@@ -121,6 +121,7 @@ class PlacementTrackerRunner:
         processed_count = 0
         skipped_count = 0
         error_count = 0
+        passed_filter_count = 0
 
         for msg in messages:
             msg_id = msg.get("message_id") or msg.get("id")
@@ -135,7 +136,8 @@ class PlacementTrackerRunner:
             ).fetchone()
 
             if already_processed:
-                logger.debug("Email %s has already been processed; skipping", msg_id)
+                # Log at INFO level (Task 7) to clarify why duplicate emails don't re-trigger pipeline actions
+                logger.info("Email %s has already been processed in a previous cycle; skipping to avoid duplication", msg_id)
                 continue
 
             subject = msg.get("subject", "(no subject)")
@@ -161,11 +163,16 @@ class PlacementTrackerRunner:
                 skipped_count += 1
                 continue
 
-            logger.info("Email %s identified as placement-related. Extracting data", msg_id)
+            passed_filter_count += 1
+            # Task 4 pipeline logging
+            logger.info("[INFO] Email %s passed filtering", msg_id)
+            logger.info("[INFO] Starting Gemini extraction")
+
             try:
                 extracted = extractor.extract(msg)
                 if not extracted:
                     raise ValueError("Structured data extraction returned empty results")
+                logger.info("[INFO] Gemini extraction successful")
 
                 # Handle model wrappers or dict directly
                 extracted_dict = asdict(extracted) if not isinstance(extracted, dict) else extracted
@@ -194,6 +201,7 @@ class PlacementTrackerRunner:
                         opp_data,
                         source_email_id=msg_id,
                     )
+                    logger.info("[INFO] Database insert/update successful")
 
                     # Send SMTP email notifications for critical updates
                     email_notifier = EmailNotifier(self.settings)
@@ -224,6 +232,7 @@ class PlacementTrackerRunner:
                             logger.info("Sending SMTP email notification for critical update type: %s", update_type)
                             success = email_notifier.send_opportunity_alert(record, update_type=update_type)
                             if success:
+                                logger.info("[INFO] Notification email sent")
                                 database.create_notification(
                                     opportunity_id=opp_id,
                                     channel="email",
@@ -264,6 +273,7 @@ class PlacementTrackerRunner:
                 error_count += 1
 
         # Synchronize all active records with Google Sheets if any processed successfully
+        sheets_sync_successful = False
         if processed_count > 0:
             logger.info("Synchronizing active opportunities to Google Sheets")
             try:
@@ -273,6 +283,8 @@ class PlacementTrackerRunner:
                 for attempt in range(1, 4):
                     try:
                         sheets_client.sync.sync_active_opportunities(database)
+                        sheets_sync_successful = True
+                        logger.info("[INFO] Google Sheets sync successful")
                         break
                     except HttpError as sheets_error:
                         if sheets_error.resp.status in {429, 503} and attempt < 3:
@@ -285,6 +297,17 @@ class PlacementTrackerRunner:
                 # Google Sheets downtime does NOT crash or revert SQLite processed email state.
                 # Auto-recovery catch-up syncs all active records next run.
                 logger.error("Failed to sync opportunities to Google Sheets: %s. Will auto-recover in next sync cycle.", sync_error)
+
+        # Task 7: Silent failures check and warning logging
+        if len(messages) > 0:
+            if passed_filter_count == 0:
+                logger.warning("[WARNING] No placement emails passed filtering this cycle")
+            if processed_count == 0:
+                logger.warning("[WARNING] No database updates or inserts occurred this cycle")
+            if not sheets_sync_successful:
+                logger.warning("[WARNING] No rows synchronized to Google Sheets this cycle")
+        else:
+            logger.warning("[WARNING] No fetched emails found in this cycle")
 
         logger.info(
             "Sync cycle finished: processed=%s skipped=%s error=%s",

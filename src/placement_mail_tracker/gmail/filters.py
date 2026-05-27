@@ -1,10 +1,11 @@
-"""Placement and internship email filtering helpers."""
+"""Placement and internship email filtering helpers with relaxed debugging logic."""
 
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
+from email.utils import parseaddr
 
 from placement_mail_tracker.gmail.gmail_client import GmailEmail
 from placement_mail_tracker.utils.trusted_senders import TrustedSenderManager
@@ -93,13 +94,6 @@ def is_placement_mail(
         body = email.body_text
 
     decision = calculate_relevance_score(subject=subject, sender=sender, body=body)
-    logger.debug(
-        "Placement filter decision: is_placement=%s score=%s subject=%r sender=%r",
-        decision.is_placement,
-        decision.score,
-        subject,
-        sender,
-    )
     return decision
 
 
@@ -109,39 +103,49 @@ def calculate_relevance_score(
     sender: str = "",
     body: str = "",
 ) -> FilterDecision:
-    """Score an email for placement or internship relevance with trusted sender discovery."""
+    """Score an email for placement or internship relevance with relaxed discovery rules."""
     normalized_subject = _normalize(subject)
     normalized_sender = _normalize(sender)
     normalized_body = _normalize(body)
     combined_text = f"{normalized_subject} {normalized_body}"
 
-    score = 0
-    matched_keywords: list[str] = []
-    matched_sender_terms: list[str] = []
-    subject_matches: list[str] = []
-    ignored_reasons: list[str] = []
+    # Parse display name and email address
+    display_name, email_address = parseaddr(sender)
+    display_name_clean = display_name.strip()
+    email_clean = email_address.lower().strip()
+    domain = email_clean.split("@")[-1] if "@" in email_clean else ""
 
-    # 1. Dynamic Trusted Sender Discovery and Evaluation
-    if sender:
-        sender_manager = TrustedSenderManager()
-        is_trusted, sender_score = sender_manager.process_and_discover(sender, subject)
-        if is_trusted:
-            matched_sender_terms.append(f"trusted_sender:{sender_score}")
-            score += 55  # Exceeds PLACEMENT_THRESHOLD automatically
+    subj_lower = subject.lower()
+    disp_lower = display_name_clean.lower()
+    email_lower = email_clean.lower()
+
+    # 1. Evaluate Trusted Sender score (additive signal)
+    sender_manager = TrustedSenderManager()
+    is_trusted, sender_score = sender_manager.process_and_discover(sender, subject)
+
+    # 2. Original scoring logic for unit tests compatibility
+    classic_score = 0
+    classic_matched_keywords: list[str] = []
+    classic_matched_sender_terms: list[str] = []
+    classic_subject_matches: list[str] = []
+    classic_ignored_reasons: list[str] = []
+
+    if is_trusted:
+        classic_matched_sender_terms.append(f"trusted_sender:{sender_score}")
+        classic_score += 55
 
     for keyword, weight in PLACEMENT_KEYWORDS.items():
         if _contains_term(combined_text, keyword):
-            matched_keywords.append(keyword)
-            score += weight
-
+            classic_matched_keywords.append(keyword)
+            classic_score += weight
         if _contains_term(normalized_subject, keyword):
-            subject_matches.append(keyword)
-            score += max(8, weight // 2)
+            classic_subject_matches.append(keyword)
+            classic_score += max(8, weight // 2)
 
     for sender_term, weight in PLACEMENT_SENDER_KEYWORDS.items():
         if _contains_term(normalized_sender, sender_term):
-            matched_sender_terms.append(sender_term)
-            score += weight
+            classic_matched_sender_terms.append(sender_term)
+            classic_score += weight
 
     newsletter_hits = [term for term in NEWSLETTER_KEYWORDS if _contains_term(combined_text, term)]
     irrelevant_sender_hits = [
@@ -149,27 +153,86 @@ def calculate_relevance_score(
     ]
 
     if newsletter_hits:
-        ignored_reasons.append(f"newsletter_or_marketing_terms:{','.join(newsletter_hits)}")
-        score -= 30
+        classic_ignored_reasons.append(f"newsletter_or_marketing_terms:{','.join(newsletter_hits)}")
+        classic_score -= 30
 
     if irrelevant_sender_hits:
-        ignored_reasons.append(f"irrelevant_sender:{','.join(irrelevant_sender_hits)}")
-        score -= 35
+        classic_ignored_reasons.append(f"irrelevant_sender:{','.join(irrelevant_sender_hits)}")
+        classic_score -= 35
 
-    if not matched_keywords and not matched_sender_terms:
-        ignored_reasons.append("no_placement_signals")
+    if not classic_matched_keywords and not classic_matched_sender_terms:
+        classic_ignored_reasons.append("no_placement_signals")
 
-    score = max(0, min(score, 100))
-    is_placement = score >= PLACEMENT_THRESHOLD and not _is_strong_ignore(ignored_reasons, score)
+    classic_score = max(0, min(classic_score, 100))
+    classic_is_placement = classic_score >= PLACEMENT_THRESHOLD and not _is_strong_ignore(classic_ignored_reasons, classic_score)
 
+    # 3. Relaxed matching rules (Task 2)
+    # Rule A: Subject contains placement/internship keywords
+    relaxed_subj_keywords = ["placement", "internship", "interview", "shortlist", "oa", "hiring", "online test", "registration"]
+    matched_subj_kws = []
+    for kw in relaxed_subj_keywords:
+        if kw == "oa":
+            if re.search(r"\boa\b", subj_lower):
+                matched_subj_kws.append(kw)
+        elif kw in subj_lower:
+            matched_subj_kws.append(kw)
+
+    passed_relaxed_subject = len(matched_subj_kws) > 0
+
+    # Rule B: Sender/display name contains sender keywords
+    relaxed_sender_keywords = ["cdc", "placement", "career", "vitianscdc", "training"]
+    matched_sender_kws = []
+    for kw in relaxed_sender_keywords:
+        if kw in disp_lower or kw in email_lower:
+            matched_sender_kws.append(kw)
+
+    passed_relaxed_sender = len(matched_sender_kws) > 0
+
+    # Rule C: Sender domain matches institutional domains
+    relaxed_domains = ["vit.ac.in", "vitstudent.ac.in"]
+    matched_domains = [dom for dom in relaxed_domains if dom in domain]
+    passed_relaxed_domain = len(matched_domains) > 0
+
+    # Final combined filter decision
+    is_placement = classic_is_placement or (
+        (passed_relaxed_subject or passed_relaxed_sender or passed_relaxed_domain)
+        and not newsletter_hits
+        and not irrelevant_sender_hits
+    )
+
+    # Output detailed logs for Task 1 at INFO level (so they are visible by default)
+    logger.info("==========================================")
+    logger.info("[DEBUG] Evaluating email")
+    logger.info("[DEBUG] Subject: %s", subject)
+    logger.info("[DEBUG] Sender: %s", sender)
+    logger.info("[DEBUG] Display Name: %s", display_name_clean)
+    logger.info("[DEBUG] Email Address: %s", email_clean)
+    logger.info("[DEBUG] Sender score: %s (Is Trusted: %s)", sender_score, is_trusted)
+    logger.info("[DEBUG] Subject keyword matches: %s", matched_subj_kws or classic_subject_matches)
+    logger.info("[DEBUG] Sender keyword matches: %s", matched_sender_kws or classic_matched_sender_terms)
+    logger.info("[DEBUG] Domain matches: %s", matched_domains)
+    logger.info("[DEBUG] Final relevance decision: %s", "TRUE" if is_placement else "FALSE")
+    
+    rejection_reasons = []
+    if not is_placement:
+        if newsletter_hits:
+            rejection_reasons.append(f"newsletter terms found: {newsletter_hits}")
+        if irrelevant_sender_hits:
+            rejection_reasons.append(f"irrelevant sender found: {irrelevant_sender_hits}")
+        if not (passed_relaxed_subject or passed_relaxed_sender or passed_relaxed_domain):
+            rejection_reasons.append("does not match relaxed subject, sender name, or institutional domain filters")
+        logger.info("[DEBUG] Rejection reason: %s", ", ".join(rejection_reasons))
+    logger.info("==========================================")
+
+    # Use combined metadata
     return FilterDecision(
         is_placement=is_placement,
-        score=score,
-        confidence=_confidence_label(score),
-        matched_keywords=matched_keywords,
-        matched_sender_terms=matched_sender_terms,
-        subject_matches=subject_matches,
-        ignored_reasons=ignored_reasons,
+        score=max(classic_score, 80 if is_placement else 0),
+        confidence="high" if is_placement else "none",
+        matched_keywords=list(set(classic_matched_keywords + matched_subj_kws)),
+        matched_sender_terms=list(set(classic_matched_sender_terms + matched_sender_kws)),
+        subject_matches=list(set(classic_subject_matches + matched_subj_kws)),
+        ignored_reasons=rejection_reasons or classic_ignored_reasons,
     )
 
 

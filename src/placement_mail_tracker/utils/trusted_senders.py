@@ -147,6 +147,12 @@ class TrustedSenderManager:
         score = 0
         matched_keywords: list[str] = []
 
+        # Check institutional domains for university senders
+        domain = email_clean.split("@")[-1] if "@" in email_clean else ""
+        if any(dom in domain for dom in ["vit.ac.in", "vitstudent.ac.in"]):
+            score += 40
+            matched_keywords.append("domain:institutional")
+
         # 1. Match display name and email local part against signals
         for keyword, weight in SENDER_KEYWORDS.items():
             pattern = rf"\b{re.escape(keyword)}\b"

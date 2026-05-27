@@ -27,10 +27,10 @@ class Settings(BaseSettings):
     )
     gmail_token_file: str = Field(default="config/token.json", alias="GMAIL_TOKEN_FILE")
     gmail_query: str = Field(default="newer_than:7d", alias="GMAIL_QUERY")
-    gmail_max_results: int = Field(default=10, alias="GMAIL_MAX_RESULTS")
+    gmail_max_results: int = Field(default=100, alias="GMAIL_MAX_RESULTS")
 
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_max_retries: int = Field(default=3, alias="GEMINI_MAX_RETRIES")
     gemini_retry_delay_seconds: float = Field(default=1.0, alias="GEMINI_RETRY_DELAY_SECONDS")
 
