@@ -115,8 +115,9 @@ def test_sync_opportunities_updates_existing_and_appends_new() -> None:
     assert values.appends[0]["body"]["values"][0][0] == "opportunity:2"
 
 
-def test_sync_skips_when_sheet_id_missing() -> None:
-    sync = GoogleSheetsSync(Settings(), service=FakeService(FakeValues()))
+def test_sync_skips_when_sheet_id_missing(monkeypatch) -> None:
+    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+    sync = GoogleSheetsSync(Settings(GOOGLE_SHEET_ID=""), service=FakeService(FakeValues()))
 
     result = sync.sync_opportunities([{"id": 1, "company_name": "A", "role": "B"}])
 

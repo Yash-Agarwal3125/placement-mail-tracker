@@ -34,3 +34,5 @@ logs/*.log
 # OS
 .DS_Store
 Thumbs.db
+credentials.json
+.gitignore
