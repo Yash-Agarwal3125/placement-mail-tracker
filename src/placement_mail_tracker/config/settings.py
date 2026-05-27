@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
 
+    smtp_email: str = Field(default="", alias="SMTP_EMAIL")
+    smtp_app_password: str = Field(default="", alias="SMTP_APP_PASSWORD")
+    email_receiver: str = Field(default="", alias="EMAIL_RECEIVER")
+
     sync_interval_hours: int = Field(default=3, alias="SYNC_INTERVAL_HOURS")
 
     model_config = SettingsConfigDict(

@@ -110,6 +110,9 @@ def test_complete_e2e_pipeline(tmp_path, monkeypatch) -> None:
         GEMINI_API_KEY="fake-key",
         GOOGLE_SHEET_ID="fake-sheet",
         gmail_max_results=5,
+        smtp_email="sender@example.com",
+        smtp_app_password="password",
+        email_receiver="receiver@example.com",
     )
 
     # 1. Define emails list (spam, new internship, duplicate internship)
@@ -171,8 +174,18 @@ def test_complete_e2e_pipeline(tmp_path, monkeypatch) -> None:
     ]
 
     # 3. Patch the internal classes using monkeypatch
-    mock_notifier = MockTelegramNotifier(settings)
     mock_model = MockModelAndClient(gemini_responses)
+    
+    # Intercept EmailNotifier alerts
+    email_alerts = []
+    def mock_send_opportunity_alert(self, record, update_type="new_opportunity"):
+        email_alerts.append(record)
+        return True
+        
+    monkeypatch.setattr(
+        "placement_mail_tracker.notifications.email_notifier.EmailNotifier.send_opportunity_alert",
+        mock_send_opportunity_alert,
+    )
 
     # Patch Gmail client
     monkeypatch.setattr(
@@ -183,11 +196,6 @@ def test_complete_e2e_pipeline(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "placement_mail_tracker.scheduler.runner.GeminiExtractor",
         lambda: mock_model,
-    )
-    # Patch Telegram notifier
-    monkeypatch.setattr(
-        "placement_mail_tracker.scheduler.runner.TelegramNotifier",
-        lambda s: mock_notifier,
     )
     # Patch Google Sheets Sync Values call to avoid HTTP requests
     monkeypatch.setattr(
@@ -242,10 +250,10 @@ def test_complete_e2e_pipeline(tmp_path, monkeypatch) -> None:
     update_fields = [u["field_name"] for u in updates]
     assert "deadline" in update_fields
 
-    # Verify notification was sent ONLY ONCE for the initial creation (created is True)
-    # The second update is processed and logged but does not trigger a duplicate creation alert.
-    assert len(mock_notifier.alerts) == 1
-    assert mock_notifier.alerts[0].company_name == "Amazon India"
+    # Verify critical alerts were sent for the new opportunity and the deadline update
+    assert len(email_alerts) == 2
+    assert email_alerts[0].company_name == "Amazon India"
+    assert email_alerts[1].company_name == "Amazon India"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,28 @@
+[
+  {
+    "display_name": "CDC Placements",
+    "email": "cdc@college.edu",
+    "first_seen": "2026-05-27T09:51:32.263267+00:00",
+    "last_seen": "2026-05-27T09:52:22.812757+00:00",
+    "matched_keywords": [
+      "display:cdc",
+      "display:placements",
+      "subject:shortlist",
+      "subject:campus recruitment",
+      "subject:interview schedule"
+    ],
+    "score": 100
+  },
+  {
+    "display_name": "Unknown Institutional Aliases",
+    "email": "placements@college.edu",
+    "first_seen": "2026-05-27T09:51:32.394524+00:00",
+    "last_seen": "2026-05-27T09:52:22.800171+00:00",
+    "matched_keywords": [
+      "email:placement",
+      "email:placements",
+      "subject:online assessment"
+    ],
+    "score": 95
+  }
+]

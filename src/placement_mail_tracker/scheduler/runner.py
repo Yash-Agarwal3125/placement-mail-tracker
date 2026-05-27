@@ -18,6 +18,7 @@ from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.models.placement_record import PlacementRecord
 from placement_mail_tracker.notifications.telegram import TelegramNotifier
+from placement_mail_tracker.notifications.email_notifier import EmailNotifier
 from placement_mail_tracker.sheets.client import SheetsClient
 from placement_mail_tracker.utils.deduplication import find_best_match
 
@@ -194,7 +195,10 @@ class PlacementTrackerRunner:
                         source_email_id=msg_id,
                     )
 
-                    # Send notifications with duplicate protection
+                    # Send SMTP email notifications for critical updates
+                    email_notifier = EmailNotifier(self.settings)
+                    update_type = extracted_dict.get("update_type") or "new_opportunity"
+                    
                     record = PlacementRecord(
                         gmail_message_id=msg_id,
                         subject=subject,
@@ -204,22 +208,32 @@ class PlacementTrackerRunner:
                         role_title=opp_data["role"],
                         application_deadline=opp_data["deadline"],
                     )
+                    
+                    # Notify only on: new opportunities, deadline updates, shortlists, interviews, and OAs
+                    is_critical_update = created or update_type in {
+                        "new_opportunity",
+                        "deadline_update",
+                        "shortlist",
+                        "interview_update",
+                        "oa_update",
+                    }
 
-                    notification_msg = f"Opportunity alert: {opp_data['company_name']} - {opp_data['role']}"
-                    if not is_duplicate_notification(self.connection, opp_id, notification_msg):
-                        if created:
-                            logger.info("Created new opportunity (ID: %s); sending notification", opp_id)
-                            notifier.send_new_record_alert(record)
-                            database.create_notification(
-                                opportunity_id=opp_id,
-                                channel="telegram",
-                                message=notification_msg,
-                                status="sent",
-                            )
+                    if is_critical_update:
+                        notification_msg = f"Email Alert [{update_type}]: {opp_data['company_name']} - {opp_data['role']}"
+                        if not is_duplicate_notification(self.connection, opp_id, notification_msg):
+                            logger.info("Sending SMTP email notification for critical update type: %s", update_type)
+                            success = email_notifier.send_opportunity_alert(record, update_type=update_type)
+                            if success:
+                                database.create_notification(
+                                    opportunity_id=opp_id,
+                                    channel="email",
+                                    message=notification_msg,
+                                    status="sent",
+                                )
                         else:
-                            logger.info("Updated existing opportunity (ID: %s); skipping duplicate notification", opp_id)
+                            logger.info("SMTP email alert was already sent recently; skipping notification")
                     else:
-                        logger.info("Identical notification was already sent recently; skipping notification")
+                        logger.info("Update type %r is not categorized as critical; skipping notification to avoid spam", update_type)
 
                 # Log processed email associated with opportunity (committed successfully)
                 database.log_processed_email(

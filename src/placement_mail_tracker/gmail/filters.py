@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 
 from placement_mail_tracker.gmail.gmail_client import GmailEmail
+from placement_mail_tracker.utils.trusted_senders import TrustedSenderManager
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ def calculate_relevance_score(
     sender: str = "",
     body: str = "",
 ) -> FilterDecision:
-    """Score an email for placement or internship relevance."""
+    """Score an email for placement or internship relevance with trusted sender discovery."""
     normalized_subject = _normalize(subject)
     normalized_sender = _normalize(sender)
     normalized_body = _normalize(body)
@@ -119,6 +120,14 @@ def calculate_relevance_score(
     matched_sender_terms: list[str] = []
     subject_matches: list[str] = []
     ignored_reasons: list[str] = []
+
+    # 1. Dynamic Trusted Sender Discovery and Evaluation
+    if sender:
+        sender_manager = TrustedSenderManager()
+        is_trusted, sender_score = sender_manager.process_and_discover(sender, subject)
+        if is_trusted:
+            matched_sender_terms.append(f"trusted_sender:{sender_score}")
+            score += 55  # Exceeds PLACEMENT_THRESHOLD automatically
 
     for keyword, weight in PLACEMENT_KEYWORDS.items():
         if _contains_term(combined_text, keyword):
