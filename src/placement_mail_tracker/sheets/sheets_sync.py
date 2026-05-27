@@ -222,8 +222,12 @@ class GoogleSheetsSync:
 
         try:
             return Credentials.from_authorized_user_file(str(self.token_path), SHEETS_SCOPES)
-        except ValueError as error:
-            logger.warning("Ignoring invalid Google Sheets token file: %s", error)
+        except Exception as error:
+            logger.warning("Corrupted or invalid Google Sheets token file found: %s. Auto-deleting file.", error)
+            try:
+                self.token_path.unlink(missing_ok=True)
+            except OSError as unlink_error:
+                logger.error("Failed to delete corrupted token file: %s", unlink_error)
             return None
 
     def _save_token(self, credentials: Credentials) -> None:
