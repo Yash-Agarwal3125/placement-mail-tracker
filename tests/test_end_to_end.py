@@ -142,7 +142,7 @@ CDC_EMAILS = [
         "sender": "Placements VIT <placements@vit.ac.in>",
         "body": (
             "Dear Students,\n\n"
-            "The following students have been shortlisted for the interview "
+            "The following students have been shortlisted for the next "
             "round of Dell Technologies.\n\n"
             "Regards,\nPlacements VIT"
         ),

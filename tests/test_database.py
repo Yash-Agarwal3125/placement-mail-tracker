@@ -296,7 +296,7 @@ class TestEdgeCases:
         opp_id, created = db_manager.insert_or_update_opportunity(opp, source_email_id="edge_001")
         assert created is True
         record = db_manager.fetch_opportunity_by_id(opp_id)
-        assert record["company_name"] == "Edge Co"
+        assert record["company_name"] == "Edge"
 
     def test_multiple_updates_tracked(self, db_manager: DatabaseManager, sample_opportunity):
         opp = sample_opportunity("Track Co", "Dev")

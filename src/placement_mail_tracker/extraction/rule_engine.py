@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 # Common legal-entity suffixes and filler words to strip
 _STRIP_SUFFIXES = re.compile(
-    r"\b(inc\.?|ltd\.?|llc|llp|pvt\.?|private|limited|"
+    r"\b(inc|ltd|llc|llp|pvt|private|limited|"
     r"technologies|technology|tech|solutions|services|systems|"
-    r"global|india|corp\.?|corporation|group|holdings|enterprises|"
-    r"co\.?|company)\b",
+    r"global|india|corp|corporation|group|holdings|enterprises|"
+    r"co|company)\b\.?",
     re.IGNORECASE,
 )
 
@@ -180,6 +180,11 @@ def classify_email(subject: str, body: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("REJECTED", re.compile(
+        r"(not\s*shortlisted|not\s*selected|regret\s*to|"
+        r"unfortunately|rejected|could\s*not\s*make)",
+        re.IGNORECASE,
+    )),
     ("OFFER_RECEIVED", re.compile(
         r"(offer\s*(letter|released)|final\s*selection\s*result|"
         r"congratulations.*selected|selected\s*candidates?\s*list)",
@@ -194,15 +199,15 @@ _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"human\s*resource\s*(round|interview))",
         re.IGNORECASE,
     )),
+    ("SHORTLISTED", re.compile(
+        r"(shortlist|short[\-\s]list|shortlisted\s*students?|"
+        r"selected\s*for\s*(next|further|interview)|qualified)",
+        re.IGNORECASE,
+    )),
     ("INTERVIEW", re.compile(
         r"(interview\s*(scheduled|process|round|date)|"
         r"next\s*round.*selection|technical\s*interview|"
         r"gd.*round|group\s*discussion)",
-        re.IGNORECASE,
-    )),
-    ("SHORTLISTED", re.compile(
-        r"(shortlist|short[\-\s]list|shortlisted\s*students?|"
-        r"selected\s*for\s*(next|further|interview)|qualified)",
         re.IGNORECASE,
     )),
     ("OA", re.compile(
@@ -214,11 +219,6 @@ _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("REGISTERED", re.compile(
         r"(registration\s*(successful|confirmed|complete)|"
         r"successfully\s*registered|applied\s*successfully)",
-        re.IGNORECASE,
-    )),
-    ("REJECTED", re.compile(
-        r"(not\s*shortlisted|not\s*selected|regret\s*to|"
-        r"unfortunately|rejected|could\s*not\s*make)",
         re.IGNORECASE,
     )),
 ]
@@ -283,9 +283,9 @@ _CATEGORY_PATTERNS = [
 
 # Company name extraction from subjects
 _COMPANY_FROM_SUBJECT = [
-    re.compile(r"(?:campus\s*(?:drive|hiring|recruitment|placement)\s*[-:\|]\s*)(.+?)(?:\s*[-:\|]|\s*$)", re.IGNORECASE),
-    re.compile(r"^(.+?)\s*[-:\|]\s*(?:campus|placement|hiring|recruitment|internship)", re.IGNORECASE),
-    re.compile(r"(?:placement\s*(?:drive|opportunity)\s*[-:\|]\s*)(.+?)(?:\s*[-:\|]|\s*$)", re.IGNORECASE),
+    re.compile(r"(?:campus\s*(?:drive|hiring|recruitment|placement)\s*[–—\-:\|]\s*)(.+?)(?:\s*[–—\-:\|]|\s*$)", re.IGNORECASE),
+    re.compile(r"^(.+?)\s*[–—\-:\|]\s*(?:campus|placement|hiring|recruitment|internship)", re.IGNORECASE),
+    re.compile(r"(?:placement\s*(?:drive|opportunity)\s*[–—\-:\|]\s*)(.+?)(?:\s*[–—\-:\|]|\s*$)", re.IGNORECASE),
 ]
 
 

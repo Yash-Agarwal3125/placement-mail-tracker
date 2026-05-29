@@ -29,7 +29,7 @@
     "display_name": "'No Reply CDC Info' via VITIANS CDC Group, Vellore and Chennai Campus",
     "email": "vitianscdc2027@vitstudent.ac.in",
     "first_seen": "2026-05-27T09:58:21.682060+00:00",
-    "last_seen": "2026-05-29T09:02:05.982324+00:00",
+    "last_seen": "2026-05-29T11:13:30.363836+00:00",
     "matched_keywords": [
       "display:cdc",
       "display:helpdesk",
@@ -51,7 +51,7 @@
     "display_name": "Unknown Institutional Aliases",
     "email": "cdc@vit.ac.in",
     "first_seen": "2026-05-29T10:35:05.266279+00:00",
-    "last_seen": "2026-05-29T10:36:21.332203+00:00",
+    "last_seen": "2026-05-29T11:10:05.731870+00:00",
     "matched_keywords": [
       "subject:shortlist",
       "domain:institutional",
@@ -64,6 +64,81 @@
     "email": "noreply@vit.ac.in",
     "first_seen": "2026-05-29T10:35:11.912575+00:00",
     "last_seen": "2026-05-29T10:36:21.397325+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "CDC VIT",
+    "email": "placements@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.754945+00:00",
+    "last_seen": "2026-05-29T11:10:05.742332+00:00",
+    "matched_keywords": [
+      "domain:institutional",
+      "email:placement",
+      "email:placements",
+      "display:cdc",
+      "subject:interview schedule"
+    ],
+    "score": 100
+  },
+  {
+    "display_name": "VIT CDC",
+    "email": "vitianscdc@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.803009+00:00",
+    "last_seen": "2026-05-29T11:10:05.755115+00:00",
+    "matched_keywords": [
+      "domain:institutional",
+      "display:cdc"
+    ],
+    "score": 80
+  },
+  {
+    "display_name": "IEEE VIT",
+    "email": "ieee@vitstudent.ac.in",
+    "first_seen": "2026-05-29T11:08:14.814688+00:00",
+    "last_seen": "2026-05-29T11:10:05.767874+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "Gravitas Team",
+    "email": "gravitas@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.832472+00:00",
+    "last_seen": "2026-05-29T11:10:05.778447+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "NPTEL Coordinator",
+    "email": "nptel@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.873379+00:00",
+    "last_seen": "2026-05-29T11:10:05.793290+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "Academic Office",
+    "email": "academic@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.894450+00:00",
+    "last_seen": "2026-05-29T11:10:05.804398+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "Riviera Team",
+    "email": "riviera@vit.ac.in",
+    "first_seen": "2026-05-29T11:08:14.906391+00:00",
+    "last_seen": "2026-05-29T11:10:05.814923+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
