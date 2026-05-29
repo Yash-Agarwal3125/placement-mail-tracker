@@ -50,7 +50,9 @@ Extract:
 - registration_link
 - hiring_process
 - important_notes
-- update_type"""
+- update_type
+- current_status
+- action_required"""
 
 SIGNATURE_PATTERNS = (
     r"\n--\s*\n.*$",
@@ -96,8 +98,8 @@ class GeminiPlacementExtractor:
         settings: Settings,
         *,
         model: GeminiModel | None = None,
-        max_retries: int = 3,
-        retry_delay_seconds: float = 1.0,
+        max_retries: int = 6,  # 1 initial attempt + 5 retries
+        retry_delay_seconds: float = 2.0,
     ) -> None:
         self.settings = settings
         self.max_retries = max_retries
@@ -135,19 +137,14 @@ class GeminiPlacementExtractor:
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
-            use_secondary_model = attempt > self.max_retries // 2
             try:
-                model_name = (
-                    self.settings.gemini_secondary_model
-                    if use_secondary_model
-                    else self.settings.gemini_model
-                )
+                model_name = self.settings.gemini_model
                 logger.info(
                     "Requesting Gemini placement extraction, attempt %s (model: %s)",
                     attempt,
                     model_name,
                 )
-                response = self._generate_content(prompt, use_secondary_model=use_secondary_model)
+                response = self._generate_content(prompt)
                 raw_text = _response_text(response)
                 parsed = parse_json_response(raw_text)
                 return validate_extraction_result(parsed)
@@ -162,7 +159,7 @@ class GeminiPlacementExtractor:
                 last_error = error
                 logger.warning("Gemini extraction attempt %s failed: %s", attempt, error)
                 if attempt < self.max_retries:
-                    backoff = self.retry_delay_seconds * (2 ** (attempt - 1))
+                    backoff = 2**attempt
                     time.sleep(backoff)
 
         logger.error("Gemini extraction failed after %s attempts", self.max_retries)
@@ -170,7 +167,7 @@ class GeminiPlacementExtractor:
             raise GeminiExtractionError(str(last_error)) from last_error
         raise GeminiExtractionError("Unknown Gemini extraction failure")
 
-    def _generate_content(self, prompt: str, use_secondary_model: bool = False) -> Any:
+    def _generate_content(self, prompt: str) -> Any:
         """Generate content using an injected fake model or the Gemini API."""
         if self._model is not None:
             return self._model.generate_content(prompt)
@@ -178,11 +175,7 @@ class GeminiPlacementExtractor:
         if self._client is None:
             self._client = genai.Client(api_key=self.settings.gemini_api_key)
 
-        model_name = (
-            self.settings.gemini_secondary_model
-            if use_secondary_model
-            else self.settings.gemini_model
-        )
+        model_name = self.settings.gemini_model
 
         return self._client.models.generate_content(
             model=model_name,
@@ -223,6 +216,8 @@ Additional rules:
 - opportunity_type should be internship, fulltime, internship_and_fulltime, or null.
 - update_type should summarize the email purpose, such as new_opportunity, deadline_update,
   shortlist, interview_update, oa_update, result_update, reminder, or null.
+- current_status MUST be inferred from the email content. Valid values are exactly one of: NEW, PPT, OA, SHORTLISTED, INTERVIEW, HR, SELECTED, OFFER_RECEIVED, REJECTED.
+- action_required should contain a brief sentence describing any action the user needs to take (e.g., "Submit resume", "Complete registration", "Attend interview"). Return null if no action is needed.
 - Return exactly one JSON object with these keys and no extra keys:
 {keys}
 

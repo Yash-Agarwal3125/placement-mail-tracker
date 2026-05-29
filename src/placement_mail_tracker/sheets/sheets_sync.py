@@ -21,28 +21,36 @@ from placement_mail_tracker.utils.time import utc_now_iso
 logger = logging.getLogger(__name__)
 
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SHEET_HEADERS = [
-    "sync_key",
-    "opportunity_id",
-    "company_name",
-    "role",
-    "internship_or_fulltime",
-    "package_or_stipend",
-    "eligibility",
-    "cgpa_requirement",
-    "branches_allowed",
-    "deadline",
-    "interview_date",
-    "oa_date",
-    "registration_link",
-    "work_location",
-    "hiring_process",
-    "important_notes",
-    "status",
-    "source_email_id",
-    "created_at",
-    "updated_at",
-    "synced_at",
+
+ACTIVE_OPP_HEADERS = [
+    "Received Date",
+    "Company",
+    "Drive ID",
+    "Role",
+    "Current Status",
+    "Status History",
+    "Package",
+    "Location",
+    "OA Date",
+    "Interview Date",
+    "Action Required",
+    "Priority",
+    "Latest Update",
+    "Open Email"
+]
+
+COMPANY_HISTORY_HEADERS = [
+    "Company",
+    "Total Drives",
+    "Selected",
+    "Rejected",
+    "Active",
+    "Last Activity"
+]
+
+DASHBOARD_HEADERS = [
+    "Metric",
+    "Value"
 ]
 
 
@@ -61,6 +69,9 @@ class SheetsValuesResource(Protocol):
 
     def append(self, **kwargs: Any) -> Any:
         """Append values."""
+        
+    def clear(self, **kwargs: Any) -> Any:
+        """Clear values."""
 
 
 class GoogleSheetsSync:
@@ -75,115 +86,165 @@ class GoogleSheetsSync:
         self.settings = settings
         self.credentials_path = Path(settings.google_sheets_credentials_file)
         self.token_path = Path(settings.google_sheets_token_file)
-        self.sheet_name = settings.google_sheet_name
         self._service = service
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
-        """Sync all active opportunities from SQLite to Google Sheets."""
-        opportunities = database.get_active_opportunities()
-        return self.sync_opportunities(opportunities)
-
-    def sync_opportunities(self, opportunities: list[dict[str, Any]]) -> dict[str, int]:
-        """Insert or update opportunity rows in Google Sheets."""
+        """Sync all active opportunities, companies, and dashboard to Google Sheets."""
         if not self.settings.google_sheet_id:
             logger.warning("GOOGLE_SHEET_ID is missing; skipping Google Sheets sync")
-            return {"created": 0, "updated": 0, "skipped": len(opportunities)}
+            return {"created": 0, "updated": 0, "skipped": 0}
 
         try:
-            self.ensure_header_row()
-            existing_rows = self._get_existing_rows()
+            self._ensure_tabs_exist()
+            
+            # Sync Active Opportunities
+            opportunities = database.get_active_opportunities()
+            active_opps = [opp for opp in opportunities if opp.get("current_status") not in ("REJECTED", "WITHDRAWN")]
+            self._sync_tab_data(
+                tab_name="Active Opportunities",
+                headers=ACTIVE_OPP_HEADERS,
+                data_rows=[opportunity_to_sheet_row(opp) for opp in active_opps],
+                key_index=2  # Drive ID
+            )
+            
+            # Sync Company History
+            companies = database.get_company_history()
+            self._sync_tab_data(
+                tab_name="Company History",
+                headers=COMPANY_HISTORY_HEADERS,
+                data_rows=[company_to_sheet_row(comp) for comp in companies],
+                key_index=0  # Company Name
+            )
+            
+            # Sync Dashboard
+            self._sync_dashboard(database)
+            
+            # Apply formatting
+            self._apply_dashboard_formatting()
+            
         except SheetsAuthenticationError as error:
             logger.warning("%s", error)
-            return {"created": 0, "updated": 0, "skipped": len(opportunities)}
+            return {"created": 0, "updated": 0, "skipped": 0}
         except HttpError as error:
             logger.exception("Unable to prepare Google Sheet for sync: %s", error)
-            return {"created": 0, "updated": 0, "skipped": len(opportunities)}
+            return {"created": 0, "updated": 0, "skipped": 0}
 
-        existing_by_key = build_existing_row_index(existing_rows)
-        rows_to_append: list[list[str]] = []
-        created = 0
-        updated = 0
-
-        for opportunity in opportunities:
-            row = opportunity_to_sheet_row(opportunity)
-            sync_key = row[0]
-            existing_row_number = existing_by_key.get(sync_key)
-
-            company = opportunity.get("company_name", "Unknown Company")
-            if existing_row_number is None:
-                logger.info("[SYNC] Writing new row for: %s", company)
-                rows_to_append.append(row)
-                created += 1
-                continue
-
-            logger.info("[SYNC] Updating existing row for: %s", company)
-            self._update_row(existing_row_number, row)
-            updated += 1
-
-        if rows_to_append:
-            logger.info("[SYNC] Appending %s new rows to sheet", len(rows_to_append))
-            self._append_rows(rows_to_append)
-
-        logger.info(
-            "Google Sheets sync complete: created=%s updated=%s skipped=0",
-            created,
-            updated,
-        )
-        return {"created": created, "updated": updated, "skipped": 0}
-
-    def ensure_header_row(self) -> None:
-        """Create or repair the first row with expected headers with self-healing sheet discovery."""
-        # Query sheets metadata to handle tab name mismatches gracefully
-        try:
-            service = self._get_service()
-            spreadsheet = (
-                service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
-            )
-            sheets = spreadsheet.get("sheets", [])
-            sheet_names = [
-                s.get("properties", {}).get("title")
-                for s in sheets
-                if s.get("properties", {}).get("title")
-            ]
-
-            if sheet_names:
-                env_plural_name = os.environ.get("GOOGLE_SHEETS_NAME")
-                if self.sheet_name in sheet_names:
-                    pass
-                elif env_plural_name in sheet_names:
-                    logger.info(
-                        "Self-healing sheet sync: using GOOGLE_SHEETS_NAME '%s'", env_plural_name
-                    )
-                    self.sheet_name = env_plural_name
-                else:
-                    logger.info(
-                        "Configured sheet '%s' not found. Falling back to active sheet '%s'",
-                        self.sheet_name,
-                        sheet_names[0],
-                    )
-                    self.sheet_name = sheet_names[0]
-        except Exception as meta_error:
-            logger.warning(
-                "Could not query spreadsheet sheets metadata for self-healing: %s", meta_error
-            )
-
+        return {"created": len(active_opps), "updated": 0, "skipped": 0}
+        
+    def _ensure_tabs_exist(self) -> None:
+        """Ensure all required tabs exist in the spreadsheet."""
+        service = self._get_service()
+        spreadsheet = service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
+        existing_tabs = [s.get("properties", {}).get("title") for s in spreadsheet.get("sheets", [])]
+        
+        required_tabs = ["Active Opportunities", "Company History", "Dashboard"]
+        requests = []
+        for tab in required_tabs:
+            if tab not in existing_tabs:
+                requests.append({"addSheet": {"properties": {"title": tab}}})
+                
+        if requests:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=self.settings.google_sheet_id, 
+                body={"requests": requests}
+            ).execute()
+            
+    def _sync_tab_data(self, tab_name: str, headers: list[str], data_rows: list[list[str]], key_index: int) -> None:
+        """Sync a list of rows to a specific tab using a key index for deduplication."""
         values = self._values()
+        
+        # Ensure Header
         response = values.get(
             spreadsheetId=self.settings.google_sheet_id,
-            range=f"{quote_sheet_name(self.sheet_name)}!A1:U1",
+            range=f"{quote_sheet_name(tab_name)}!A1:Z1",
         ).execute()
         existing_header = response.get("values", [[]])[0] if response.get("values") else []
-
-        if existing_header == SHEET_HEADERS:
-            return
-
-        logger.info("Writing Google Sheets header row to tab '%s'", self.sheet_name)
+        
+        if existing_header != headers:
+            values.update(
+                spreadsheetId=self.settings.google_sheet_id,
+                range=f"{quote_sheet_name(tab_name)}!A1:Z1",
+                valueInputOption="RAW",
+                body={"values": [headers]},
+            ).execute()
+            
+        # Get existing rows
+        response = values.get(
+            spreadsheetId=self.settings.google_sheet_id,
+            range=f"{quote_sheet_name(tab_name)}!A:Z",
+        ).execute()
+        existing_rows = response.get("values", [])
+        
+        existing_by_key = {}
+        for row_number, row in enumerate(existing_rows[1:], start=2):
+            if len(row) > key_index:
+                key = row[key_index].strip()
+                if key:
+                    existing_by_key[key] = row_number
+                    
+        rows_to_append = []
+        for row in data_rows:
+            if len(row) > key_index:
+                key = row[key_index].strip()
+                existing_row_number = existing_by_key.get(key)
+                if existing_row_number:
+                    values.update(
+                        spreadsheetId=self.settings.google_sheet_id,
+                        range=f"{quote_sheet_name(tab_name)}!A{existing_row_number}:Z{existing_row_number}",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [row]},
+                    ).execute()
+                else:
+                    rows_to_append.append(row)
+                    
+        if rows_to_append:
+            values.append(
+                spreadsheetId=self.settings.google_sheet_id,
+                range=f"{quote_sheet_name(tab_name)}!A:Z",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": rows_to_append},
+            ).execute()
+            
+    def _sync_dashboard(self, database: DatabaseManager) -> None:
+        """Compute and sync static dashboard metrics."""
+        companies = database.get_company_history()
+        opportunities = database.get_active_opportunities()
+        
+        total_drives = sum(c.get("total_drives", 0) for c in companies)
+        active_drives = sum(1 for o in opportunities if o.get("current_status") not in ("REJECTED", "WITHDRAWN"))
+        offers = sum(1 for o in opportunities if o.get("current_status") == "OFFER_RECEIVED")
+        interviews = sum(1 for o in opportunities if o.get("current_status") == "INTERVIEW")
+        oas = sum(1 for o in opportunities if o.get("current_status") == "OA")
+        
+        selection_rate = f"{(offers / total_drives * 100):.1f}%" if total_drives > 0 else "0%"
+        
+        dashboard_data = [
+            ["Total Drives", str(total_drives)],
+            ["Active Opportunities", str(active_drives)],
+            ["Pending OAs", str(oas)],
+            ["Pending Interviews", str(interviews)],
+            ["Offers Received", str(offers)],
+            ["Selection Rate", selection_rate],
+            ["Companies Applied", str(len(companies))]
+        ]
+        
+        values = self._values()
+        
+        # Clear existing
+        values.clear(
+            spreadsheetId=self.settings.google_sheet_id,
+            range=f"{quote_sheet_name('Dashboard')}!A:B",
+        ).execute()
+        
+        # Write new
         values.update(
             spreadsheetId=self.settings.google_sheet_id,
-            range=f"{quote_sheet_name(self.sheet_name)}!A1:U1",
-            valueInputOption="RAW",
-            body={"values": [SHEET_HEADERS]},
+            range=f"{quote_sheet_name('Dashboard')}!A1:B{len(dashboard_data)+1}",
+            valueInputOption="USER_ENTERED",
+            body={"values": [DASHBOARD_HEADERS] + dashboard_data},
         ).execute()
+
 
     def authenticate(self) -> Credentials:
         """Load, refresh, or create OAuth2 credentials for Google Sheets."""
@@ -223,34 +284,6 @@ class GoogleSheetsSync:
             self._service = build("sheets", "v4", credentials=credentials)
         return self._service
 
-    def _get_existing_rows(self) -> list[list[str]]:
-        response = (
-            self._values()
-            .get(
-                spreadsheetId=self.settings.google_sheet_id,
-                range=f"{quote_sheet_name(self.sheet_name)}!A:U",
-            )
-            .execute()
-        )
-        return response.get("values", [])
-
-    def _update_row(self, row_number: int, row: list[str]) -> None:
-        self._values().update(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{quote_sheet_name(self.sheet_name)}!A{row_number}:U{row_number}",
-            valueInputOption="RAW",
-            body={"values": [row]},
-        ).execute()
-
-    def _append_rows(self, rows: list[list[str]]) -> None:
-        self._values().append(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{quote_sheet_name(self.sheet_name)}!A:U",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": rows},
-        ).execute()
-
     def _load_token(self) -> Credentials | None:
         if not self.token_path.exists():
             return None
@@ -277,68 +310,119 @@ class GoogleSheetsSync:
         except OSError as error:
             logger.debug("Could not update Sheets token file permissions: %s", error)
 
+    def _apply_dashboard_formatting(self) -> None:
+        """Apply dashboard conditional formatting and automatic sorting."""
+        service = self._get_service()
+        spreadsheet = (
+            service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
+        )
+
+        active_opp_sheet_id = None
+        for sheet in spreadsheet.get("sheets", []):
+            if sheet.get("properties", {}).get("title") == "Active Opportunities":
+                active_opp_sheet_id = sheet.get("properties", {}).get("sheetId")
+                break
+
+        if active_opp_sheet_id is None:
+            return
+
+        requests: list[dict[str, Any]] = []
+
+        # Sort Active Opportunities by Latest Update (Index 12) DESCENDING
+        requests.append(
+            {
+                "sortRange": {
+                    "range": {
+                        "sheetId": active_opp_sheet_id,
+                        "startRowIndex": 1,
+                    },
+                    "sortSpecs": [{"dimensionIndex": 12, "sortOrder": "DESCENDING"}],
+                }
+            }
+        )
+
+        # Clear existing conditional formatting rules
+        sheet_obj = next((s for s in spreadsheet.get("sheets", []) if s.get("properties", {}).get("sheetId") == active_opp_sheet_id), None)
+        if sheet_obj:
+            existing_rules = sheet_obj.get("conditionalFormats", [])
+            for i in reversed(range(len(existing_rules))):
+                requests.append({"deleteConditionalFormatRule": {"index": i, "sheetId": active_opp_sheet_id}})
+
+        # Conditional formatting for Current Status (Column E, index 4)
+        colors = {
+            "OA": {"red": 1.0, "green": 0.95, "blue": 0.8},
+            "SHORTLISTED": {"red": 0.8, "green": 0.9, "blue": 1.0},
+            "INTERVIEW": {"red": 1.0, "green": 0.85, "blue": 0.7},
+            "SELECTED": {"red": 0.8, "green": 1.0, "blue": 0.8},
+            "OFFER_RECEIVED": {"red": 0.8, "green": 1.0, "blue": 0.8},
+        }
+
+        for status, color in colors.items():
+            requests.append(
+                {
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [
+                                {
+                                    "sheetId": active_opp_sheet_id,
+                                    "startRowIndex": 1,
+                                    "startColumnIndex": 4,
+                                    "endColumnIndex": 5,
+                                }
+                            ],
+                            "booleanRule": {
+                                "condition": {
+                                    "type": "TEXT_EQ",
+                                    "values": [{"userEnteredValue": status}],
+                                },
+                                "format": {"backgroundColor": color},
+                            },
+                        },
+                        "index": 0,
+                    }
+                }
+            )
+
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=self.settings.google_sheet_id, body={"requests": requests}
+        ).execute()
+
 
 def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
     """Convert one opportunity dictionary to a Sheets row."""
-    sync_key = build_sync_key(opportunity)
+    email_link = ""
+    if opportunity.get("source_message_id") or opportunity.get("source_email_id"):
+        msg_id = opportunity.get("source_message_id") or opportunity.get("source_email_id")
+        email_link = f'=HYPERLINK("https://mail.google.com/mail/u/0/#inbox/{msg_id}", "Open Email")'
+
     return [
-        sync_key,
-        _cell(opportunity.get("id")),
+        _cell(opportunity.get("email_received_at")),
         _cell(opportunity.get("company_name")),
+        _cell(opportunity.get("drive_id")),
         _cell(opportunity.get("role")),
-        _cell(opportunity.get("internship_or_fulltime")),
+        _cell(opportunity.get("current_status")),
+        _cell(opportunity.get("status_history")),
         _cell(opportunity.get("package_or_stipend")),
-        _cell(opportunity.get("eligibility")),
-        _cell(opportunity.get("cgpa_requirement")),
-        _cell(opportunity.get("branches_allowed")),
-        _cell(opportunity.get("deadline")),
-        _cell(opportunity.get("interview_date")),
-        _cell(opportunity.get("oa_date")),
-        _cell(opportunity.get("registration_link")),
         _cell(opportunity.get("work_location")),
-        _cell(opportunity.get("hiring_process")),
-        _cell(opportunity.get("important_notes")),
-        _cell(opportunity.get("status", "active")),
-        _cell(opportunity.get("source_email_id")),
-        _cell(opportunity.get("created_at")),
-        _cell(opportunity.get("updated_at")),
-        utc_now_iso(),
+        _cell(opportunity.get("oa_date")),
+        _cell(opportunity.get("interview_date")),
+        _cell(opportunity.get("action_required")),
+        "",  # Priority (placeholder)
+        _cell(opportunity.get("last_update_timestamp", utc_now_iso())),
+        email_link,
     ]
 
 
-def build_existing_row_index(rows: list[list[str]]) -> dict[str, int]:
-    """Map existing sheet sync keys to 1-based row numbers."""
-    index: dict[str, int] = {}
-    for row_number, row in enumerate(rows[1:], start=2):
-        if not row:
-            continue
-
-        sync_key = row[0].strip() if len(row) > 0 else ""
-        if not sync_key:
-            company_name = row[2] if len(row) > 2 else ""
-            role = row[3] if len(row) > 3 else ""
-            sync_key = build_company_role_key(company_name, role)
-
-        if sync_key:
-            index[sync_key] = row_number
-
-    return index
-
-
-def build_sync_key(opportunity: dict[str, Any]) -> str:
-    """Build a stable key for duplicate-safe sheet sync."""
-    opportunity_id = opportunity.get("id")
-    if opportunity_id not in {None, ""}:
-        return f"opportunity:{opportunity_id}"
-    return build_company_role_key(
-        str(opportunity.get("company_name", "")),
-        str(opportunity.get("role", "")),
-    )
-
-
-def build_company_role_key(company_name: str, role: str) -> str:
-    """Build a fallback key for rows without an opportunity ID."""
-    return f"company-role:{_slug(company_name)}:{_slug(role)}"
+def company_to_sheet_row(company: dict[str, Any]) -> list[str]:
+    """Convert company record to Sheets row."""
+    return [
+        _cell(company.get("name")),
+        _cell(company.get("total_drives")),
+        _cell(company.get("selected_drives")),
+        _cell(company.get("rejected_drives")),
+        _cell(company.get("active_drives")),
+        _cell(company.get("last_activity"))
+    ]
 
 
 def quote_sheet_name(sheet_name: str) -> str:

@@ -34,9 +34,19 @@ OPPORTUNITY_FIELDS = (
 JSON_FIELDS = {"branches_allowed", "hiring_process", "important_notes"}
 
 
-def generate_unique_hash(company_name: str, role: str) -> str:
-    """Generate a stable hash for duplicate prevention by company and role."""
-    normalized = f"{_normalize_key(company_name)}::{_normalize_key(role)}"
+def generate_unique_hash(opportunity: dict[str, Any]) -> str:
+    """Generate a stable hash for duplicate prevention by drive."""
+    # Deduplicate by company, role, package, and season (year)
+    import datetime
+    year = str(datetime.datetime.now().year)
+    
+    parts = [
+        _normalize_key(opportunity.get("company_name", "")),
+        _normalize_key(opportunity.get("role", "")),
+        _normalize_key(opportunity.get("package_or_stipend", "")),
+        year
+    ]
+    normalized = "::".join(parts)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -60,6 +70,16 @@ class DatabaseManager:
         """Create all required SQLite tables and indexes automatically."""
         self.connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                total_drives INTEGER NOT NULL DEFAULT 0,
+                active_drives INTEGER NOT NULL DEFAULT 0,
+                selected_drives INTEGER NOT NULL DEFAULT 0,
+                rejected_drives INTEGER NOT NULL DEFAULT 0,
+                last_activity TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS opportunities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 unique_hash TEXT UNIQUE NOT NULL,
@@ -80,7 +100,14 @@ class DatabaseManager:
                 status TEXT NOT NULL DEFAULT 'active',
                 source_email_id TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                current_status TEXT NOT NULL DEFAULT 'NEW',
+                status_history TEXT NOT NULL DEFAULT '[]',
+                last_update_timestamp TEXT,
+                email_received_at TEXT,
+                drive_id TEXT,
+                source_thread_id TEXT,
+                action_required TEXT
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -134,6 +161,8 @@ class DatabaseManager:
                 ON opportunities(status);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_unique_hash
                 ON opportunities(unique_hash);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_drive_id
+                ON opportunities(drive_id);
             CREATE INDEX IF NOT EXISTS idx_updates_opportunity_id
                 ON updates(opportunity_id);
             CREATE INDEX IF NOT EXISTS idx_processed_emails_message_id
@@ -149,24 +178,53 @@ class DatabaseManager:
         opportunity: dict[str, Any],
         *,
         source_email_id: str | None = None,
+        source_thread_id: str | None = None,
     ) -> tuple[int, bool]:
         """Insert a new opportunity or update an existing duplicate.
 
         Returns ``(opportunity_id, created_new_record)``.
         """
         normalized = self._normalize_opportunity(opportunity)
-        existing = self.find_duplicate_opportunity(
-            normalized["company_name"],
-            normalized["role"],
-        )
+        existing = None
+        
+        # 1. Match by thread ID first (Follow-up detection)
+        if source_thread_id:
+            existing = self.fetch_opportunity_by_thread_id(source_thread_id)
+            
+        # 2. Fallback to hash matching
+        if not existing:
+            existing = self.find_duplicate_opportunity(normalized)
+
+        # Merge history if new status is present
+        new_status = (normalized.get("current_status") or "NEW").upper()
+        if existing:
+            try:
+                history = json.loads(existing["status_history"])
+            except Exception:
+                history = []
+
+            if new_status and (not history or history[-1] != new_status):
+                history.append(new_status)
+            normalized["status_history"] = json.dumps(history)
+            normalized["current_status"] = new_status
+
+            # Since role might have changed, we let it update the row.
+        else:
+            normalized["status_history"] = json.dumps([new_status])
+            normalized["current_status"] = new_status
 
         if existing is None:
-            opportunity_id = self._insert_opportunity(normalized, source_email_id=source_email_id)
+            opportunity_id = self._insert_opportunity(
+                normalized,
+                source_email_id=source_email_id,
+                source_thread_id=source_thread_id,
+            )
             self.create_update_event(
                 opportunity_id,
                 "created",
                 notes="Opportunity created from email",
             )
+            self._update_company_stats(normalized["company_name"])
             logger.info("Inserted opportunity %s", opportunity_id)
             return opportunity_id, True
 
@@ -178,8 +236,10 @@ class DatabaseManager:
                 opportunity_id,
                 normalized,
                 source_email_id=source_email_id,
+                source_thread_id=source_thread_id,
                 changed_fields=changed_fields,
             )
+            self._update_company_stats(normalized["company_name"])
             logger.info(
                 "Updated opportunity %s with %s changes",
                 opportunity_id,
@@ -201,6 +261,7 @@ class DatabaseManager:
         opportunity: dict[str, Any],
         *,
         source_email_id: str | None = None,
+        source_thread_id: str | None = None,
         changed_fields: list[tuple[str, Any, Any]] | None = None,
     ) -> None:
         """Update one opportunity and create update-history rows."""
@@ -215,6 +276,7 @@ class DatabaseManager:
             opportunity_id,
             normalized,
             source_email_id=source_email_id,
+            source_thread_id=source_thread_id,
         )
 
         for field_name, old_value, new_value in changes:
@@ -263,12 +325,19 @@ class DatabaseManager:
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def find_duplicate_opportunity(self, company_name: str, role: str) -> sqlite3.Row | None:
-        """Fetch an opportunity by the generated company-role hash."""
-        unique_hash = generate_unique_hash(company_name, role)
+    def find_duplicate_opportunity(self, opportunity: dict[str, Any]) -> sqlite3.Row | None:
+        """Fetch an opportunity by the generated hash."""
+        unique_hash = generate_unique_hash(opportunity)
         return self.connection.execute(
             "SELECT * FROM opportunities WHERE unique_hash = ? LIMIT 1;",
             (unique_hash,),
+        ).fetchone()
+        
+    def fetch_opportunity_by_thread_id(self, thread_id: str) -> sqlite3.Row | None:
+        """Fetch an opportunity by Gmail thread ID."""
+        return self.connection.execute(
+            "SELECT * FROM opportunities WHERE source_thread_id = ? LIMIT 1;",
+            (thread_id,),
         ).fetchone()
 
     def fetch_opportunity_by_id(self, opportunity_id: int) -> dict[str, Any] | None:
@@ -453,15 +522,23 @@ class DatabaseManager:
         opportunity: dict[str, Any],
         *,
         source_email_id: str | None,
+        source_thread_id: str | None = None,
     ) -> int:
         now = utc_now_iso()
+        company_name = opportunity["company_name"]
+        
+        # Drive ID Generation
+        import datetime
+        year = datetime.datetime.now().year
+        count = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (company_name,)).fetchone()[0]
+        drive_id = f"{_normalize_key(company_name).replace(' ', '').upper()}_{year}_{count + 1:02d}"
+        
         values = {
             **opportunity,
-            "unique_hash": generate_unique_hash(
-                opportunity["company_name"],
-                opportunity["role"],
-            ),
+            "unique_hash": generate_unique_hash(opportunity),
             "source_email_id": source_email_id,
+            "source_thread_id": source_thread_id,
+            "drive_id": drive_id,
             "created_at": now,
             "updated_at": now,
         }
@@ -485,7 +562,14 @@ class DatabaseManager:
                 important_notes,
                 source_email_id,
                 created_at,
-                updated_at
+                updated_at,
+                current_status,
+                status_history,
+                last_update_timestamp,
+                email_received_at,
+                drive_id,
+                source_thread_id,
+                action_required
             )
             VALUES (
                 :unique_hash,
@@ -505,7 +589,14 @@ class DatabaseManager:
                 :important_notes,
                 :source_email_id,
                 :created_at,
-                :updated_at
+                :updated_at,
+                :current_status,
+                :status_history,
+                :last_update_timestamp,
+                :email_received_at,
+                :drive_id,
+                :source_thread_id,
+                :action_required
             );
             """,
             values,
@@ -520,22 +611,63 @@ class DatabaseManager:
             for row in self.connection.execute("PRAGMA table_info(opportunities);").fetchall()
         }
 
-        if "unique_hash" not in columns:
-            logger.info("Migrating opportunities table: adding unique_hash column")
-            self.connection.execute("ALTER TABLE opportunities ADD COLUMN unique_hash TEXT;")
+        if "current_status" not in columns:
+            logger.info("Migrating opportunities table: adding dashboard columns")
+            self.connection.executescript(
+                """
+                ALTER TABLE opportunities ADD COLUMN current_status TEXT NOT NULL DEFAULT 'NEW';
+                ALTER TABLE opportunities ADD COLUMN status_history TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE opportunities ADD COLUMN last_update_timestamp TEXT;
+                ALTER TABLE opportunities ADD COLUMN email_received_at TEXT;
+                """
+            )
+            
+        if "drive_id" not in columns:
+            logger.info("Migrating opportunities table: adding drive architecture columns")
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS companies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    total_drives INTEGER NOT NULL DEFAULT 0,
+                    active_drives INTEGER NOT NULL DEFAULT 0,
+                    selected_drives INTEGER NOT NULL DEFAULT 0,
+                    rejected_drives INTEGER NOT NULL DEFAULT 0,
+                    last_activity TEXT
+                );
+                ALTER TABLE opportunities ADD COLUMN drive_id TEXT;
+                ALTER TABLE opportunities ADD COLUMN source_thread_id TEXT;
+                ALTER TABLE opportunities ADD COLUMN action_required TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_drive_id ON opportunities(drive_id);
+                """
+            )
 
         rows = self.connection.execute(
             """
-            SELECT id, company_name, role
-            FROM opportunities
-            WHERE unique_hash IS NULL OR unique_hash = '';
+            SELECT id, company_name, role, package_or_stipend
+            FROM opportunities;
             """
         ).fetchall()
         for row in rows:
-            self.connection.execute(
-                "UPDATE opportunities SET unique_hash = ? WHERE id = ?;",
-                (generate_unique_hash(row["company_name"], row["role"]), row["id"]),
-            )
+            opp_dict = {"company_name": row["company_name"], "role": row["role"], "package_or_stipend": row["package_or_stipend"]}
+            try:
+                self.connection.execute(
+                    "UPDATE opportunities SET unique_hash = ? WHERE id = ?;",
+                    (generate_unique_hash(opp_dict), row["id"]),
+                )
+            except sqlite3.IntegrityError:
+                # Merge logic - delete older duplicates
+                self.connection.execute("DELETE FROM opportunities WHERE id = ?;", (row["id"],))
+                
+        # Backfill Drive IDs
+        null_drives = self.connection.execute("SELECT id, company_name FROM opportunities WHERE drive_id IS NULL;").fetchall()
+        import datetime
+        year = datetime.datetime.now().year
+        for row in null_drives:
+            count = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND drive_id IS NOT NULL", (row["company_name"],)).fetchone()[0]
+            drive_id = f"{_normalize_key(row['company_name']).replace(' ', '').upper()}_{year}_{count + 1:02d}"
+            self.connection.execute("UPDATE opportunities SET drive_id = ? WHERE id = ?;", (drive_id, row["id"]))
+            
         self.connection.commit()
 
     def _update_opportunity_row(
@@ -544,15 +676,14 @@ class DatabaseManager:
         opportunity: dict[str, Any],
         *,
         source_email_id: str | None,
+        source_thread_id: str | None = None,
     ) -> None:
         values = {
             **opportunity,
             "id": opportunity_id,
-            "unique_hash": generate_unique_hash(
-                opportunity["company_name"],
-                opportunity["role"],
-            ),
+            "unique_hash": generate_unique_hash(opportunity),
             "source_email_id": source_email_id,
+            "source_thread_id": source_thread_id,
             "updated_at": utc_now_iso(),
         }
         self.connection.execute(
@@ -574,7 +705,13 @@ class DatabaseManager:
                 hiring_process = :hiring_process,
                 important_notes = :important_notes,
                 source_email_id = COALESCE(:source_email_id, source_email_id),
-                updated_at = :updated_at
+                updated_at = :updated_at,
+                current_status = COALESCE(:current_status, current_status),
+                status_history = COALESCE(:status_history, status_history),
+                last_update_timestamp = COALESCE(:last_update_timestamp, last_update_timestamp),
+                email_received_at = COALESCE(:email_received_at, email_received_at),
+                source_thread_id = COALESCE(:source_thread_id, source_thread_id),
+                action_required = COALESCE(:action_required, action_required)
             WHERE id = :id;
             """,
             values,
@@ -594,13 +731,21 @@ class DatabaseManager:
         role = _clean_required_text(role_val, "role")
         normalized = {"company_name": company_name, "role": role}
 
-        for field in OPPORTUNITY_FIELDS:
+        for field in OPPORTUNITY_FIELDS + (
+            "current_status",
+            "status_history",
+            "last_update_timestamp",
+            "email_received_at",
+            "action_required",
+        ):
             if field in {"company_name", "role"}:
                 continue
 
             value = opportunity.get(field)
             if field in JSON_FIELDS:
                 normalized[field] = _serialize_value(_normalize_list(value))
+            elif field == "status_history":
+                normalized[field] = value if value else "[]"
             else:
                 normalized[field] = _normalize_scalar(value)
 
@@ -636,12 +781,47 @@ class DatabaseManager:
     def _row_to_opportunity(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         for field in JSON_FIELDS:
-            data[field] = _deserialize_json_list(data[field])
+            data[field] = _deserialize_json_list(data.get(field))
         return data
 
+    def _update_company_stats(self, company_name: str) -> None:
+        """Update the companies table metrics based on the current state of opportunities."""
+        normalized = _clean_required_text(company_name, "company_name")
+        now = utc_now_iso()
+        
+        # Ensure company exists
+        self.connection.execute("INSERT OR IGNORE INTO companies (name) VALUES (?)", (normalized,))
+        
+        # Calculate stats
+        total = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (normalized,)).fetchone()[0]
+        active = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status NOT IN ('REJECTED', 'OFFER_RECEIVED')", (normalized,)).fetchone()[0]
+        selected = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'OFFER_RECEIVED'", (normalized,)).fetchone()[0]
+        rejected = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'REJECTED'", (normalized,)).fetchone()[0]
+        
+        self.connection.execute(
+            """
+            UPDATE companies
+            SET total_drives = ?,
+                active_drives = ?,
+                selected_drives = ?,
+                rejected_drives = ?,
+                last_activity = ?
+            WHERE name = ?;
+            """,
+            (total, active, selected, rejected, now, normalized)
+        )
+        self.connection.commit()
 
-def _normalize_key(value: str) -> str:
+    def get_company_history(self) -> list[dict[str, Any]]:
+        """Fetch all company records."""
+        rows = self.connection.execute("SELECT * FROM companies ORDER BY last_activity DESC").fetchall()
+        return [dict(row) for row in rows]
+
+
+def _normalize_key(value: str | None) -> str:
     """Normalize identity fields before hashing."""
+    if not value:
+        return ""
     return " ".join(value.casefold().strip().split())
 
 

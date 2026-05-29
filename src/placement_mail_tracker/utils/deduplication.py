@@ -297,16 +297,20 @@ def normalize_text(text: str | None) -> str:
 
 
 def normalize_company(text: str | None) -> str:
-    """Normalise a company name by stripping common legal-entity suffixes.
+    """Normalise a company name by stripping common legal-entity suffixes and title-casing.
 
     Example
     -------
     >>> normalize_company("Acme Technologies Pvt. Ltd.")
-    'acme'
+    'Acme'
+    >>> normalize_company("TATA MOTORS")
+    'Tata Motors'
     """
     base = normalize_text(text)
     tokens = [t for t in base.split() if t not in _STRIP_TOKENS]
-    return " ".join(tokens) if tokens else base
+    normalized = " ".join(tokens) if tokens else base
+    # Return Title Case for presentation
+    return normalized.title()
 
 
 def normalize_opportunity_type(text: str | None) -> str:

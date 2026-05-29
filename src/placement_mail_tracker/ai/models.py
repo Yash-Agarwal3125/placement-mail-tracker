@@ -26,6 +26,8 @@ class PlacementExtraction(BaseModel):
     hiring_process: list[str] | None = Field(default=None)
     important_notes: list[str] | None = Field(default=None)
     update_type: str | None = None
+    current_status: str | None = None
+    action_required: str | None = Field(default=None, description="Action required by the user, if any.")
 
     model_config = ConfigDict(extra="ignore")
 
@@ -67,6 +69,8 @@ class PlacementExtraction(BaseModel):
         "oa_date",
         "registration_link",
         "update_type",
+        "current_status",
+        "action_required",
         mode="before",
     )
     @classmethod

@@ -219,6 +219,10 @@ class GmailClient:
             logger.exception("Gmail API request failed: %s", error)
             return []
 
+    def fetch_message(self, message_id: str) -> dict[str, Any]:
+        """Fetch a specific message by ID."""
+        return asdict(self._fetch_message(message_id))
+
     def _fetch_message(self, message_id: str) -> GmailEmail:
         service = self._get_service()
         raw_message = (

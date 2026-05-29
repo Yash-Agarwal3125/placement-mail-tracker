@@ -7,6 +7,7 @@ import socket
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any
 
 from googleapiclient.errors import HttpError
@@ -20,7 +21,9 @@ from placement_mail_tracker.models.placement_record import PlacementRecord
 from placement_mail_tracker.notifications.telegram import TelegramNotifier
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
 from placement_mail_tracker.sheets.client import SheetsClient
+from placement_mail_tracker.utils.time import utc_now_iso
 from placement_mail_tracker.utils.deduplication import find_best_match
+from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
 
 # ---------------------------------------------------------------------------
 # Safeguard 1: Set a global network socket timeout to prevent infinite hangs
@@ -96,9 +99,37 @@ class PlacementTrackerRunner:
         extractor = GeminiExtractor()
         sheets_client = SheetsClient(self.settings)
         notifier = TelegramNotifier(self.settings)
+        digest_gen = DailyDigestGenerator(database, self.settings)
+
+        # Trigger daily digest if it's past 8:00 AM local time
+        if datetime.now().hour >= 8:
+            try:
+                digest_gen.generate_and_send()
+            except Exception as e:
+                logger.error("Failed to generate and send daily digest: %s", e)
 
         logger.info("Fetching recent messages from Gmail")
         messages: list[dict[str, Any]] = []
+
+        # ---------------------------------------------------------------------------
+        # Retry Mechanism: Fetch pending emails first (Tasks 4 & 5)
+        # ---------------------------------------------------------------------------
+        pending_records = self.connection.execute(
+            "SELECT gmail_message_id FROM processed_emails WHERE processed_status = 'PENDING_EXTRACTION';"
+        ).fetchall()
+
+        pending_ids = [row[0] for row in pending_records]
+        if pending_ids:
+            logger.info(
+                "Found %s pending emails in retry queue. Fetching them now.", len(pending_ids)
+            )
+            for pending_id in pending_ids:
+                try:
+                    msg = gmail_client.fetch_message(pending_id)
+                    messages.append(msg)
+                except Exception as e:
+                    logger.warning("Could not fetch pending email %s: %s", pending_id, e)
+
         try:
             # Enforce rate-limiting retry logic on email fetching
             for attempt in range(1, 4):
@@ -155,6 +186,7 @@ class PlacementTrackerRunner:
             sender = msg.get("sender", "")
             body = msg.get("body_text") or msg.get("body") or ""
             timestamp = msg.get("timestamp") or msg.get("received_at")
+            thread_id = msg.get("thread_id")
 
             logger.info("Evaluating email relevance: Subject=%r, Sender=%r", subject, sender)
             decision = is_placement_mail(subject=subject, sender=sender, body=body)
@@ -208,12 +240,26 @@ class PlacementTrackerRunner:
                         opp_data["company_name"] = best_match.candidate["company_name"]
                         opp_data["role"] = best_match.candidate["role"]
 
+                    # Format Email Received Date to DD-MMM-YYYY HH:MM AM/PM
+                    formatted_date = timestamp
+                    try:
+                        if timestamp:
+                            dt = datetime.fromisoformat(timestamp)
+                            formatted_date = dt.strftime("%d-%b-%Y %I:%M %p")
+                    except Exception:
+                        pass
+
+                    opp_data["email_received_at"] = formatted_date
+                    opp_data["last_update_timestamp"] = utc_now_iso()
+
                     # Insert or update in SQLite database
                     opp_id, created = database.insert_or_update_opportunity(
                         opp_data,
                         source_email_id=msg_id,
+                        source_thread_id=thread_id,
                     )
                     action = "inserted" if created else "updated"
+                    logger.info("[DB] Insert Success")
                     logger.info(
                         "[DB] Opportunity %s: %s - %s",
                         action,
@@ -288,6 +334,7 @@ class PlacementTrackerRunner:
             except Exception as error:
                 logger.exception("Failed to process email %s: %s", msg_id, error)
                 # Keep logs outside transaction so they are committed even if opportunity fails
+                # Mark as PENDING_EXTRACTION so it gets retried on the next cycle
                 database.log_processed_email(
                     gmail_message_id=msg_id,
                     subject=subject,
@@ -295,45 +342,41 @@ class PlacementTrackerRunner:
                     received_at=timestamp,
                     filter_score=decision.score,
                     filter_decision=asdict(decision),
-                    processed_status="error",
+                    processed_status="PENDING_EXTRACTION",
                     error_message=str(error),
                 )
                 error_count += 1
 
-        # Synchronize all active records with Google Sheets if any processed successfully
+        # ---------------------------------------------------------------------------
+        # Task 6 & 8: Always synchronize all active records to ensure eventually consistent state
+        # ---------------------------------------------------------------------------
         sheets_sync_successful = False
-        if processed_count > 0:
-            logger.info(
-                "[SYNC] Queued %s active opportunity emails for sheet sync", processed_count
-            )
-            try:
-                # ---------------------------------------------------------------------------
-                # Safeguard 4: Rate-limiting / Transient Sync Backoff loop for Sheets sync
-                # ---------------------------------------------------------------------------
-                for attempt in range(1, 4):
-                    try:
-                        sheets_client.sync.sync_active_opportunities(database)
-                        sheets_sync_successful = True
-                        logger.info("[SYNC] Success")
-                        break
-                    except HttpError as sheets_error:
-                        if sheets_error.resp.status in {429, 503} and attempt < 3:
-                            sleep_time = attempt * 2.0
-                            logger.warning(
-                                "Sheets API rate limit/server error hit (%s). Retrying in %ss...",
-                                sheets_error.resp.status,
-                                sleep_time,
-                            )
-                            time.sleep(sleep_time)
-                        else:
-                            raise
-            except Exception as sync_error:
-                # Google Sheets downtime does NOT crash or revert SQLite processed email state.
-                # Auto-recovery catch-up syncs all active records next run.
-                logger.error(
-                    "Failed to sync opportunities to Google Sheets: %s. Will auto-recover in next sync cycle.",
-                    sync_error,
-                )
+        logger.info("[SYNC] Starting Sheet Sync")
+        try:
+            # ---------------------------------------------------------------------------
+            # Safeguard 4: Rate-limiting / Transient Sync Backoff loop for Sheets sync
+            # ---------------------------------------------------------------------------
+            for attempt in range(1, 4):
+                try:
+                    sheets_client.sync.sync_active_opportunities(database)
+                    sheets_sync_successful = True
+                    logger.info("[SYNC] Google Sheets Write Success")
+                    break
+                except HttpError as sheets_error:
+                    if sheets_error.resp.status in {429, 503} and attempt < 3:
+                        sleep_time = attempt * 2.0
+                        logger.warning(
+                            "Sheets API rate limit/server error hit (%s). Retrying in %ss...",
+                            sheets_error.resp.status,
+                            sleep_time,
+                        )
+                        time.sleep(sleep_time)
+                    else:
+                        raise
+        except Exception as sync_error:
+            # Google Sheets downtime does NOT crash or revert SQLite processed email state.
+            # Auto-recovery catch-up syncs all active records next run.
+            logger.error("[SYNC] Google Sheets Write Failed: %s", sync_error)
 
         # Task 7: Silent failures check and warning logging
         if len(messages) > 0:
