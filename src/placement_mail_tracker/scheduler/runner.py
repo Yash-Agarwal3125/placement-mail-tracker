@@ -103,17 +103,25 @@ class PlacementTrackerRunner:
             # Enforce rate-limiting retry logic on email fetching
             for attempt in range(1, 4):
                 try:
-                    messages = gmail_client.fetch_recent_messages(max_results=self.settings.gmail_max_results)
+                    messages = gmail_client.fetch_recent_messages(
+                        max_results=self.settings.gmail_max_results
+                    )
                     break
                 except HttpError as api_error:
                     if api_error.resp.status in {429, 503} and attempt < 3:
                         sleep_time = attempt * 2.0
-                        logger.warning("Gmail API rate limit hit (%s). Retrying in %ss...", api_error.resp.status, sleep_time)
+                        logger.warning(
+                            "Gmail API rate limit hit (%s). Retrying in %ss...",
+                            api_error.resp.status,
+                            sleep_time,
+                        )
                         time.sleep(sleep_time)
                     else:
                         raise
         except Exception as fetch_error:
-            logger.error("Could not fetch messages from Gmail API: %s. Halting sync cycle.", fetch_error)
+            logger.error(
+                "Could not fetch messages from Gmail API: %s. Halting sync cycle.", fetch_error
+            )
             return
 
         logger.info("Fetched %s candidate messages", len(messages))
@@ -129,15 +137,18 @@ class PlacementTrackerRunner:
                 logger.warning("Email message is missing unique ID; skipping")
                 continue
 
-            # Check if this email was already processed
+            # Check if this email was already processed successfully or legitimately skipped
             already_processed = self.connection.execute(
-                "SELECT id FROM processed_emails WHERE gmail_message_id = ? LIMIT 1;",
+                "SELECT id FROM processed_emails WHERE gmail_message_id = ? AND processed_status IN ('processed', 'skipped') LIMIT 1;",
                 (msg_id,),
             ).fetchone()
 
             if already_processed:
                 # Log at INFO level (Task 7) to clarify why duplicate emails don't re-trigger pipeline actions
-                logger.info("Email %s has already been processed in a previous cycle; skipping to avoid duplication", msg_id)
+                logger.info(
+                    "Email %s has already been processed in a previous cycle; skipping to avoid duplication",
+                    msg_id,
+                )
                 continue
 
             subject = msg.get("subject", "(no subject)")
@@ -173,6 +184,7 @@ class PlacementTrackerRunner:
                 if not extracted:
                     raise ValueError("Structured data extraction returned empty results")
                 logger.info("[INFO] Gemini extraction successful")
+                logger.info("EXTRACTED PAYLOAD: %s", extracted)
 
                 # Handle model wrappers or dict directly
                 extracted_dict = asdict(extracted) if not isinstance(extracted, dict) else extracted
@@ -201,12 +213,18 @@ class PlacementTrackerRunner:
                         opp_data,
                         source_email_id=msg_id,
                     )
-                    logger.info("[INFO] Database insert/update successful")
+                    action = "inserted" if created else "updated"
+                    logger.info(
+                        "[DB] Opportunity %s: %s - %s",
+                        action,
+                        opp_data["company_name"],
+                        opp_data["role"],
+                    )
 
                     # Send SMTP email notifications for critical updates
                     email_notifier = EmailNotifier(self.settings)
                     update_type = extracted_dict.get("update_type") or "new_opportunity"
-                    
+
                     record = PlacementRecord(
                         gmail_message_id=msg_id,
                         subject=subject,
@@ -216,7 +234,7 @@ class PlacementTrackerRunner:
                         role_title=opp_data["role"],
                         application_deadline=opp_data["deadline"],
                     )
-                    
+
                     # Notify only on: new opportunities, deadline updates, shortlists, interviews, and OAs
                     is_critical_update = created or update_type in {
                         "new_opportunity",
@@ -229,8 +247,13 @@ class PlacementTrackerRunner:
                     if is_critical_update:
                         notification_msg = f"Email Alert [{update_type}]: {opp_data['company_name']} - {opp_data['role']}"
                         if not is_duplicate_notification(self.connection, opp_id, notification_msg):
-                            logger.info("Sending SMTP email notification for critical update type: %s", update_type)
-                            success = email_notifier.send_opportunity_alert(record, update_type=update_type)
+                            logger.info(
+                                "Sending SMTP email notification for critical update type: %s",
+                                update_type,
+                            )
+                            success = email_notifier.send_opportunity_alert(
+                                record, update_type=update_type
+                            )
                             if success:
                                 logger.info("[INFO] Notification email sent")
                                 database.create_notification(
@@ -240,9 +263,14 @@ class PlacementTrackerRunner:
                                     status="sent",
                                 )
                         else:
-                            logger.info("SMTP email alert was already sent recently; skipping notification")
+                            logger.info(
+                                "SMTP email alert was already sent recently; skipping notification"
+                            )
                     else:
-                        logger.info("Update type %r is not categorized as critical; skipping notification to avoid spam", update_type)
+                        logger.info(
+                            "Update type %r is not categorized as critical; skipping notification to avoid spam",
+                            update_type,
+                        )
 
                 # Log processed email associated with opportunity (committed successfully)
                 database.log_processed_email(
@@ -275,7 +303,9 @@ class PlacementTrackerRunner:
         # Synchronize all active records with Google Sheets if any processed successfully
         sheets_sync_successful = False
         if processed_count > 0:
-            logger.info("Synchronizing active opportunities to Google Sheets")
+            logger.info(
+                "[SYNC] Queued %s active opportunity emails for sheet sync", processed_count
+            )
             try:
                 # ---------------------------------------------------------------------------
                 # Safeguard 4: Rate-limiting / Transient Sync Backoff loop for Sheets sync
@@ -284,19 +314,26 @@ class PlacementTrackerRunner:
                     try:
                         sheets_client.sync.sync_active_opportunities(database)
                         sheets_sync_successful = True
-                        logger.info("[INFO] Google Sheets sync successful")
+                        logger.info("[SYNC] Success")
                         break
                     except HttpError as sheets_error:
                         if sheets_error.resp.status in {429, 503} and attempt < 3:
                             sleep_time = attempt * 2.0
-                            logger.warning("Sheets API rate limit/server error hit (%s). Retrying in %ss...", sheets_error.resp.status, sleep_time)
+                            logger.warning(
+                                "Sheets API rate limit/server error hit (%s). Retrying in %ss...",
+                                sheets_error.resp.status,
+                                sleep_time,
+                            )
                             time.sleep(sleep_time)
                         else:
                             raise
             except Exception as sync_error:
                 # Google Sheets downtime does NOT crash or revert SQLite processed email state.
                 # Auto-recovery catch-up syncs all active records next run.
-                logger.error("Failed to sync opportunities to Google Sheets: %s. Will auto-recover in next sync cycle.", sync_error)
+                logger.error(
+                    "Failed to sync opportunities to Google Sheets: %s. Will auto-recover in next sync cycle.",
+                    sync_error,
+                )
 
         # Task 7: Silent failures check and warning logging
         if len(messages) > 0:

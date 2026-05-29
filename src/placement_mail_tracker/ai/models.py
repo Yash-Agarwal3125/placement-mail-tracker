@@ -48,10 +48,7 @@ class PlacementExtraction(BaseModel):
         values = [normalized]
         for separator in separators:
             values = [
-                part.strip()
-                for item in values
-                for part in item.split(separator)
-                if part.strip()
+                part.strip() for item in values for part in item.split(separator) if part.strip()
             ]
 
         return values or None

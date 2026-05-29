@@ -168,6 +168,7 @@ class GmailClient:
     def fetch_latest_emails(self, max_results: int = 100) -> list[GmailEmail]:
         """Fetch latest inbox emails from the current day."""
         from datetime import datetime
+
         today_str = datetime.now().strftime("%Y/%m/%d")
         query = f"in:inbox after:{today_str}"
         return self._search(query=query, max_results=max_results)
@@ -221,10 +222,7 @@ class GmailClient:
     def _fetch_message(self, message_id: str) -> GmailEmail:
         service = self._get_service()
         raw_message = (
-            service.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
+            service.users().messages().get(userId="me", id=message_id, format="full").execute()
         )
         return parse_gmail_message(raw_message)
 
@@ -235,7 +233,9 @@ class GmailClient:
         try:
             return Credentials.from_authorized_user_file(str(self.token_path), self.scopes)
         except Exception as error:
-            logger.warning("Corrupted or invalid Gmail token file found: %s. Auto-deleting file.", error)
+            logger.warning(
+                "Corrupted or invalid Gmail token file found: %s. Auto-deleting file.", error
+            )
             try:
                 self.token_path.unlink(missing_ok=True)
             except OSError as unlink_error:

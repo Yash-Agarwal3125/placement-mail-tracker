@@ -582,8 +582,16 @@ class DatabaseManager:
         self.connection.commit()
 
     def _normalize_opportunity(self, opportunity: dict[str, Any]) -> dict[str, Any]:
-        company_name = _clean_required_text(opportunity.get("company_name"), "company_name")
-        role = _clean_required_text(opportunity.get("role"), "role")
+        company_val = opportunity.get("company_name")
+        if _normalize_scalar(company_val) is None:
+            company_val = "Unknown Company"
+
+        role_val = opportunity.get("role")
+        if _normalize_scalar(role_val) is None:
+            role_val = "Unknown Role"
+
+        company_name = _clean_required_text(company_val, "company_name")
+        role = _clean_required_text(role_val, "role")
         normalized = {"company_name": company_name, "role": role}
 
         for field in OPPORTUNITY_FIELDS:

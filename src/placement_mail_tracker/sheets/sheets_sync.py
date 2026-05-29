@@ -109,15 +109,19 @@ class GoogleSheetsSync:
             sync_key = row[0]
             existing_row_number = existing_by_key.get(sync_key)
 
+            company = opportunity.get("company_name", "Unknown Company")
             if existing_row_number is None:
+                logger.info("[SYNC] Writing new row for: %s", company)
                 rows_to_append.append(row)
                 created += 1
                 continue
 
+            logger.info("[SYNC] Updating existing row for: %s", company)
             self._update_row(existing_row_number, row)
             updated += 1
 
         if rows_to_append:
+            logger.info("[SYNC] Appending %s new rows to sheet", len(rows_to_append))
             self._append_rows(rows_to_append)
 
         logger.info(
@@ -132,31 +136,42 @@ class GoogleSheetsSync:
         # Query sheets metadata to handle tab name mismatches gracefully
         try:
             service = self._get_service()
-            spreadsheet = service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
+            spreadsheet = (
+                service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
+            )
             sheets = spreadsheet.get("sheets", [])
-            sheet_names = [s.get("properties", {}).get("title") for s in sheets if s.get("properties", {}).get("title")]
-            
+            sheet_names = [
+                s.get("properties", {}).get("title")
+                for s in sheets
+                if s.get("properties", {}).get("title")
+            ]
+
             if sheet_names:
                 env_plural_name = os.environ.get("GOOGLE_SHEETS_NAME")
                 if self.sheet_name in sheet_names:
                     pass
                 elif env_plural_name in sheet_names:
-                    logger.info("Self-healing sheet sync: using GOOGLE_SHEETS_NAME '%s'", env_plural_name)
+                    logger.info(
+                        "Self-healing sheet sync: using GOOGLE_SHEETS_NAME '%s'", env_plural_name
+                    )
                     self.sheet_name = env_plural_name
                 else:
-                    logger.info("Configured sheet '%s' not found. Falling back to active sheet '%s'", self.sheet_name, sheet_names[0])
+                    logger.info(
+                        "Configured sheet '%s' not found. Falling back to active sheet '%s'",
+                        self.sheet_name,
+                        sheet_names[0],
+                    )
                     self.sheet_name = sheet_names[0]
         except Exception as meta_error:
-            logger.warning("Could not query spreadsheet sheets metadata for self-healing: %s", meta_error)
+            logger.warning(
+                "Could not query spreadsheet sheets metadata for self-healing: %s", meta_error
+            )
 
         values = self._values()
-        response = (
-            values.get(
-                spreadsheetId=self.settings.google_sheet_id,
-                range=f"{quote_sheet_name(self.sheet_name)}!A1:U1",
-            )
-            .execute()
-        )
+        response = values.get(
+            spreadsheetId=self.settings.google_sheet_id,
+            range=f"{quote_sheet_name(self.sheet_name)}!A1:U1",
+        ).execute()
         existing_header = response.get("values", [[]])[0] if response.get("values") else []
 
         if existing_header == SHEET_HEADERS:
@@ -243,7 +258,10 @@ class GoogleSheetsSync:
         try:
             return Credentials.from_authorized_user_file(str(self.token_path), SHEETS_SCOPES)
         except Exception as error:
-            logger.warning("Corrupted or invalid Google Sheets token file found: %s. Auto-deleting file.", error)
+            logger.warning(
+                "Corrupted or invalid Google Sheets token file found: %s. Auto-deleting file.",
+                error,
+            )
             try:
                 self.token_path.unlink(missing_ok=True)
             except OSError as unlink_error:

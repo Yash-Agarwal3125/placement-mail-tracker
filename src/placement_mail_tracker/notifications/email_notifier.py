@@ -60,9 +60,9 @@ A placement update has been logged on your tracker:
 
 🏢 Company Name: {record.company_name}
 💼 Role Title:  {record.role_title}
-📅 Application Deadline: {record.application_deadline or 'N/A'}
-📧 Sender: {record.sender or 'Unknown'}
-🔗 Source: {record.source_url or 'Gmail'}
+📅 Application Deadline: {record.application_deadline or "N/A"}
+📧 Sender: {record.sender or "Unknown"}
+🔗 Source: {record.source_url or "Gmail"}
 
 To check the complete details or sync to Google Sheets, check your tracker dashboard.
 

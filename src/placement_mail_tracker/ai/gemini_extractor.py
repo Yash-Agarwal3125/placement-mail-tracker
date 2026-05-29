@@ -10,6 +10,7 @@ from dataclasses import asdict
 from typing import Any, Protocol
 
 from google import genai
+from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
 from placement_mail_tracker.ai.models import PlacementExtraction, empty_extraction_payload
@@ -134,9 +135,19 @@ class GeminiPlacementExtractor:
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
+            use_secondary_model = attempt > self.max_retries // 2
             try:
-                logger.info("Requesting Gemini placement extraction, attempt %s", attempt)
-                response = self._generate_content(prompt)
+                model_name = (
+                    self.settings.gemini_secondary_model
+                    if use_secondary_model
+                    else self.settings.gemini_model
+                )
+                logger.info(
+                    "Requesting Gemini placement extraction, attempt %s (model: %s)",
+                    attempt,
+                    model_name,
+                )
+                response = self._generate_content(prompt, use_secondary_model=use_secondary_model)
                 raw_text = _response_text(response)
                 parsed = parse_json_response(raw_text)
                 return validate_extraction_result(parsed)
@@ -146,18 +157,20 @@ class GeminiPlacementExtractor:
                 json.JSONDecodeError,
                 TypeError,
                 ValueError,
+                genai_errors.APIError,
             ) as error:
                 last_error = error
                 logger.warning("Gemini extraction attempt %s failed: %s", attempt, error)
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_delay_seconds * attempt)
+                    backoff = self.retry_delay_seconds * (2 ** (attempt - 1))
+                    time.sleep(backoff)
 
         logger.error("Gemini extraction failed after %s attempts", self.max_retries)
         if last_error:
             raise GeminiExtractionError(str(last_error)) from last_error
         raise GeminiExtractionError("Unknown Gemini extraction failure")
 
-    def _generate_content(self, prompt: str) -> Any:
+    def _generate_content(self, prompt: str, use_secondary_model: bool = False) -> Any:
         """Generate content using an injected fake model or the Gemini API."""
         if self._model is not None:
             return self._model.generate_content(prompt)
@@ -165,8 +178,14 @@ class GeminiPlacementExtractor:
         if self._client is None:
             self._client = genai.Client(api_key=self.settings.gemini_api_key)
 
+        model_name = (
+            self.settings.gemini_secondary_model
+            if use_secondary_model
+            else self.settings.gemini_model
+        )
+
         return self._client.models.generate_content(
-            model=self.settings.gemini_model,
+            model=model_name,
             contents=prompt,
             config={
                 "temperature": 0.0,

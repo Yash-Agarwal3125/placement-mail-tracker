@@ -64,6 +64,20 @@ IRRELEVANT_SENDERS = (
     "udemy",
 )
 
+NEGATIVE_KEYWORDS = (
+    "club",
+    "committee",
+    "student organization",
+    "attendance",
+    "event registration",
+    "workshop",
+    "nptel",
+    "academic notice",
+    "gravitas",
+    "riviera",
+    "chapter",
+)
+
 PLACEMENT_THRESHOLD = 45
 
 
@@ -151,6 +165,7 @@ def calculate_relevance_score(
     irrelevant_sender_hits = [
         term for term in IRRELEVANT_SENDERS if _contains_term(normalized_sender, term)
     ]
+    negative_hits = [term for term in NEGATIVE_KEYWORDS if _contains_term(combined_text, term)]
 
     if newsletter_hits:
         classic_ignored_reasons.append(f"newsletter_or_marketing_terms:{','.join(newsletter_hits)}")
@@ -160,15 +175,30 @@ def calculate_relevance_score(
         classic_ignored_reasons.append(f"irrelevant_sender:{','.join(irrelevant_sender_hits)}")
         classic_score -= 35
 
+    if negative_hits:
+        classic_ignored_reasons.append(f"negative_terms:{','.join(negative_hits)}")
+        classic_score -= 50
+
     if not classic_matched_keywords and not classic_matched_sender_terms:
         classic_ignored_reasons.append("no_placement_signals")
 
     classic_score = max(0, min(classic_score, 100))
-    classic_is_placement = classic_score >= PLACEMENT_THRESHOLD and not _is_strong_ignore(classic_ignored_reasons, classic_score)
+    classic_is_placement = classic_score >= PLACEMENT_THRESHOLD and not _is_strong_ignore(
+        classic_ignored_reasons, classic_score
+    )
 
     # 3. Relaxed matching rules (Task 2)
     # Rule A: Subject contains placement/internship keywords
-    relaxed_subj_keywords = ["placement", "internship", "interview", "shortlist", "oa", "hiring", "online test", "registration"]
+    relaxed_subj_keywords = [
+        "placement",
+        "internship",
+        "interview",
+        "shortlist",
+        "oa",
+        "hiring",
+        "online test",
+        "registration",
+    ]
     matched_subj_kws = []
     for kw in relaxed_subj_keywords:
         if kw == "oa":
@@ -195,9 +225,10 @@ def calculate_relevance_score(
 
     # Final combined filter decision
     is_placement = classic_is_placement or (
-        (passed_relaxed_subject or passed_relaxed_sender or passed_relaxed_domain)
+        (passed_relaxed_subject or passed_relaxed_sender)
         and not newsletter_hits
         and not irrelevant_sender_hits
+        and not negative_hits
     )
 
     # Output detailed logs for Task 1 at INFO level (so they are visible by default)
@@ -209,18 +240,22 @@ def calculate_relevance_score(
     logger.info("[DEBUG] Email Address: %s", email_clean)
     logger.info("[DEBUG] Sender score: %s (Is Trusted: %s)", sender_score, is_trusted)
     logger.info("[DEBUG] Subject keyword matches: %s", matched_subj_kws or classic_subject_matches)
-    logger.info("[DEBUG] Sender keyword matches: %s", matched_sender_kws or classic_matched_sender_terms)
+    logger.info(
+        "[DEBUG] Sender keyword matches: %s", matched_sender_kws or classic_matched_sender_terms
+    )
     logger.info("[DEBUG] Domain matches: %s", matched_domains)
     logger.info("[DEBUG] Final relevance decision: %s", "TRUE" if is_placement else "FALSE")
-    
+
     rejection_reasons = []
     if not is_placement:
         if newsletter_hits:
             rejection_reasons.append(f"newsletter terms found: {newsletter_hits}")
         if irrelevant_sender_hits:
             rejection_reasons.append(f"irrelevant sender found: {irrelevant_sender_hits}")
-        if not (passed_relaxed_subject or passed_relaxed_sender or passed_relaxed_domain):
-            rejection_reasons.append("does not match relaxed subject, sender name, or institutional domain filters")
+        if negative_hits:
+            rejection_reasons.append(f"negative terms found: {negative_hits}")
+        if not (passed_relaxed_subject or passed_relaxed_sender):
+            rejection_reasons.append("does not match relaxed subject or sender name filters")
         logger.info("[DEBUG] Rejection reason: %s", ", ".join(rejection_reasons))
     logger.info("==========================================")
 
@@ -268,5 +303,5 @@ def _is_strong_ignore(ignored_reasons: list[str], score: int) -> bool:
     """Avoid letting generic job-newsletter content pass as placement mail."""
     if score >= 75:
         return False
-    ignored_prefixes = ("newsletter_or_marketing_terms", "irrelevant_sender")
+    ignored_prefixes = ("newsletter_or_marketing_terms", "irrelevant_sender", "negative_terms")
     return any(reason.startswith(ignored_prefixes) for reason in ignored_reasons)

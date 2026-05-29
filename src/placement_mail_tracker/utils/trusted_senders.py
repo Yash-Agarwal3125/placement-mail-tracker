@@ -156,12 +156,12 @@ class TrustedSenderManager:
         # 1. Match display name and email local part against signals
         for keyword, weight in SENDER_KEYWORDS.items():
             pattern = rf"\b{re.escape(keyword)}\b"
-            
+
             # Check display name
             if re.search(pattern, display_clean):
                 score += weight
                 matched_keywords.append(f"display:{keyword}")
-                
+
             # Check local part of email
             elif keyword in local_part:
                 score += weight
@@ -175,7 +175,7 @@ class TrustedSenderManager:
 
         # Deduplicate matched keywords
         matched_keywords = list(dict.fromkeys(matched_keywords))
-        
+
         # Max out score at 100, min at 0
         final_score = max(0, min(score, 100))
         return final_score, matched_keywords
@@ -194,10 +194,14 @@ class TrustedSenderManager:
             return False, 0
 
         # Don't discover common spam/irrelevant standard addresses
-        if any(domain in email for domain in {"medium.com", "quora.com", "substack.com", "udemy.com"}):
+        if any(
+            domain in email for domain in {"medium.com", "quora.com", "substack.com", "udemy.com"}
+        ):
             return False, 0
 
-        calculated_score, matched_keywords = self.calculate_sender_score(email, display_name, subject)
+        calculated_score, matched_keywords = self.calculate_sender_score(
+            email, display_name, subject
+        )
         now = utc_now_iso()
 
         existing = self.senders.get(email)
@@ -209,7 +213,7 @@ class TrustedSenderManager:
                 existing.score = calculated_score
                 existing.matched_keywords = list(set(existing.matched_keywords + matched_keywords))
                 logger.info("Updated trusted sender score for %s to %s", email, calculated_score)
-            
+
             self.save_senders()
             return existing.score >= self.trust_threshold, existing.score
 
@@ -224,7 +228,9 @@ class TrustedSenderManager:
                 last_seen=now,
             )
             self.senders[email] = new_sender
-            logger.info("Discovered new institutional sender: %s (Score: %s)", email, calculated_score)
+            logger.info(
+                "Discovered new institutional sender: %s (Score: %s)", email, calculated_score
+            )
             self.save_senders()
             return calculated_score >= self.trust_threshold, calculated_score
 
