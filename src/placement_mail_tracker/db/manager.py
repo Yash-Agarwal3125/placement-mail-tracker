@@ -1,4 +1,16 @@
-"""Reusable SQLite database manager for Placement Mail Tracker."""
+"""Reusable SQLite database manager for Placement Mail Tracker.
+
+This module implements the drive-centric architecture (Phase 1):
+- Each placement drive is a tracked entity
+- Follow-up emails update existing drives
+- No duplicate drives are created
+- Company stats are maintained automatically
+
+Phase 5: Drive ID generation using company + role + category + season.
+Phase 7: Gmail message_id and thread_id storage for deep linking.
+Phase 11: Action Required engine.
+Phase 12: Personal status tracking (My Status).
+"""
 
 from __future__ import annotations
 
@@ -6,10 +18,12 @@ import hashlib
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from placement_mail_tracker.db.connection import get_connection
+from placement_mail_tracker.extraction.rule_engine import normalize_company_name
 from placement_mail_tracker.utils.time import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -33,25 +47,103 @@ OPPORTUNITY_FIELDS = (
 
 JSON_FIELDS = {"branches_allowed", "hiring_process", "important_notes"}
 
+# Phase 2: Valid status progression order
+VALID_STATUSES = (
+    "OPEN",
+    "REGISTERED",
+    "SHORTLISTED",
+    "OA",
+    "INTERVIEW",
+    "HR",
+    "SELECTED",
+    "OFFER_RECEIVED",
+    "REJECTED",
+    "WITHDRAWN",
+    "EXPIRED",
+    "COMPLETED",
+)
+
+# Phase 12: Personal status values
+PERSONAL_STATUSES = (
+    "NOT_APPLIED",
+    "APPLIED",
+    "SHORTLISTED",
+    "OA_CLEARED",
+    "INTERVIEWED",
+    "SELECTED",
+    "REJECTED",
+)
+
 
 def generate_unique_hash(opportunity: dict[str, Any]) -> str:
-    """Generate a stable hash for duplicate prevention by drive."""
-    # Deduplicate by company, role, package, and season (year)
-    import datetime
-    year = str(datetime.datetime.now().year)
-    
+    """Generate a stable hash for duplicate prevention by drive.
+
+    Phase 5: Uses company + role + package + year as uniqueness key.
+    """
+    year = str(datetime.now().year)
+
     parts = [
         _normalize_key(opportunity.get("company_name", "")),
         _normalize_key(opportunity.get("role", "")),
         _normalize_key(opportunity.get("package_or_stipend", "")),
-        year
+        year,
     ]
     normalized = "::".join(parts)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def generate_drive_id(
+    company_name: str,
+    role: str | None = None,
+    category: str | None = None,
+) -> str:
+    """Generate a human-readable drive ID.
+
+    Phase 5: Examples:
+        MICROSOFT_2027_DS_INTERN
+        DELL_2027_SUMMER_INTERN
+        STANDARDCHARTERED_2027_SUMMER
+    """
+    year = datetime.now().year
+
+    # Normalize company to uppercase slug
+    normalized = normalize_company_name(company_name)
+    slug = normalized.upper().replace(" ", "").replace("-", "")
+
+    # Build role slug
+    role_slug = ""
+    if role:
+        role_words = role.upper().split()[:3]  # first 3 words
+        role_slug = "_".join(w for w in role_words if len(w) > 1)
+
+    # Build category slug
+    cat_slug = ""
+    if category:
+        cat_map = {
+            "internship": "INTERN",
+            "full_time": "FTE",
+            "contract": "CONTRACT",
+        }
+        cat_slug = cat_map.get(category.lower(), category.upper()[:6])
+
+    parts = [slug, str(year)]
+    if role_slug:
+        parts.append(role_slug)
+    if cat_slug:
+        parts.append(cat_slug)
+
+    return "_".join(parts)
+
+
 class DatabaseManager:
-    """High-level sqlite3 manager for opportunities, updates, and notifications."""
+    """High-level SQLite manager for the drive-centric placement tracker.
+
+    Phase 1: Each placement drive is a tracked entity.
+    Phase 5: Drive IDs encode company + role + season.
+    Phase 7: Stores gmail_message_id and gmail_thread_id for deep linking.
+    Phase 11: Computes action_required based on upcoming deadlines.
+    Phase 12: Tracks personal status per drive.
+    """
 
     def __init__(
         self,
@@ -101,13 +193,16 @@ class DatabaseManager:
                 source_email_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                current_status TEXT NOT NULL DEFAULT 'NEW',
+                current_status TEXT NOT NULL DEFAULT 'OPEN',
                 status_history TEXT NOT NULL DEFAULT '[]',
                 last_update_timestamp TEXT,
                 email_received_at TEXT,
                 drive_id TEXT,
                 source_thread_id TEXT,
-                action_required TEXT
+                action_required TEXT,
+                email_classification TEXT,
+                my_status TEXT NOT NULL DEFAULT 'NOT_APPLIED',
+                next_event_date TEXT
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -133,6 +228,7 @@ class DatabaseManager:
                 filter_decision TEXT,
                 processed_status TEXT NOT NULL,
                 error_message TEXT,
+                email_classification TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE SET NULL
@@ -161,8 +257,10 @@ class DatabaseManager:
                 ON opportunities(status);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_unique_hash
                 ON opportunities(unique_hash);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_drive_id
+            CREATE INDEX IF NOT EXISTS idx_opportunities_drive_id
                 ON opportunities(drive_id);
+            CREATE INDEX IF NOT EXISTS idx_opportunities_thread_id
+                ON opportunities(source_thread_id);
             CREATE INDEX IF NOT EXISTS idx_updates_opportunity_id
                 ON updates(opportunity_id);
             CREATE INDEX IF NOT EXISTS idx_processed_emails_message_id
@@ -173,30 +271,39 @@ class DatabaseManager:
         )
         self.connection.commit()
 
+    # ------------------------------------------------------------------
+    # Phase 1: Drive-Centric Insert/Update
+    # ------------------------------------------------------------------
+
     def insert_or_update_opportunity(
         self,
         opportunity: dict[str, Any],
         *,
         source_email_id: str | None = None,
         source_thread_id: str | None = None,
+        email_classification: str | None = None,
     ) -> tuple[int, bool]:
-        """Insert a new opportunity or update an existing duplicate.
+        """Insert a new drive or update an existing one.
+
+        Follow-up detection (Phase 2):
+        1. Match by thread_id first (bulletproof for Gmail threads)
+        2. Fallback to hash matching (company + role + package + year)
 
         Returns ``(opportunity_id, created_new_record)``.
         """
         normalized = self._normalize_opportunity(opportunity)
         existing = None
-        
+
         # 1. Match by thread ID first (Follow-up detection)
         if source_thread_id:
             existing = self.fetch_opportunity_by_thread_id(source_thread_id)
-            
+
         # 2. Fallback to hash matching
         if not existing:
             existing = self.find_duplicate_opportunity(normalized)
 
-        # Merge history if new status is present
-        new_status = (normalized.get("current_status") or "NEW").upper()
+        # Merge status history
+        new_status = (normalized.get("current_status") or "OPEN").upper()
         if existing:
             try:
                 history = json.loads(existing["status_history"])
@@ -207,11 +314,15 @@ class DatabaseManager:
                 history.append(new_status)
             normalized["status_history"] = json.dumps(history)
             normalized["current_status"] = new_status
-
-            # Since role might have changed, we let it update the row.
         else:
             normalized["status_history"] = json.dumps([new_status])
             normalized["current_status"] = new_status
+
+        if email_classification:
+            normalized["email_classification"] = email_classification
+
+        # Phase 11: Compute action required
+        normalized["action_required"] = self._compute_action_required(normalized)
 
         if existing is None:
             opportunity_id = self._insert_opportunity(
@@ -222,10 +333,10 @@ class DatabaseManager:
             self.create_update_event(
                 opportunity_id,
                 "created",
-                notes="Opportunity created from email",
+                notes="Drive created from email",
             )
             self._update_company_stats(normalized["company_name"])
-            logger.info("Inserted opportunity %s", opportunity_id)
+            logger.info("Inserted drive %s (id=%s)", normalized.get("drive_id"), opportunity_id)
             return opportunity_id, True
 
         opportunity_id = int(existing["id"])
@@ -241,7 +352,8 @@ class DatabaseManager:
             )
             self._update_company_stats(normalized["company_name"])
             logger.info(
-                "Updated opportunity %s with %s changes",
+                "Updated drive %s (id=%s) with %s changes",
+                existing["drive_id"],
                 opportunity_id,
                 len(changed_fields),
             )
@@ -249,9 +361,9 @@ class DatabaseManager:
             self.create_update_event(
                 opportunity_id,
                 "duplicate_seen",
-                notes="Duplicate email without opportunity changes",
+                notes="Follow-up email without drive changes",
             )
-            logger.info("Duplicate opportunity %s had no changes", opportunity_id)
+            logger.info("Follow-up for drive %s had no changes", existing["drive_id"])
 
         return opportunity_id, False
 
@@ -264,7 +376,7 @@ class DatabaseManager:
         source_thread_id: str | None = None,
         changed_fields: list[tuple[str, Any, Any]] | None = None,
     ) -> None:
-        """Update one opportunity and create update-history rows."""
+        """Update one drive and create update-history rows."""
         normalized = self._normalize_opportunity(opportunity)
         existing = self.fetch_opportunity_by_id(opportunity_id)
         if existing is None:
@@ -288,6 +400,55 @@ class DatabaseManager:
                 new_value=new_value,
             )
 
+    # ------------------------------------------------------------------
+    # Phase 11: Action Required Engine
+    # ------------------------------------------------------------------
+
+    def _compute_action_required(self, opportunity: dict[str, Any]) -> str | None:
+        """Compute the action required based on deadlines and status."""
+        status = (opportunity.get("current_status") or "").upper()
+        deadline = opportunity.get("deadline")
+        oa_date = opportunity.get("oa_date")
+        interview_date = opportunity.get("interview_date")
+
+        now = datetime.now()
+        tomorrow = now + timedelta(days=1)
+
+        def _is_tomorrow(date_str: str | None) -> bool:
+            if not date_str:
+                return False
+            try:
+                dt = datetime.fromisoformat(date_str)
+                return dt.date() == tomorrow.date()
+            except (ValueError, TypeError):
+                return False
+
+        def _is_today(date_str: str | None) -> bool:
+            if not date_str:
+                return False
+            try:
+                dt = datetime.fromisoformat(date_str)
+                return dt.date() == now.date()
+            except (ValueError, TypeError):
+                return False
+
+        if status == "OFFER_RECEIVED":
+            return "REVIEW OFFER"
+        if _is_today(deadline) or _is_tomorrow(deadline):
+            return "APPLY TODAY"
+        if _is_today(oa_date) or _is_tomorrow(oa_date):
+            return "PREPARE FOR TEST"
+        if _is_today(interview_date) or _is_tomorrow(interview_date):
+            return "PREPARE FOR INTERVIEW"
+        if status == "OPEN" and deadline:
+            return "REGISTER BEFORE DEADLINE"
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Event/Update Tracking
+    # ------------------------------------------------------------------
+
     def create_update_event(
         self,
         opportunity_id: int,
@@ -302,13 +463,8 @@ class DatabaseManager:
         cursor = self.connection.execute(
             """
             INSERT INTO updates (
-                opportunity_id,
-                update_type,
-                field_name,
-                old_value,
-                new_value,
-                notes,
-                created_at
+                opportunity_id, update_type, field_name,
+                old_value, new_value, notes, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?);
             """,
@@ -325,23 +481,27 @@ class DatabaseManager:
         self.connection.commit()
         return int(cursor.lastrowid)
 
+    # ------------------------------------------------------------------
+    # Query Methods
+    # ------------------------------------------------------------------
+
     def find_duplicate_opportunity(self, opportunity: dict[str, Any]) -> sqlite3.Row | None:
-        """Fetch an opportunity by the generated hash."""
+        """Fetch a drive by the generated hash."""
         unique_hash = generate_unique_hash(opportunity)
         return self.connection.execute(
             "SELECT * FROM opportunities WHERE unique_hash = ? LIMIT 1;",
             (unique_hash,),
         ).fetchone()
-        
+
     def fetch_opportunity_by_thread_id(self, thread_id: str) -> sqlite3.Row | None:
-        """Fetch an opportunity by Gmail thread ID."""
+        """Fetch a drive by Gmail thread ID."""
         return self.connection.execute(
             "SELECT * FROM opportunities WHERE source_thread_id = ? LIMIT 1;",
             (thread_id,),
         ).fetchone()
 
     def fetch_opportunity_by_id(self, opportunity_id: int) -> dict[str, Any] | None:
-        """Fetch one opportunity by primary key."""
+        """Fetch one drive by primary key."""
         row = self.connection.execute(
             "SELECT * FROM opportunities WHERE id = ?;",
             (opportunity_id,),
@@ -349,19 +509,39 @@ class DatabaseManager:
         return self._row_to_opportunity(row) if row else None
 
     def fetch_active_opportunities(self) -> list[dict[str, Any]]:
-        """Return active opportunities as dictionaries."""
+        """Return active drives ordered by most recently updated (Phase 8)."""
         rows = self.connection.execute(
             """
             SELECT *
             FROM opportunities
             WHERE status = 'active'
-            ORDER BY COALESCE(deadline, updated_at) ASC;
+            ORDER BY updated_at DESC;
             """
         ).fetchall()
         return [self._row_to_opportunity(row) for row in rows]
 
+    def get_active_opportunities(self) -> list[dict[str, Any]]:
+        """Backward-compatible alias for fetch_active_opportunities."""
+        return self.fetch_active_opportunities()
+
+    def fetch_active_drives_only(self) -> list[dict[str, Any]]:
+        """Phase 9: Return only drives with active statuses."""
+        active_statuses = ("OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR")
+        placeholders = ", ".join("?" for _ in active_statuses)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM opportunities
+            WHERE status = 'active'
+              AND current_status IN ({placeholders})
+            ORDER BY updated_at DESC;
+            """,
+            active_statuses,
+        ).fetchall()
+        return [self._row_to_opportunity(row) for row in rows]
+
     def fetch_updates_for_opportunity(self, opportunity_id: int) -> list[dict[str, Any]]:
-        """Fetch update history for one opportunity."""
+        """Fetch update history for one drive."""
         rows = self.connection.execute(
             """
             SELECT *
@@ -372,6 +552,44 @@ class DatabaseManager:
             (opportunity_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Phase 10: Dashboard Metrics
+    # ------------------------------------------------------------------
+
+    def get_dashboard_metrics(self) -> dict[str, Any]:
+        """Compute dashboard metrics (Phase 10)."""
+        all_opps = self.fetch_active_opportunities()
+
+        now = datetime.now()
+        week_start = now - timedelta(days=now.weekday())
+        week_end = week_start + timedelta(days=7)
+
+        active_statuses = {"OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR"}
+
+        active_drives = sum(1 for o in all_opps if o.get("current_status") in active_statuses)
+        applications_open = sum(1 for o in all_opps if o.get("current_status") == "OPEN")
+        offers = sum(1 for o in all_opps if o.get("current_status") == "OFFER_RECEIVED")
+        interviews = sum(1 for o in all_opps if o.get("current_status") == "INTERVIEW")
+
+        total = len(all_opps)
+        companies = len(set(o.get("company_name", "") for o in all_opps))
+        selection_rate = f"{(offers / total * 100):.1f}%" if total > 0 else "0%"
+
+        return {
+            "active_drives": active_drives,
+            "applications_open": applications_open,
+            "oa_this_week": sum(1 for o in all_opps if o.get("current_status") == "OA"),
+            "interviews_this_week": interviews,
+            "offers_received": offers,
+            "companies_applied": companies,
+            "selection_rate": selection_rate,
+            "total_drives": total,
+        }
+
+    # ------------------------------------------------------------------
+    # Processed Emails, Notifications
+    # ------------------------------------------------------------------
 
     def log_processed_email(
         self,
@@ -385,25 +603,19 @@ class DatabaseManager:
         filter_decision: dict[str, Any] | None = None,
         processed_status: str = "processed",
         error_message: str | None = None,
+        email_classification: str | None = None,
     ) -> int:
         """Create or update a processed email record."""
         now = utc_now_iso()
         cursor = self.connection.execute(
             """
             INSERT INTO processed_emails (
-                gmail_message_id,
-                opportunity_id,
-                subject,
-                sender,
-                received_at,
-                filter_score,
-                filter_decision,
-                processed_status,
-                error_message,
-                created_at,
-                updated_at
+                gmail_message_id, opportunity_id, subject, sender,
+                received_at, filter_score, filter_decision,
+                processed_status, error_message, email_classification,
+                created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 subject = excluded.subject,
@@ -413,6 +625,7 @@ class DatabaseManager:
                 filter_decision = excluded.filter_decision,
                 processed_status = excluded.processed_status,
                 error_message = excluded.error_message,
+                email_classification = excluded.email_classification,
                 updated_at = excluded.updated_at;
             """,
             (
@@ -425,6 +638,7 @@ class DatabaseManager:
                 _serialize_value(filter_decision),
                 processed_status,
                 error_message,
+                email_classification,
                 now,
                 now,
             ),
@@ -454,68 +668,41 @@ class DatabaseManager:
         cursor = self.connection.execute(
             """
             INSERT INTO notifications (
-                opportunity_id,
-                channel,
-                recipient,
-                subject,
-                message,
-                status,
-                error_message,
-                sent_at,
-                created_at,
-                updated_at
+                opportunity_id, channel, recipient, subject,
+                message, status, error_message, sent_at,
+                created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
-                opportunity_id,
-                channel,
-                recipient,
-                subject,
-                message,
-                status,
-                error_message,
-                sent_at,
-                now,
-                now,
+                opportunity_id, channel, recipient, subject,
+                message, status, error_message, sent_at,
+                now, now,
             ),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def fetch_notifications(self, status: str | None = None) -> list[dict[str, Any]]:
-        """Fetch notification rows, optionally filtered by status."""
-        if status is None:
-            rows = self.connection.execute(
-                "SELECT * FROM notifications ORDER BY created_at DESC, id DESC;"
-            ).fetchall()
-        else:
-            rows = self.connection.execute(
-                """
-                SELECT *
-                FROM notifications
-                WHERE status = ?
-                ORDER BY created_at DESC, id DESC;
-                """,
-                (status,),
-            ).fetchall()
+    def get_company_history(self) -> list[dict[str, Any]]:
+        """Fetch all company records."""
+        rows = self.connection.execute(
+            "SELECT * FROM companies ORDER BY last_activity DESC"
+        ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_active_opportunities(self) -> list[dict[str, Any]]:
-        """Backward-compatible alias for fetch_active_opportunities."""
-        return self.fetch_active_opportunities()
-
+    # Backward compatibility aliases
     def get_opportunity_events(self, opportunity_id: int) -> list[dict[str, Any]]:
-        """Backward-compatible alias for fetch_updates_for_opportunity."""
         return self.fetch_updates_for_opportunity(opportunity_id)
 
     def add_event(self, opportunity_id: int, event_type: str, **kwargs: Any) -> int:
-        """Backward-compatible alias for create_update_event."""
         return self.create_update_event(opportunity_id, event_type, **kwargs)
 
     def log_email(self, **kwargs: Any) -> int:
-        """Backward-compatible alias for log_processed_email."""
         return self.log_processed_email(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Internal Helpers
+    # ------------------------------------------------------------------
 
     def _insert_opportunity(
         self,
@@ -526,13 +713,22 @@ class DatabaseManager:
     ) -> int:
         now = utc_now_iso()
         company_name = opportunity["company_name"]
-        
-        # Drive ID Generation
-        import datetime
-        year = datetime.datetime.now().year
-        count = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (company_name,)).fetchone()[0]
-        drive_id = f"{_normalize_key(company_name).replace(' ', '').upper()}_{year}_{count + 1:02d}"
-        
+
+        # Phase 5: Generate Drive ID
+        drive_id = generate_drive_id(
+            company_name,
+            role=opportunity.get("role"),
+            category=opportunity.get("internship_or_fulltime"),
+        )
+
+        # Ensure uniqueness by appending sequence
+        existing_count = self.connection.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE drive_id LIKE ?",
+            (f"{drive_id}%",),
+        ).fetchone()[0]
+        if existing_count > 0:
+            drive_id = f"{drive_id}_{existing_count + 1:02d}"
+
         values = {
             **opportunity,
             "unique_hash": generate_unique_hash(opportunity),
@@ -545,130 +741,32 @@ class DatabaseManager:
         cursor = self.connection.execute(
             """
             INSERT INTO opportunities (
-                unique_hash,
-                company_name,
-                role,
-                internship_or_fulltime,
-                package_or_stipend,
-                eligibility,
-                cgpa_requirement,
-                branches_allowed,
-                deadline,
-                interview_date,
-                oa_date,
-                registration_link,
-                work_location,
-                hiring_process,
-                important_notes,
-                source_email_id,
-                created_at,
-                updated_at,
-                current_status,
-                status_history,
-                last_update_timestamp,
-                email_received_at,
-                drive_id,
-                source_thread_id,
-                action_required
+                unique_hash, company_name, role, internship_or_fulltime,
+                package_or_stipend, eligibility, cgpa_requirement,
+                branches_allowed, deadline, interview_date, oa_date,
+                registration_link, work_location, hiring_process,
+                important_notes, source_email_id, created_at, updated_at,
+                current_status, status_history, last_update_timestamp,
+                email_received_at, drive_id, source_thread_id,
+                action_required, email_classification, my_status,
+                next_event_date
             )
             VALUES (
-                :unique_hash,
-                :company_name,
-                :role,
-                :internship_or_fulltime,
-                :package_or_stipend,
-                :eligibility,
-                :cgpa_requirement,
-                :branches_allowed,
-                :deadline,
-                :interview_date,
-                :oa_date,
-                :registration_link,
-                :work_location,
-                :hiring_process,
-                :important_notes,
-                :source_email_id,
-                :created_at,
-                :updated_at,
-                :current_status,
-                :status_history,
-                :last_update_timestamp,
-                :email_received_at,
-                :drive_id,
-                :source_thread_id,
-                :action_required
+                :unique_hash, :company_name, :role, :internship_or_fulltime,
+                :package_or_stipend, :eligibility, :cgpa_requirement,
+                :branches_allowed, :deadline, :interview_date, :oa_date,
+                :registration_link, :work_location, :hiring_process,
+                :important_notes, :source_email_id, :created_at, :updated_at,
+                :current_status, :status_history, :last_update_timestamp,
+                :email_received_at, :drive_id, :source_thread_id,
+                :action_required, :email_classification, :my_status,
+                :next_event_date
             );
             """,
             values,
         )
         self.connection.commit()
         return int(cursor.lastrowid)
-
-    def _migrate_existing_opportunities_table(self) -> None:
-        """Add required columns when an older local SQLite file already exists."""
-        columns = {
-            row["name"]
-            for row in self.connection.execute("PRAGMA table_info(opportunities);").fetchall()
-        }
-
-        if "current_status" not in columns:
-            logger.info("Migrating opportunities table: adding dashboard columns")
-            self.connection.executescript(
-                """
-                ALTER TABLE opportunities ADD COLUMN current_status TEXT NOT NULL DEFAULT 'NEW';
-                ALTER TABLE opportunities ADD COLUMN status_history TEXT NOT NULL DEFAULT '[]';
-                ALTER TABLE opportunities ADD COLUMN last_update_timestamp TEXT;
-                ALTER TABLE opportunities ADD COLUMN email_received_at TEXT;
-                """
-            )
-            
-        if "drive_id" not in columns:
-            logger.info("Migrating opportunities table: adding drive architecture columns")
-            self.connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS companies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    total_drives INTEGER NOT NULL DEFAULT 0,
-                    active_drives INTEGER NOT NULL DEFAULT 0,
-                    selected_drives INTEGER NOT NULL DEFAULT 0,
-                    rejected_drives INTEGER NOT NULL DEFAULT 0,
-                    last_activity TEXT
-                );
-                ALTER TABLE opportunities ADD COLUMN drive_id TEXT;
-                ALTER TABLE opportunities ADD COLUMN source_thread_id TEXT;
-                ALTER TABLE opportunities ADD COLUMN action_required TEXT;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_drive_id ON opportunities(drive_id);
-                """
-            )
-
-        rows = self.connection.execute(
-            """
-            SELECT id, company_name, role, package_or_stipend
-            FROM opportunities;
-            """
-        ).fetchall()
-        for row in rows:
-            opp_dict = {"company_name": row["company_name"], "role": row["role"], "package_or_stipend": row["package_or_stipend"]}
-            try:
-                self.connection.execute(
-                    "UPDATE opportunities SET unique_hash = ? WHERE id = ?;",
-                    (generate_unique_hash(opp_dict), row["id"]),
-                )
-            except sqlite3.IntegrityError:
-                # Merge logic - delete older duplicates
-                self.connection.execute("DELETE FROM opportunities WHERE id = ?;", (row["id"],))
-                
-        # Backfill Drive IDs
-        null_drives = self.connection.execute("SELECT id, company_name FROM opportunities WHERE drive_id IS NULL;").fetchall()
-        import datetime
-        year = datetime.datetime.now().year
-        for row in null_drives:
-            count = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND drive_id IS NOT NULL", (row["company_name"],)).fetchone()[0]
-            drive_id = f"{_normalize_key(row['company_name']).replace(' ', '').upper()}_{year}_{count + 1:02d}"
-            self.connection.execute("UPDATE opportunities SET drive_id = ? WHERE id = ?;", (drive_id, row["id"]))
-            
-        self.connection.commit()
 
     def _update_opportunity_row(
         self,
@@ -711,43 +809,105 @@ class DatabaseManager:
                 last_update_timestamp = COALESCE(:last_update_timestamp, last_update_timestamp),
                 email_received_at = COALESCE(:email_received_at, email_received_at),
                 source_thread_id = COALESCE(:source_thread_id, source_thread_id),
-                action_required = COALESCE(:action_required, action_required)
+                action_required = COALESCE(:action_required, action_required),
+                email_classification = COALESCE(:email_classification, email_classification),
+                next_event_date = COALESCE(:next_event_date, next_event_date)
             WHERE id = :id;
             """,
             values,
         )
         self.connection.commit()
 
+    def _migrate_existing_opportunities_table(self) -> None:
+        """Add required columns when an older local SQLite file already exists."""
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(opportunities);").fetchall()
+        }
+
+        new_columns = {
+            "current_status": "TEXT NOT NULL DEFAULT 'OPEN'",
+            "status_history": "TEXT NOT NULL DEFAULT '[]'",
+            "last_update_timestamp": "TEXT",
+            "email_received_at": "TEXT",
+            "drive_id": "TEXT",
+            "source_thread_id": "TEXT",
+            "action_required": "TEXT",
+            "email_classification": "TEXT",
+            "my_status": "TEXT NOT NULL DEFAULT 'NOT_APPLIED'",
+            "next_event_date": "TEXT",
+        }
+
+        for col_name, col_def in new_columns.items():
+            if col_name not in columns:
+                logger.info("Migrating opportunities table: adding %s", col_name)
+                try:
+                    self.connection.execute(
+                        f"ALTER TABLE opportunities ADD COLUMN {col_name} {col_def};"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column might already exist from another path
+
+        # Ensure companies table
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                total_drives INTEGER NOT NULL DEFAULT 0,
+                active_drives INTEGER NOT NULL DEFAULT 0,
+                selected_drives INTEGER NOT NULL DEFAULT 0,
+                rejected_drives INTEGER NOT NULL DEFAULT 0,
+                last_activity TEXT
+            );
+            """
+        )
+
+        # Add email_classification to processed_emails if missing
+        pe_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(processed_emails);").fetchall()
+        }
+        if "email_classification" not in pe_columns:
+            try:
+                self.connection.execute(
+                    "ALTER TABLE processed_emails ADD COLUMN email_classification TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        self.connection.commit()
+
     def _normalize_opportunity(self, opportunity: dict[str, Any]) -> dict[str, Any]:
+        # Phase 4: Normalize company name
         company_val = opportunity.get("company_name")
         if _normalize_scalar(company_val) is None:
             company_val = "Unknown Company"
+        company_name = normalize_company_name(company_val)
 
         role_val = opportunity.get("role")
         if _normalize_scalar(role_val) is None:
             role_val = "Unknown Role"
-
-        company_name = _clean_required_text(company_val, "company_name")
         role = _clean_required_text(role_val, "role")
-        normalized = {"company_name": company_name, "role": role}
 
-        for field in OPPORTUNITY_FIELDS + (
-            "current_status",
-            "status_history",
-            "last_update_timestamp",
-            "email_received_at",
-            "action_required",
+        normalized: dict[str, Any] = {"company_name": company_name, "role": role}
+
+        for fld in OPPORTUNITY_FIELDS + (
+            "current_status", "status_history", "last_update_timestamp",
+            "email_received_at", "action_required", "email_classification",
+            "my_status", "next_event_date",
         ):
-            if field in {"company_name", "role"}:
+            if fld in {"company_name", "role"}:
                 continue
-
-            value = opportunity.get(field)
-            if field in JSON_FIELDS:
-                normalized[field] = _serialize_value(_normalize_list(value))
-            elif field == "status_history":
-                normalized[field] = value if value else "[]"
+            value = opportunity.get(fld)
+            if fld in JSON_FIELDS:
+                normalized[fld] = _serialize_value(_normalize_list(value))
+            elif fld == "status_history":
+                normalized[fld] = value if value else "[]"
+            elif fld == "my_status":
+                normalized[fld] = value if value else "NOT_APPLIED"
             else:
-                normalized[field] = _normalize_scalar(value)
+                normalized[fld] = _normalize_scalar(value)
 
         return normalized
 
@@ -764,58 +924,69 @@ class DatabaseManager:
         incoming: dict[str, Any],
     ) -> list[tuple[str, Any, Any]]:
         changes: list[tuple[str, Any, Any]] = []
-        for field in OPPORTUNITY_FIELDS:
-            if field in {"company_name", "role"}:
+        for fld in OPPORTUNITY_FIELDS:
+            if fld in {"company_name", "role"}:
                 continue
-
-            old_value = existing[field]
-            if field in JSON_FIELDS and isinstance(old_value, list):
+            old_value = existing.get(fld)
+            if fld in JSON_FIELDS and isinstance(old_value, list):
                 old_value = _serialize_value(old_value)
+            new_value = incoming.get(fld)
+            if old_value != new_value and new_value is not None:
+                changes.append((fld, old_value, new_value))
 
-            new_value = incoming[field]
-            if old_value != new_value:
-                changes.append((field, old_value, new_value))
+        # Also track status changes
+        if existing.get("current_status") != incoming.get("current_status"):
+            changes.append(("current_status", existing.get("current_status"), incoming.get("current_status")))
 
         return changes
 
     def _row_to_opportunity(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
-        for field in JSON_FIELDS:
-            data[field] = _deserialize_json_list(data.get(field))
+        for fld in JSON_FIELDS:
+            data[fld] = _deserialize_json_list(data.get(fld))
         return data
 
     def _update_company_stats(self, company_name: str) -> None:
-        """Update the companies table metrics based on the current state of opportunities."""
-        normalized = _clean_required_text(company_name, "company_name")
+        """Update the companies table metrics."""
+        normalized = normalize_company_name(company_name)
         now = utc_now_iso()
-        
-        # Ensure company exists
-        self.connection.execute("INSERT OR IGNORE INTO companies (name) VALUES (?)", (normalized,))
-        
-        # Calculate stats
-        total = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (normalized,)).fetchone()[0]
-        active = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status NOT IN ('REJECTED', 'OFFER_RECEIVED')", (normalized,)).fetchone()[0]
-        selected = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'OFFER_RECEIVED'", (normalized,)).fetchone()[0]
-        rejected = self.connection.execute("SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'REJECTED'", (normalized,)).fetchone()[0]
-        
+
+        self.connection.execute(
+            "INSERT OR IGNORE INTO companies (name) VALUES (?)", (normalized,)
+        )
+
+        total = self.connection.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (normalized,)
+        ).fetchone()[0]
+        active = self.connection.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status NOT IN ('REJECTED', 'OFFER_RECEIVED', 'EXPIRED', 'WITHDRAWN')",
+            (normalized,),
+        ).fetchone()[0]
+        selected = self.connection.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status IN ('SELECTED', 'OFFER_RECEIVED')",
+            (normalized,),
+        ).fetchone()[0]
+        rejected = self.connection.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'REJECTED'",
+            (normalized,),
+        ).fetchone()[0]
+
         self.connection.execute(
             """
             UPDATE companies
-            SET total_drives = ?,
-                active_drives = ?,
-                selected_drives = ?,
-                rejected_drives = ?,
+            SET total_drives = ?, active_drives = ?,
+                selected_drives = ?, rejected_drives = ?,
                 last_activity = ?
             WHERE name = ?;
             """,
-            (total, active, selected, rejected, now, normalized)
+            (total, active, selected, rejected, now, normalized),
         )
         self.connection.commit()
 
-    def get_company_history(self) -> list[dict[str, Any]]:
-        """Fetch all company records."""
-        rows = self.connection.execute("SELECT * FROM companies ORDER BY last_activity DESC").fetchall()
-        return [dict(row) for row in rows]
+
+# ------------------------------------------------------------------
+# Module-level Helpers
+# ------------------------------------------------------------------
 
 
 def _normalize_key(value: str | None) -> str:
@@ -836,10 +1007,8 @@ def _clean_required_text(value: Any, field_name: str) -> str:
 def _normalize_scalar(value: Any) -> str | None:
     if value is None:
         return None
-
     if isinstance(value, list):
         value = ", ".join(str(item).strip() for item in value if str(item).strip())
-
     normalized = str(value).strip()
     if not normalized or normalized.lower() in {"null", "none", "n/a", "na", "-"}:
         return None
@@ -849,14 +1018,11 @@ def _normalize_scalar(value: Any) -> str | None:
 def _normalize_list(value: Any) -> list[str]:
     if value is None:
         return []
-
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
-
     normalized = str(value).strip()
     if not normalized or normalized.lower() in {"null", "none", "n/a", "na", "-"}:
         return []
-
     return [item.strip() for item in normalized.replace(";", ",").split(",") if item.strip()]
 
 
