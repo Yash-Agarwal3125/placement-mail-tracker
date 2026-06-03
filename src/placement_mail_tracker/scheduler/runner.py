@@ -284,6 +284,10 @@ class PlacementTrackerRunner:
                     eligibility_status = evaluate_eligibility(opp_data, user_profile)
                     opp_data["eligibility_status"] = eligibility_status
 
+                    # Feature 8: Priority Scoring
+                    from placement_mail_tracker.utils.scoring import compute_priority
+                    opp_data["priority"] = compute_priority(opp_data, user_profile)
+
                     # Phase 1: Insert or update drive (not create duplicate)
                     opp_id, created = database.insert_or_update_opportunity(
                         opp_data,
@@ -293,43 +297,9 @@ class PlacementTrackerRunner:
                     )
                     action = "inserted" if created else "updated"
                     logger.info(
-                        "[DB] Drive %s: %s - %s (classification=%s)",
-                        action, opp_data["company_name"], opp_data["role"], classification,
+                        "[DB] Drive %s: %s - %s (classification=%s, priority=%s)",
+                        action, opp_data["company_name"], opp_data["role"], classification, opp_data["priority"]
                     )
-
-                    # Send notifications for critical updates
-                    email_notifier = EmailNotifier(self.settings)
-                    update_type = classification.lower().replace("_update", "")
-
-                    record = PlacementRecord(
-                        gmail_message_id=msg_id,
-                        subject=subject,
-                        sender=sender,
-                        received_at=timestamp,
-                        company_name=opp_data["company_name"],
-                        role_title=opp_data["role"],
-                        application_deadline=opp_data.get("deadline"),
-                    )
-
-                    is_critical_update = created or classification in {
-                        "NEW_DRIVE", "OA_UPDATE", "SHORTLIST_UPDATE",
-                        "INTERVIEW_UPDATE", "OFFER_UPDATE",
-                    }
-
-                    if is_critical_update:
-                        notification_msg = f"[{classification}] {opp_data['company_name']} - {opp_data['role']}"
-                        if not is_duplicate_notification(self.connection, opp_id, notification_msg):
-                            logger.info("Sending notification for %s", classification)
-                            try:
-                                email_notifier.send_opportunity_alert(record, update_type=update_type)
-                                database.create_notification(
-                                    opportunity_id=opp_id,
-                                    channel="email",
-                                    message=notification_msg,
-                                    status="sent",
-                                )
-                            except Exception as notify_error:
-                                logger.warning("Notification failed: %s", notify_error)
 
                 database.log_processed_email(
                     gmail_message_id=msg_id,
@@ -376,6 +346,15 @@ class PlacementTrackerRunner:
                         raise
         except Exception as sync_error:
             logger.error("[SYNC] Google Sheets Write Failed: %s", sync_error)
+
+        # Feature 2 & 3: Smart Alerting
+        logger.info("Checking for upcoming deadlines and events")
+        try:
+            from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
+            alert_generator = AlertGenerator(database, self.settings)
+            alert_generator.check_and_send_alerts()
+        except Exception as e:
+            logger.exception("Alert generation failed: %s", e)
 
         # Summary
         total_emails = len(messages)

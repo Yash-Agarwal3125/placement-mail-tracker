@@ -51,7 +51,7 @@
     "display_name": "Unknown Institutional Aliases",
     "email": "cdc@vit.ac.in",
     "first_seen": "2026-05-29T10:35:05.266279+00:00",
-    "last_seen": "2026-06-03T08:04:30.993512+00:00",
+    "last_seen": "2026-06-03T10:30:28.662812+00:00",
     "matched_keywords": [
       "subject:shortlist",
       "domain:institutional",
@@ -73,7 +73,7 @@
     "display_name": "CDC VIT",
     "email": "placements@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.754945+00:00",
-    "last_seen": "2026-06-03T08:04:31.003041+00:00",
+    "last_seen": "2026-06-03T10:30:28.680581+00:00",
     "matched_keywords": [
       "domain:institutional",
       "email:placement",
@@ -87,7 +87,7 @@
     "display_name": "VIT CDC",
     "email": "vitianscdc@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.803009+00:00",
-    "last_seen": "2026-06-03T08:04:31.013559+00:00",
+    "last_seen": "2026-06-03T10:30:28.695209+00:00",
     "matched_keywords": [
       "domain:institutional",
       "display:cdc"
@@ -98,7 +98,7 @@
     "display_name": "IEEE VIT",
     "email": "ieee@vitstudent.ac.in",
     "first_seen": "2026-05-29T11:08:14.814688+00:00",
-    "last_seen": "2026-06-03T08:04:31.026369+00:00",
+    "last_seen": "2026-06-03T10:30:28.707412+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
@@ -108,7 +108,7 @@
     "display_name": "Gravitas Team",
     "email": "gravitas@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.832472+00:00",
-    "last_seen": "2026-06-03T08:04:31.035814+00:00",
+    "last_seen": "2026-06-03T10:30:28.721568+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
@@ -118,7 +118,7 @@
     "display_name": "NPTEL Coordinator",
     "email": "nptel@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.873379+00:00",
-    "last_seen": "2026-06-03T08:04:31.048162+00:00",
+    "last_seen": "2026-06-03T10:30:28.740511+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
@@ -128,7 +128,7 @@
     "display_name": "Academic Office",
     "email": "academic@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.894450+00:00",
-    "last_seen": "2026-06-03T08:04:31.058366+00:00",
+    "last_seen": "2026-06-03T10:30:28.755663+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
@@ -138,7 +138,7 @@
     "display_name": "Riviera Team",
     "email": "riviera@vit.ac.in",
     "first_seen": "2026-05-29T11:08:14.906391+00:00",
-    "last_seen": "2026-06-03T08:04:31.069510+00:00",
+    "last_seen": "2026-06-03T10:30:28.770272+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],

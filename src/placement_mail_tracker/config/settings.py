@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     smtp_email: str = Field(default="", alias="SMTP_EMAIL")
     smtp_app_password: str = Field(default="", alias="SMTP_APP_PASSWORD")
     email_receiver: str = Field(default="", alias="EMAIL_RECEIVER")
+    notification_email: str = Field(default="", alias="NOTIFICATION_EMAIL")
+    digest_send_time: str = Field(default="08:00", alias="DIGEST_SEND_TIME")
 
     sync_interval_hours: int = Field(default=3, alias="SYNC_INTERVAL_HOURS")
 

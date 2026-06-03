@@ -203,7 +203,9 @@ class DatabaseManager:
                 email_classification TEXT,
                 my_status TEXT NOT NULL DEFAULT 'NOT_APPLIED',
                 next_event_date TEXT,
-                eligibility_status TEXT NOT NULL DEFAULT 'MANUAL_REVIEW'
+                eligibility_status TEXT NOT NULL DEFAULT 'MANUAL_REVIEW',
+                applied_date TEXT,
+                priority TEXT NOT NULL DEFAULT 'MEDIUM'
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -248,6 +250,15 @@ class DatabaseManager:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sent_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER NOT NULL,
+                alert_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(opportunity_id, alert_type),
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
             );
             """
         )
@@ -750,7 +761,7 @@ class DatabaseManager:
                 current_status, status_history, last_update_timestamp,
                 email_received_at, drive_id, source_thread_id,
                 action_required, email_classification, my_status,
-                next_event_date, eligibility_status
+                next_event_date, eligibility_status, applied_date, priority
             )
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
@@ -761,7 +772,7 @@ class DatabaseManager:
                 :current_status, :status_history, :last_update_timestamp,
                 :email_received_at, :drive_id, :source_thread_id,
                 :action_required, :email_classification, :my_status,
-                :next_event_date, :eligibility_status
+                :next_event_date, :eligibility_status, :applied_date, :priority
             );
             """,
             values,
@@ -813,7 +824,9 @@ class DatabaseManager:
                 action_required = COALESCE(:action_required, action_required),
                 email_classification = COALESCE(:email_classification, email_classification),
                 next_event_date = COALESCE(:next_event_date, next_event_date),
-                eligibility_status = COALESCE(:eligibility_status, eligibility_status)
+                eligibility_status = COALESCE(:eligibility_status, eligibility_status),
+                applied_date = COALESCE(:applied_date, applied_date),
+                priority = COALESCE(:priority, priority)
             WHERE id = :id;
             """,
             values,
@@ -839,6 +852,8 @@ class DatabaseManager:
             "my_status": "TEXT NOT NULL DEFAULT 'NOT_APPLIED'",
             "next_event_date": "TEXT",
             "eligibility_status": "TEXT NOT NULL DEFAULT 'MANUAL_REVIEW'",
+            "applied_date": "TEXT",
+            "priority": "TEXT NOT NULL DEFAULT 'MEDIUM'",
         }
 
         for col_name, col_def in new_columns.items():
@@ -899,6 +914,7 @@ class DatabaseManager:
             "current_status", "status_history", "last_update_timestamp",
             "email_received_at", "action_required", "email_classification",
             "my_status", "next_event_date", "eligibility_status",
+            "applied_date", "priority",
         ):
             if fld in {"company_name", "role"}:
                 continue
@@ -911,6 +927,8 @@ class DatabaseManager:
                 normalized[fld] = value if value else "NOT_APPLIED"
             elif fld == "eligibility_status":
                 normalized[fld] = value if value else "MANUAL_REVIEW"
+            elif fld == "priority":
+                normalized[fld] = value if value else "MEDIUM"
             else:
                 normalized[fld] = _normalize_scalar(value)
 
