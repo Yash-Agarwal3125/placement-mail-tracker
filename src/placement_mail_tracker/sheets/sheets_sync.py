@@ -44,6 +44,7 @@ ACTIVE_OPP_HEADERS = [
     "Registration Deadline",
     "Next Event Date",
     "Action Required",
+    "Eligibility Status",
     "My Status",
     "Priority",
     "Latest Update",
@@ -101,11 +102,23 @@ class GoogleSheetsSync:
             self._ensure_tabs_exist()
 
             # Phase 9: Active Opportunities (excludes terminal statuses)
+            # Phase 5 (Eligibility Filter): Split by ELIGIBLE vs NOT_ELIGIBLE_*
             active_opps = database.fetch_active_drives_only()
+            
+            eligible_opps = [opp for opp in active_opps if opp.get("eligibility_status") == "ELIGIBLE"]
+            filtered_opps = [opp for opp in active_opps if opp.get("eligibility_status") != "ELIGIBLE"]
+
             self._sync_tab_data(
                 tab_name="Active Opportunities",
                 headers=ACTIVE_OPP_HEADERS,
-                data_rows=[opportunity_to_sheet_row(opp) for opp in active_opps],
+                data_rows=[opportunity_to_sheet_row(opp) for opp in eligible_opps],
+                key_index=2,  # Drive ID
+            )
+
+            self._sync_tab_data(
+                tab_name="Filtered Opportunities",
+                headers=ACTIVE_OPP_HEADERS,
+                data_rows=[opportunity_to_sheet_row(opp) for opp in filtered_opps],
                 key_index=2,  # Drive ID
             )
 
@@ -146,7 +159,7 @@ class GoogleSheetsSync:
             for s in spreadsheet.get("sheets", [])
         ]
 
-        required_tabs = ["Active Opportunities", "Company History", "Dashboard"]
+        required_tabs = ["Active Opportunities", "Filtered Opportunities", "Company History", "Dashboard"]
         requests = []
         for tab in required_tabs:
             if tab not in existing_tabs:
@@ -482,6 +495,7 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
         _cell(opportunity.get("deadline")),
         _cell(opportunity.get("next_event_date")),
         _cell(opportunity.get("action_required")),
+        _cell(opportunity.get("eligibility_status", "MANUAL_REVIEW")),
         _cell(opportunity.get("my_status", "NOT_APPLIED")),
         "",  # Priority (manual)
         _cell(opportunity.get("last_update_timestamp", utc_now_iso())),

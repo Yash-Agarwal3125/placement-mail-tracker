@@ -26,6 +26,8 @@ from placement_mail_tracker.extraction.rule_engine import (
     extract_from_email as rule_extract,
     normalize_company_name,
 )
+from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
+from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.gemini.extractor import GeminiExtractor
 from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
@@ -107,7 +109,10 @@ class PlacementTrackerRunner:
 
         logger.info("Initializing API clients")
         gmail_client = GmailClient(self.settings)
-        extractor = GeminiExtractor()
+        extractor = GeminiExtractor(self.settings)
+
+        # Load user profile for eligibility filtering
+        user_profile = UserProfile.load()
         sheets_client = SheetsClient(self.settings)
         notifier = TelegramNotifier(self.settings)
 
@@ -274,6 +279,10 @@ class PlacementTrackerRunner:
 
                     opp_data["email_received_at"] = formatted_date
                     opp_data["last_update_timestamp"] = utc_now_iso()
+
+                    # Phase 5: Eligibility Filter
+                    eligibility_status = evaluate_eligibility(opp_data, user_profile)
+                    opp_data["eligibility_status"] = eligibility_status
 
                     # Phase 1: Insert or update drive (not create duplicate)
                     opp_id, created = database.insert_or_update_opportunity(

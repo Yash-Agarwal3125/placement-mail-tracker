@@ -52,12 +52,12 @@ class TestOpportunityToSheetRow:
 
     def test_column_count_is_18(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        assert len(row) == 18, f"Expected 18 columns, got {len(row)}"
+        assert len(row) == 19, f"Expected 19 columns, got {len(row)}"
         assert len(row) == len(ACTIVE_OPP_HEADERS)
 
     def test_gmail_link_generated_from_thread_id(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        email_col = row[16]  # "Open Email" column
+        email_col = row[17]  # "Open Email" column
         assert "HYPERLINK" in email_col
         assert "thread_ms_001" in email_col
         assert "mail.google.com" in email_col
@@ -65,13 +65,13 @@ class TestOpportunityToSheetRow:
     def test_gmail_link_from_message_id_when_no_thread(self):
         opp = self._sample_opp(source_thread_id=None)
         row = opportunity_to_sheet_row(opp)
-        email_col = row[16]
+        email_col = row[17]
         assert "msg_ms_001" in email_col
 
     def test_no_link_when_no_ids(self):
         opp = self._sample_opp(source_email_id=None, source_thread_id=None)
         row = opportunity_to_sheet_row(opp)
-        assert row[16] == ""
+        assert row[17] == ""
 
     def test_company_name_in_row(self):
         row = opportunity_to_sheet_row(self._sample_opp())
@@ -89,7 +89,7 @@ class TestOpportunityToSheetRow:
         opp = self._sample_opp()
         del opp["my_status"]
         row = opportunity_to_sheet_row(opp)
-        assert row[13] == "NOT_APPLIED"
+        assert row[14] == "NOT_APPLIED"
 
 
 # ===================================================================
@@ -170,7 +170,7 @@ class TestCompanyToSheetRow:
 
 class TestHeaders:
     def test_active_opp_headers_count(self):
-        assert len(ACTIVE_OPP_HEADERS) == 18
+        assert len(ACTIVE_OPP_HEADERS) == 19
 
     def test_company_headers_count(self):
         assert len(COMPANY_HISTORY_HEADERS) == 6

@@ -439,7 +439,7 @@ class TestEndToEnd:
         all_opps = db_manager.fetch_active_opportunities()
         for opp in all_opps:
             row = opportunity_to_sheet_row(opp)
-            email_col = row[16]
+            email_col = row[17]
             # All drives have source_email_id or source_thread_id
             if opp.get("source_thread_id") or opp.get("source_email_id"):
                 assert "HYPERLINK" in email_col or email_col == ""

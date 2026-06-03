@@ -202,7 +202,8 @@ class DatabaseManager:
                 action_required TEXT,
                 email_classification TEXT,
                 my_status TEXT NOT NULL DEFAULT 'NOT_APPLIED',
-                next_event_date TEXT
+                next_event_date TEXT,
+                eligibility_status TEXT NOT NULL DEFAULT 'MANUAL_REVIEW'
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -749,7 +750,7 @@ class DatabaseManager:
                 current_status, status_history, last_update_timestamp,
                 email_received_at, drive_id, source_thread_id,
                 action_required, email_classification, my_status,
-                next_event_date
+                next_event_date, eligibility_status
             )
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
@@ -760,7 +761,7 @@ class DatabaseManager:
                 :current_status, :status_history, :last_update_timestamp,
                 :email_received_at, :drive_id, :source_thread_id,
                 :action_required, :email_classification, :my_status,
-                :next_event_date
+                :next_event_date, :eligibility_status
             );
             """,
             values,
@@ -811,7 +812,8 @@ class DatabaseManager:
                 source_thread_id = COALESCE(:source_thread_id, source_thread_id),
                 action_required = COALESCE(:action_required, action_required),
                 email_classification = COALESCE(:email_classification, email_classification),
-                next_event_date = COALESCE(:next_event_date, next_event_date)
+                next_event_date = COALESCE(:next_event_date, next_event_date),
+                eligibility_status = COALESCE(:eligibility_status, eligibility_status)
             WHERE id = :id;
             """,
             values,
@@ -836,6 +838,7 @@ class DatabaseManager:
             "email_classification": "TEXT",
             "my_status": "TEXT NOT NULL DEFAULT 'NOT_APPLIED'",
             "next_event_date": "TEXT",
+            "eligibility_status": "TEXT NOT NULL DEFAULT 'MANUAL_REVIEW'",
         }
 
         for col_name, col_def in new_columns.items():
@@ -895,7 +898,7 @@ class DatabaseManager:
         for fld in OPPORTUNITY_FIELDS + (
             "current_status", "status_history", "last_update_timestamp",
             "email_received_at", "action_required", "email_classification",
-            "my_status", "next_event_date",
+            "my_status", "next_event_date", "eligibility_status",
         ):
             if fld in {"company_name", "role"}:
                 continue
@@ -906,6 +909,8 @@ class DatabaseManager:
                 normalized[fld] = value if value else "[]"
             elif fld == "my_status":
                 normalized[fld] = value if value else "NOT_APPLIED"
+            elif fld == "eligibility_status":
+                normalized[fld] = value if value else "MANUAL_REVIEW"
             else:
                 normalized[fld] = _normalize_scalar(value)
 
