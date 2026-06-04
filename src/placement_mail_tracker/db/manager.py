@@ -538,7 +538,7 @@ class DatabaseManager:
 
     def fetch_active_drives_only(self) -> list[dict[str, Any]]:
         """Phase 9: Return only drives with active statuses."""
-        active_statuses = ("OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR")
+        active_statuses = ("OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR", "SELECTED", "OFFER_RECEIVED")
         placeholders = ", ".join("?" for _ in active_statuses)
         rows = self.connection.execute(
             f"""

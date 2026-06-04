@@ -2,7 +2,7 @@
 name = "placement-mail-tracker"
 version = "0.1.0"
 description = "Starter project for tracking placement and internship emails."
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 [build-system]
 requires = ["setuptools>=68"]

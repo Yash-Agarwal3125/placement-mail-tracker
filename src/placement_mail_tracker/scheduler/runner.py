@@ -28,7 +28,7 @@ from placement_mail_tracker.extraction.rule_engine import (
 )
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
 from placement_mail_tracker.config.user_profile import UserProfile
-from placement_mail_tracker.gemini.extractor import GeminiExtractor
+from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
 from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.models.placement_record import PlacementRecord
@@ -226,7 +226,7 @@ class PlacementTrackerRunner:
                 if rule_result.needs_gemini:
                     # Fall back to Gemini for missing critical fields
                     logger.info("Rule extraction incomplete; calling Gemini")
-                    extracted = extractor.extract(msg)
+                    extracted = extractor.extract_from_email(msg)
                     if not extracted:
                         raise ValueError("Gemini extraction returned empty results")
 
@@ -282,7 +282,8 @@ class PlacementTrackerRunner:
 
                     # Phase 5: Eligibility Filter
                     eligibility_status = evaluate_eligibility(opp_data, user_profile)
-                    opp_data["eligibility_status"] = eligibility_status
+                    if eligibility_status != "MANUAL_REVIEW":
+                        opp_data["eligibility_status"] = eligibility_status
 
                     # Feature 8: Priority Scoring
                     from placement_mail_tracker.utils.scoring import compute_priority

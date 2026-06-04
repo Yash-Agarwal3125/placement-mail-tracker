@@ -2,4 +2,4 @@ Metadata-Version: 2.4
 Name: placement-mail-tracker
 Version: 0.1.0
 Summary: Starter project for tracking placement and internship emails.
-Requires-Python: >=3.12
+Requires-Python: >=3.10
