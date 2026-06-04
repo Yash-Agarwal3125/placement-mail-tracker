@@ -15,10 +15,12 @@ import sys
 from pathlib import Path
 
 from placement_mail_tracker.config.settings import get_settings
+from placement_mail_tracker.config.validator import ConfigValidator
 from placement_mail_tracker.db.connection import get_connection
 from placement_mail_tracker.db.schema import create_tables
 from placement_mail_tracker.scheduler.runner import run_once
 from placement_mail_tracker.utils.logging_config import setup_logging
+from placement_mail_tracker.utils.lock_manager import SingleInstanceLock
 
 logger = logging.getLogger("placement_mail_tracker.main")
 
@@ -35,21 +37,34 @@ def main() -> int:
     logger.info("Environment: %s", settings.app_env)
     logger.info("Database URL: %s", settings.database_url)
 
+    # 1b. Run startup validation checks
+    validator = ConfigValidator(settings)
+    validator.run_all_checks()
+    validator.print_report()
+    
+    if not validator.is_healthy():
+        logger.critical("Startup aborted due to critical configuration errors. Please check the health report above.")
+        return 1
+
     try:
-        # 2. Establish connection and create SQLite tables atomically
-        db_path = settings.database_path
-        logger.info("Connecting to SQLite database: %s", db_path)
-        with get_connection(db_path) as connection:
-            create_tables(connection)
-            
-            # 3. Execute the full E2E orchestration pipeline
-            run_once(connection, settings)
+        with SingleInstanceLock(lock_file="data/tracker.lock"):
+            # 2. Establish connection and create SQLite tables atomically
+            db_path = settings.database_path
+            logger.info("Connecting to SQLite database: %s", db_path)
+            with get_connection(db_path) as connection:
+                create_tables(connection)
+                
+                # 3. Execute the full E2E orchestration pipeline
+                run_once(connection, settings)
 
         logger.info("==================================================")
         logger.info("SUCCESS: SYNC CYCLE COMPLETED")
         logger.info("==================================================")
         return 0
 
+    except SystemExit:
+        # Expected exit from SingleInstanceLock if another instance is running
+        return 0
     except Exception as error:
         logger.critical("Sync cycle failed due to an unhandled error: %s", error, exc_info=True)
         logger.info("==================================================")
