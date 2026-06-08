@@ -12,14 +12,9 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
-from unittest.mock import patch
-
-import pytest
 
 from placement_mail_tracker.db.manager import DatabaseManager
-
 
 # ===================================================================
 # Insert / Update
@@ -237,7 +232,11 @@ class TestRetryQueue:
         )
 
         rows = db_manager.connection.execute(
-            "SELECT gmail_message_id FROM processed_emails WHERE processed_status = 'PENDING_EXTRACTION';"
+            """
+            SELECT gmail_message_id
+            FROM processed_emails
+            WHERE processed_status = 'PENDING_EXTRACTION';
+            """
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["gmail_message_id"] == "retry_001"

@@ -9,14 +9,11 @@ Provides:
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
-
 
 # ---------------------------------------------------------------------------
 # Core Database Fixtures

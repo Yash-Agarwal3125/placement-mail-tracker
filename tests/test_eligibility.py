@@ -1,8 +1,10 @@
 """Tests for Phase 2, 3, 6, 7: Eligibility Engine."""
 
 import pytest
+
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
+
 
 @pytest.fixture
 def base_profile():

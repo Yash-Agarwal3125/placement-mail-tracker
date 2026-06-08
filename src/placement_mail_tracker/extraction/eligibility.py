@@ -2,6 +2,7 @@
 
 import logging
 import re
+
 from rapidfuzz import fuzz
 
 from placement_mail_tracker.config.user_profile import UserProfile

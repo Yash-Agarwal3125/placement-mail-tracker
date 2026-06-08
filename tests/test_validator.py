@@ -92,18 +92,60 @@ def test_run_all_checks_healthy(monkeypatch, tmp_path: Path):
     db_file.touch()
 
     # Modify settings instance to point to our temp paths
-    settings = Settings()
+    settings = Settings(DATABASE_URL=f"sqlite:///{db_file}")
     settings.google_sheets_credentials_file = str(creds_file)
-    settings.database_path = str(db_file)
     
     validator = ConfigValidator(settings)
     
     # Patch the .env check path specifically
-    monkeypatch.setattr(validator, "validate_file", lambda f, d, is_critical=True: validator.results.append(
-        __import__('placement_mail_tracker.config.validator', fromlist=['ValidationResult']).config.validator.ValidationResult("PASS", "Fake pass", True)
-    ))
+    from placement_mail_tracker.config.validator import ValidationResult
+
+    monkeypatch.setattr(
+        validator,
+        "validate_file",
+        lambda *_args, **_kwargs: validator.results.append(
+            ValidationResult("PASS", "Fake pass", True)
+        ),
+    )
     
     validator.run_all_checks()
     
     # It should be healthy since we mocked the files and env vars
     assert validator.is_healthy() is True
+
+
+def test_production_validation_requires_oauth_files(tmp_path: Path):
+    settings = Settings(
+        APP_ENV="production",
+        GEMINI_API_KEY="fake_key",
+        GOOGLE_SHEET_ID="fake_sheet",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
+        GMAIL_CREDENTIALS_FILE=str(tmp_path / "missing_gmail_credentials.json"),
+        GMAIL_TOKEN_FILE=str(tmp_path / "missing_gmail_token.json"),
+        GOOGLE_SHEETS_CREDENTIALS_FILE=str(tmp_path / "missing_sheets_credentials.json"),
+        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "missing_sheets_token.json"),
+    )
+    validator = ConfigValidator(settings)
+
+    validator.run_all_checks()
+
+    assert validator.is_healthy() is False
+    assert any(result.component == "gmail" for result in validator.errors())
+    assert any(result.component == "sheets" for result in validator.errors())
+
+
+def test_development_validation_warns_for_missing_oauth_files(tmp_path: Path):
+    settings = Settings(
+        APP_ENV="development",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
+        GMAIL_CREDENTIALS_FILE=str(tmp_path / "missing_gmail_credentials.json"),
+        GMAIL_TOKEN_FILE=str(tmp_path / "missing_gmail_token.json"),
+        GOOGLE_SHEETS_CREDENTIALS_FILE=str(tmp_path / "missing_sheets_credentials.json"),
+        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "missing_sheets_token.json"),
+    )
+    validator = ConfigValidator(settings)
+
+    validator.run_all_checks()
+
+    assert validator.is_healthy() is True
+    assert any(result.component == "gmail" for result in validator.warnings())

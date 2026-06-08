@@ -20,7 +20,6 @@ from placement_mail_tracker.extraction.rule_engine import (
     normalize_company_name,
 )
 
-
 # ===================================================================
 # Phase 13: classify_email
 # ===================================================================
@@ -240,7 +239,7 @@ class TestExtractFromEmail:
         result = extract_from_email(subject, body)
         assert result.company_name is not None
         assert result.role is not None
-        # If both company_name and role exist and a status/classification is found, needs_gemini is False
+        # Complete company/role/status extraction should avoid Gemini.
         if result.email_classification != "IRRELEVANT" or result.current_status != "OPEN":
             assert result.needs_gemini is False
 

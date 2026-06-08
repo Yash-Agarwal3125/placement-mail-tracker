@@ -94,8 +94,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     # Backfill drive IDs for existing records without one
     from placement_mail_tracker.db.manager import generate_drive_id
+
     null_drives = conn.execute(
-        "SELECT id, company_name, role, internship_or_fulltime FROM opportunities WHERE drive_id IS NULL;"
+        """
+        SELECT id, company_name, role, internship_or_fulltime
+        FROM opportunities
+        WHERE drive_id IS NULL;
+        """
     ).fetchall()
 
     for row in null_drives:

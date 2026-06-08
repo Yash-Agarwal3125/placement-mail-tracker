@@ -6,6 +6,7 @@ It uses PID liveness checking to safely overwrite stale locks left behind by cra
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -20,13 +21,33 @@ logger = logging.getLogger(__name__)
 
 
 def is_process_alive(pid: int) -> bool:
-    """Check if a process is alive using a cross-platform OS signal (works on Windows Python >=3.2)."""
+    """Check whether a process is alive without disturbing it."""
+    if pid <= 0:
+        return False
+
+    if os.name == "nt":
+        return _is_process_alive_windows(pid)
+
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     else:
         return True
+
+
+def _is_process_alive_windows(pid: int) -> bool:
+    """Check process liveness using Win32 OpenProcess."""
+    process_query_limited_information = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(
+        process_query_limited_information,
+        False,
+        pid,
+    )
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
 
 
 class SingleInstanceLock:
@@ -61,7 +82,10 @@ class SingleInstanceLock:
                 pid = None
 
             if pid is not None and is_process_alive(pid):
-                logger.warning("[LOCK] Existing active process detected (PID: %s). Exiting gracefully.", pid)
+                logger.warning(
+                    "[LOCK] Existing active process detected (PID: %s). Exiting gracefully.",
+                    pid,
+                )
                 sys.exit(0)
             else:
                 logger.info("[LOCK] Removing stale lock from dead process (PID: %s)", pid)

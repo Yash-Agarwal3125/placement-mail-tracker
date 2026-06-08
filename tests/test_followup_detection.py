@@ -21,7 +21,6 @@ from placement_mail_tracker.db.manager import (
 )
 from placement_mail_tracker.extraction.rule_engine import normalize_company_name
 
-
 # ===================================================================
 # Thread-based follow-up detection
 # ===================================================================
@@ -159,14 +158,22 @@ class TestDriveIdGeneration:
     """Drive IDs should encode company, year, role, and category."""
 
     def test_drive_id_format_intern(self):
-        drive_id = generate_drive_id("Microsoft", role="Software Engineer Intern", category="internship")
+        drive_id = generate_drive_id(
+            "Microsoft",
+            role="Software Engineer Intern",
+            category="internship",
+        )
         parts = drive_id.split("_")
         assert "MICROSOFT" in parts[0]
         assert parts[1].isdigit()  # year
         assert "INTERN" in drive_id
 
     def test_drive_id_format_fte(self):
-        drive_id = generate_drive_id("Dell Technologies", role="Cloud Engineer", category="full_time")
+        drive_id = generate_drive_id(
+            "Dell Technologies",
+            role="Cloud Engineer",
+            category="full_time",
+        )
         assert "DELL" in drive_id.upper()
         assert "FTE" in drive_id
 

@@ -538,7 +538,15 @@ class DatabaseManager:
 
     def fetch_active_drives_only(self) -> list[dict[str, Any]]:
         """Phase 9: Return only drives with active statuses."""
-        active_statuses = ("OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR", "SELECTED", "OFFER_RECEIVED")
+        active_statuses = (
+            "OPEN",
+            "REGISTERED",
+            "SHORTLISTED",
+            "OA",
+            "INTERVIEW",
+            "HR",
+            "SELECTED",
+        )
         placeholders = ", ".join("?" for _ in active_statuses)
         rows = self.connection.execute(
             f"""
@@ -572,10 +580,6 @@ class DatabaseManager:
     def get_dashboard_metrics(self) -> dict[str, Any]:
         """Compute dashboard metrics (Phase 10)."""
         all_opps = self.fetch_active_opportunities()
-
-        now = datetime.now()
-        week_start = now - timedelta(days=now.weekday())
-        week_end = week_start + timedelta(days=7)
 
         active_statuses = {"OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR"}
 
@@ -959,7 +963,13 @@ class DatabaseManager:
 
         # Also track status changes
         if existing.get("current_status") != incoming.get("current_status"):
-            changes.append(("current_status", existing.get("current_status"), incoming.get("current_status")))
+            changes.append(
+                (
+                    "current_status",
+                    existing.get("current_status"),
+                    incoming.get("current_status"),
+                )
+            )
 
         return changes
 
@@ -982,15 +992,32 @@ class DatabaseManager:
             "SELECT COUNT(*) FROM opportunities WHERE company_name = ?", (normalized,)
         ).fetchone()[0]
         active = self.connection.execute(
-            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status NOT IN ('REJECTED', 'OFFER_RECEIVED', 'EXPIRED', 'WITHDRAWN')",
+            """
+            SELECT COUNT(*)
+            FROM opportunities
+            WHERE company_name = ?
+              AND current_status NOT IN (
+                  'REJECTED', 'OFFER_RECEIVED', 'EXPIRED', 'WITHDRAWN'
+              )
+            """,
             (normalized,),
         ).fetchone()[0]
         selected = self.connection.execute(
-            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status IN ('SELECTED', 'OFFER_RECEIVED')",
+            """
+            SELECT COUNT(*)
+            FROM opportunities
+            WHERE company_name = ?
+              AND current_status IN ('SELECTED', 'OFFER_RECEIVED')
+            """,
             (normalized,),
         ).fetchone()[0]
         rejected = self.connection.execute(
-            "SELECT COUNT(*) FROM opportunities WHERE company_name = ? AND current_status = 'REJECTED'",
+            """
+            SELECT COUNT(*)
+            FROM opportunities
+            WHERE company_name = ?
+              AND current_status = 'REJECTED'
+            """,
             (normalized,),
         ).fetchone()[0]
 

@@ -18,22 +18,22 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
+from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
 from placement_mail_tracker.config.settings import Settings
+from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
+from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
 from placement_mail_tracker.extraction.rule_engine import (
     classify_email,
     detect_status_from_text,
-    extract_from_email as rule_extract,
     normalize_company_name,
 )
-from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
-from placement_mail_tracker.config.user_profile import UserProfile
-from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
+from placement_mail_tracker.extraction.rule_engine import (
+    extract_from_email as rule_extract,
+)
 from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
-from placement_mail_tracker.models.placement_record import PlacementRecord
-from placement_mail_tracker.notifications.email_notifier import EmailNotifier
-from placement_mail_tracker.notifications.telegram import TelegramNotifier
+from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
 from placement_mail_tracker.sheets.client import SheetsClient
 from placement_mail_tracker.utils.deduplication import find_best_match
 from placement_mail_tracker.utils.time import utc_now_iso
@@ -52,7 +52,9 @@ def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
         "company_name": extraction.get("company_name"),
         "role": extraction.get("role"),
         "internship_or_fulltime": extraction.get("opportunity_type") or extraction.get("category"),
-        "package_or_stipend": extraction.get("package") or extraction.get("stipend") or extraction.get("ctc"),
+        "package_or_stipend": (
+            extraction.get("package") or extraction.get("stipend") or extraction.get("ctc")
+        ),
         "eligibility": extraction.get("eligibility"),
         "cgpa_requirement": extraction.get("cgpa_requirement"),
         "branches_allowed": extraction.get("eligible_branches"),
@@ -101,11 +103,23 @@ class PlacementTrackerRunner:
     connection: sqlite3.Connection
     settings: Settings
 
-    def run_once(self) -> None:
+    def run_once(self) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
-        logger.info("Initializing database manager and creating tables")
-        database = DatabaseManager(connection=self.connection)
-        database.create_tables()
+        report = RunReport(environment=self.settings.environment)
+
+        try:
+            logger.info("Initializing database manager and creating tables")
+            database = DatabaseManager(connection=self.connection)
+            database.create_tables()
+        except Exception as database_error:
+            logger.exception("Database initialization failed: %s", database_error)
+            report.mark_component(
+                "database",
+                False,
+                str(database_error),
+                critical=True,
+            )
+            return report
 
         logger.info("Initializing API clients")
         gmail_client = GmailClient(self.settings)
@@ -114,7 +128,6 @@ class PlacementTrackerRunner:
         # Load user profile for eligibility filtering
         user_profile = UserProfile.load()
         sheets_client = SheetsClient(self.settings)
-        notifier = TelegramNotifier(self.settings)
 
         # Daily digest (if configured)
         try:
@@ -130,7 +143,11 @@ class PlacementTrackerRunner:
 
         # Retry pending emails first
         pending_records = self.connection.execute(
-            "SELECT gmail_message_id FROM processed_emails WHERE processed_status = 'PENDING_EXTRACTION';"
+            """
+            SELECT gmail_message_id
+            FROM processed_emails
+            WHERE processed_status = 'PENDING_EXTRACTION';
+            """
         ).fetchall()
         pending_ids = [row[0] for row in pending_records]
         if pending_ids:
@@ -161,7 +178,21 @@ class PlacementTrackerRunner:
                         raise
         except Exception as fetch_error:
             logger.error("Could not fetch messages from Gmail API: %s", fetch_error)
-            return
+            report.mark_component(
+                "gmail",
+                False,
+                str(fetch_error),
+                critical=self.settings.is_production,
+            )
+            return report
+
+        if gmail_client.last_error:
+            report.mark_component(
+                "gmail",
+                False,
+                gmail_client.last_error,
+                critical=self.settings.is_production,
+            )
 
         logger.info("Fetched %s candidate messages", len(messages))
 
@@ -170,6 +201,8 @@ class PlacementTrackerRunner:
         error_count = 0
         gemini_calls = 0
         rule_only_count = 0
+        drives_created = 0
+        drives_updated = 0
 
         for msg in messages:
             msg_id = msg.get("message_id") or msg.get("id")
@@ -178,7 +211,13 @@ class PlacementTrackerRunner:
                 continue
 
             already_processed = self.connection.execute(
-                "SELECT id FROM processed_emails WHERE gmail_message_id = ? AND processed_status IN ('processed', 'skipped') LIMIT 1;",
+                """
+                SELECT id
+                FROM processed_emails
+                WHERE gmail_message_id = ?
+                  AND processed_status IN ('processed', 'skipped')
+                LIMIT 1;
+                """,
                 (msg_id,),
             ).fetchone()
 
@@ -199,7 +238,11 @@ class PlacementTrackerRunner:
             decision = is_placement_mail(subject=subject, sender=sender, body=body)
 
             if not decision.is_placement:
-                logger.info("Email %s not relevant; skipping (classification=%s)", msg_id, classification)
+                logger.info(
+                    "Email %s not relevant; skipping (classification=%s)",
+                    msg_id,
+                    classification,
+                )
                 database.log_processed_email(
                     gmail_message_id=msg_id,
                     subject=subject,
@@ -230,7 +273,9 @@ class PlacementTrackerRunner:
                     if not extracted:
                         raise ValueError("Gemini extraction returned empty results")
 
-                    extracted_dict = asdict(extracted) if not isinstance(extracted, dict) else extracted
+                    extracted_dict = (
+                        asdict(extracted) if not isinstance(extracted, dict) else extracted
+                    )
                     opp_data = map_extraction_to_opportunity(extracted_dict)
                     gemini_calls += 1
 
@@ -297,9 +342,17 @@ class PlacementTrackerRunner:
                         email_classification=classification,
                     )
                     action = "inserted" if created else "updated"
+                    if created:
+                        drives_created += 1
+                    else:
+                        drives_updated += 1
                     logger.info(
                         "[DB] Drive %s: %s - %s (classification=%s, priority=%s)",
-                        action, opp_data["company_name"], opp_data["role"], classification, opp_data["priority"]
+                        action,
+                        opp_data["company_name"],
+                        opp_data["role"],
+                        classification,
+                        opp_data["priority"],
                     )
 
                 database.log_processed_email(
@@ -347,6 +400,20 @@ class PlacementTrackerRunner:
                         raise
         except Exception as sync_error:
             logger.error("[SYNC] Google Sheets Write Failed: %s", sync_error)
+            report.mark_component(
+                "sheets",
+                False,
+                str(sync_error),
+                critical=self.settings.is_production,
+            )
+
+        if not sheets_sync_successful and sheets_client.sync.last_error:
+            report.mark_component(
+                "sheets",
+                False,
+                sheets_client.sync.last_error,
+                critical=self.settings.is_production,
+            )
 
         # Feature 2 & 3: Smart Alerting
         logger.info("Checking for upcoming deadlines and events")
@@ -356,9 +423,14 @@ class PlacementTrackerRunner:
             alert_generator.check_and_send_alerts()
         except Exception as e:
             logger.exception("Alert generation failed: %s", e)
+            report.mark_component(
+                "notifications",
+                False,
+                str(e),
+                critical=False,
+            )
 
         # Summary
-        total_emails = len(messages)
         gemini_savings = (
             f"{(rule_only_count / (rule_only_count + gemini_calls) * 100):.0f}%"
             if (rule_only_count + gemini_calls) > 0
@@ -372,7 +444,22 @@ class PlacementTrackerRunner:
             gemini_calls, rule_only_count, gemini_savings,
         )
 
+        report.metrics = SyncMetrics(
+            processed_messages=processed_count,
+            skipped_messages=skipped_count,
+            error_messages=error_count,
+            drives_created=drives_created,
+            drives_updated=drives_updated,
+            gemini_calls=gemini_calls,
+            rule_only=rule_only_count,
+        )
 
-def run_once(connection: sqlite3.Connection, settings: Settings) -> None:
+        if error_count:
+            report.add_warning(f"{error_count} email(s) failed processing")
+
+        return report
+
+
+def run_once(connection: sqlite3.Connection, settings: Settings) -> RunReport:
     """Run one full sync cycle."""
-    PlacementTrackerRunner(connection=connection, settings=settings).run_once()
+    return PlacementTrackerRunner(connection=connection, settings=settings).run_once()

@@ -241,51 +241,110 @@ def detect_status_from_text(subject: str, body: str = "") -> str:
 
 # CTC patterns like "12 LPA", "12.5 Lakhs Per Annum", "Rs. 3,60,000"
 _CTC_PATTERNS = [
-    re.compile(r"(?:ctc|package|salary)\s*[:\-]?\s*(?:rs\.?\s*)?(\d[\d,\.]*\s*(?:lpa|lakhs?\s*(?:per\s*annum)?|crore|cr))", re.IGNORECASE),
-    re.compile(r"(?:ctc|package|salary)\s*[:\-]?\s*(?:inr|rs\.?)\s*(\d[\d,\.]+(?:\s*p\.?a\.?)?)", re.IGNORECASE),
+    re.compile(
+        r"(?:ctc|package|salary)\s*[:\-]?\s*(?:rs\.?\s*)?"
+        r"(\d[\d,\.]*\s*(?:lpa|lakhs?\s*(?:per\s*annum)?|crore|cr))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:ctc|package|salary)\s*[:\-]?\s*(?:inr|rs\.?)\s*"
+        r"(\d[\d,\.]+(?:\s*p\.?a\.?)?)",
+        re.IGNORECASE,
+    ),
 ]
 
 # Stipend patterns like "50,000 per month", "50K/month"
 _STIPEND_PATTERNS = [
-    re.compile(r"(?:stipend|allowance|monthly)\s*[:\-]?\s*(?:rs\.?\s*)?(\d[\d,\.]*\s*(?:per\s*month|p\.?m\.?|/\s*month|pm))", re.IGNORECASE),
-    re.compile(r"(?:stipend|allowance)\s*[:\-]?\s*(?:inr|rs\.?)\s*(\d[\d,\.]+)", re.IGNORECASE),
+    re.compile(
+        r"(?:stipend|allowance|monthly)\s*[:\-]?\s*(?:rs\.?\s*)?"
+        r"(\d[\d,\.]*\s*(?:per\s*month|p\.?m\.?|/\s*month|pm))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:stipend|allowance)\s*[:\-]?\s*(?:inr|rs\.?)\s*(\d[\d,\.]+)",
+        re.IGNORECASE,
+    ),
 ]
 
 # Deadline patterns
 _DEADLINE_PATTERNS = [
-    re.compile(r"(?:deadline|last\s*date|register\s*(?:by|before)|apply\s*(?:by|before))\s*[:\-]?\s*(\d{1,2}[\s\-/]\w+[\s\-/]\d{2,4}(?:\s+\d{1,2}[:\.]?\d{0,2}\s*(?:am|pm)?)?)", re.IGNORECASE),
-    re.compile(r"(?:deadline|last\s*date)\s*[:\-]?\s*(\d{1,2}\s+\w+\s+\d{4})", re.IGNORECASE),
+    re.compile(
+        r"(?:deadline|last\s*date|register\s*(?:by|before)|apply\s*(?:by|before))"
+        r"\s*[:\-]?\s*"
+        r"(\d{1,2}[\s\-/]\w+[\s\-/]\d{2,4}"
+        r"(?:\s+\d{1,2}[:\.]?\d{0,2}\s*(?:am|pm)?)?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:deadline|last\s*date)\s*[:\-]?\s*(\d{1,2}\s+\w+\s+\d{4})",
+        re.IGNORECASE,
+    ),
 ]
 
 # Location patterns
 _LOCATION_PATTERNS = [
-    re.compile(r"(?:location|work\s*location|place\s*of\s*posting|city)\s*[:\-]?\s*([A-Z][a-z]+(?:[\s,/]+[A-Z][a-z]+){0,3})", re.IGNORECASE),
+    re.compile(
+        r"(?:location|work\s*location|place\s*of\s*posting|city)\s*[:\-]?\s*"
+        r"([A-Z][a-z]+(?:[\s,/]+[A-Z][a-z]+){0,3})",
+        re.IGNORECASE,
+    ),
 ]
 
 # Registration link patterns
 _LINK_PATTERNS = [
-    re.compile(r"(?:registration\s*link|apply\s*(?:here|link|at)|register\s*(?:here|at))\s*[:\-]?\s*(https?://\S+)", re.IGNORECASE),
+    re.compile(
+        r"(?:registration\s*link|apply\s*(?:here|link|at)|register\s*(?:here|at))"
+        r"\s*[:\-]?\s*(https?://\S+)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(https?://forms\.(?:gle|google\.com)/\S+)", re.IGNORECASE),
 ]
 
 # Role patterns
 _ROLE_PATTERNS = [
-    re.compile(r"(?:role|position|designation|job\s*title)\s*[:\-]?\s*(.+?)(?:\n|$)", re.IGNORECASE),
-    re.compile(r"(?:hiring\s*for|opening\s*for|vacancy\s*for)\s+(.+?)(?:\n|,|$)", re.IGNORECASE),
+    re.compile(
+        r"(?:role|position|designation|job\s*title)\s*[:\-]?\s*(.+?)(?:\n|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:hiring\s*for|opening\s*for|vacancy\s*for)\s+(.+?)(?:\n|,|$)",
+        re.IGNORECASE,
+    ),
 ]
 
 # Category (internship/fulltime) patterns
 _CATEGORY_PATTERNS = [
-    (re.compile(r"\b(intern(?:ship)?|summer\s*intern(?:ship)?)\b", re.IGNORECASE), "internship"),
-    (re.compile(r"\b(full[\s\-]*time|fte|ppo|pre[\s\-]*placement\s*offer)\b", re.IGNORECASE), "full_time"),
+    (
+        re.compile(r"\b(intern(?:ship)?|summer\s*intern(?:ship)?)\b", re.IGNORECASE),
+        "internship",
+    ),
+    (
+        re.compile(
+            r"\b(full[\s\-]*time|fte|ppo|pre[\s\-]*placement\s*offer)\b",
+            re.IGNORECASE,
+        ),
+        "full_time",
+    ),
     (re.compile(r"\b(contract|freelance|part[\s\-]*time)\b", re.IGNORECASE), "contract"),
 ]
 
 # Company name extraction from subjects
 _COMPANY_FROM_SUBJECT = [
-    re.compile(r"(?:campus\s*(?:drive|hiring|recruitment|placement)\s*[–—\-:\|]\s*)(.+?)(?:\s*[–—\-:\|]|\s*$)", re.IGNORECASE),
-    re.compile(r"^(.+?)\s*[–—\-:\|]\s*(?:campus|placement|hiring|recruitment|internship)", re.IGNORECASE),
-    re.compile(r"(?:placement\s*(?:drive|opportunity)\s*[–—\-:\|]\s*)(.+?)(?:\s*[–—\-:\|]|\s*$)", re.IGNORECASE),
+    re.compile(
+        r"(?:campus\s*(?:drive|hiring|recruitment|placement)\s*[–—\-:\|]\s*)"
+        r"(.+?)(?:\s*[–—\-:\|]|\s*$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(.+?)\s*[–—\-:\|]\s*"
+        r"(?:campus|placement|hiring|recruitment|internship)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:placement\s*(?:drive|opportunity)\s*[–—\-:\|]\s*)"
+        r"(.+?)(?:\s*[–—\-:\|]|\s*$)",
+        re.IGNORECASE,
+    ),
 ]
 
 

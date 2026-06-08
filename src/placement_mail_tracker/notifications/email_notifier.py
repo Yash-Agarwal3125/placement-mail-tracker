@@ -23,7 +23,9 @@ class EmailNotifier:
         self.smtp_email = settings.smtp_email.strip()
         self.smtp_app_password = settings.smtp_app_password.strip()
         # Feature 7: Personal Email Delivery
-        self.email_receiver = (settings.notification_email.strip() or settings.email_receiver.strip())
+        self.email_receiver = (
+            settings.notification_email.strip() or settings.email_receiver.strip()
+        )
 
     @property
     def is_configured(self) -> bool:

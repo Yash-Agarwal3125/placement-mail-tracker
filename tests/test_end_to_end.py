@@ -13,7 +13,6 @@ Chartered, and HPE.  Verifies:
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,7 +24,6 @@ from placement_mail_tracker.extraction.rule_engine import (
     normalize_company_name,
 )
 from placement_mail_tracker.sheets.sheets_sync import opportunity_to_sheet_row
-
 
 # ===================================================================
 # Realistic VIT CDC email corpus (20+ emails)
@@ -360,7 +358,7 @@ class TestEndToEnd:
     """End-to-end tests processing realistic CDC email corpus."""
 
     def test_microsoft_full_lifecycle(self, db_manager: DatabaseManager):
-        """Microsoft: 5 emails → 1 drive, status OPEN → OA → SHORTLISTED → INTERVIEW → OFFER_RECEIVED."""
+        """Microsoft lifecycle should update one drive across all status emails."""
         ms_emails = [e for e in CDC_EMAILS if e["id"].startswith("ms_")]
         assert len(ms_emails) == 5
 
@@ -402,7 +400,6 @@ class TestEndToEnd:
 
     def test_no_duplicate_drives(self, db_manager: DatabaseManager):
         """Processing all emails should not produce duplicate drives per thread."""
-        thread_ids = set()
         drive_ids_by_thread: dict[str, int] = {}
 
         for email in CDC_EMAILS:
@@ -461,10 +458,13 @@ class TestEndToEnd:
             _process_email(db_manager, email)
 
         all_opps = db_manager.fetch_active_opportunities()
-        company_names = {opp["company_name"] for opp in all_opps}
 
         # Dell should be normalized to "Dell Technologies"
-        dell_opps = [o for o in all_opps if "Dell" in o["company_name"] or "dell" in o["company_name"].lower()]
+        dell_opps = [
+            o
+            for o in all_opps
+            if "Dell" in o["company_name"] or "dell" in o["company_name"].lower()
+        ]
         if dell_opps:
             assert all(o["company_name"] == "Dell Technologies" for o in dell_opps)
 

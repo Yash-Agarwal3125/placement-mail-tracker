@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -91,22 +90,31 @@ class GoogleSheetsSync:
         self.credentials_path = Path(settings.google_sheets_credentials_file)
         self.token_path = Path(settings.google_sheets_token_file)
         self._service = service
+        self.last_error: str | None = None
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
         """Sync all drives, companies, and dashboard to Google Sheets."""
         if not self.settings.google_sheet_id:
+            self.last_error = "GOOGLE_SHEET_ID is missing"
+            if self.settings.is_production:
+                raise SheetsAuthenticationError(self.last_error)
             logger.warning("GOOGLE_SHEET_ID is missing; skipping Google Sheets sync")
             return {"created": 0, "updated": 0, "skipped": 0}
 
         try:
+            self.last_error = None
             self._ensure_tabs_exist()
 
             # Phase 9: Active Opportunities (excludes terminal statuses)
             # Phase 5 (Eligibility Filter): Split by ELIGIBLE vs NOT_ELIGIBLE_*
             active_opps = database.fetch_active_drives_only()
             
-            eligible_opps = [opp for opp in active_opps if opp.get("eligibility_status") == "ELIGIBLE"]
-            filtered_opps = [opp for opp in active_opps if opp.get("eligibility_status") != "ELIGIBLE"]
+            eligible_opps = [
+                opp for opp in active_opps if opp.get("eligibility_status") == "ELIGIBLE"
+            ]
+            filtered_opps = [
+                opp for opp in active_opps if opp.get("eligibility_status") != "ELIGIBLE"
+            ]
 
             self._sync_tab_data(
                 tab_name="Active Opportunities",
@@ -138,9 +146,15 @@ class GoogleSheetsSync:
             self._apply_formatting()
 
         except SheetsAuthenticationError as error:
+            self.last_error = str(error)
+            if self.settings.is_production:
+                raise
             logger.warning("%s", error)
             return {"created": 0, "updated": 0, "skipped": 0}
         except HttpError as error:
+            self.last_error = str(error)
+            if self.settings.is_production:
+                raise
             logger.exception("Unable to sync Google Sheet: %s", error)
             return {"created": 0, "updated": 0, "skipped": 0}
 
@@ -159,7 +173,12 @@ class GoogleSheetsSync:
             for s in spreadsheet.get("sheets", [])
         ]
 
-        required_tabs = ["Active Opportunities", "Filtered Opportunities", "Company History", "Dashboard"]
+        required_tabs = [
+            "Active Opportunities",
+            "Filtered Opportunities",
+            "Company History",
+            "Dashboard",
+        ]
         requests = []
         for tab in required_tabs:
             if tab not in existing_tabs:
@@ -281,7 +300,7 @@ class GoogleSheetsSync:
 
         requests: list[dict[str, Any]] = []
 
-        for tab_name, sheet_id in sheet_ids.items():
+        for _tab_name, sheet_id in sheet_ids.items():
             if sheet_id is None:
                 continue
 
@@ -471,7 +490,10 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
     thread_id = opportunity.get("source_thread_id")
     link_target = thread_id or msg_id
     if link_target:
-        email_link = f'=HYPERLINK("https://mail.google.com/mail/u/0/#inbox/{link_target}", "Open Email")'
+        email_link = (
+            f'=HYPERLINK("https://mail.google.com/mail/u/0/#inbox/{link_target}", '
+            '"Open Email")'
+        )
 
     # Determine CTC vs Stipend
     pkg = _cell(opportunity.get("package_or_stipend"))

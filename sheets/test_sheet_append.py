@@ -1,6 +1,6 @@
+import logging
 import os
 import sys
-import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -89,7 +89,11 @@ def main():
     try:
         spreadsheet = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheets = spreadsheet.get("sheets", [])
-        sheet_names = [s.get("properties", {}).get("title") for s in sheets if s.get("properties", {}).get("title")]
+        sheet_names = [
+            s.get("properties", {}).get("title")
+            for s in sheets
+            if s.get("properties", {}).get("title")
+        ]
         logger.info("Discovered sheet names: %s", sheet_names)
         
         if not sheet_names:
@@ -110,7 +114,11 @@ def main():
             target_sheet_name = env_plural_name
             logger.info("Using .env GOOGLE_SHEETS_NAME: %s", target_sheet_name)
         else:
-            logger.info("Configured sheet '%s' not found. Self-healing fallback to first sheet: '%s'", configured_name, target_sheet_name)
+            logger.info(
+                "Configured sheet '%s' not found. Self-healing fallback to first sheet: '%s'",
+                configured_name,
+                target_sheet_name,
+            )
             
     except Exception as e:
         logger.error("[FAILURE] Failed to retrieve spreadsheet metadata: %s", e)

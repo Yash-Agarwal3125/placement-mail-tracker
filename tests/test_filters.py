@@ -6,15 +6,12 @@ placement emails and rejects irrelevant college-event/club emails.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from placement_mail_tracker.gmail.filters import (
     FilterDecision,
     is_placement_mail,
 )
-
 
 # ---------------------------------------------------------------------------
 # Valid placement email fixtures

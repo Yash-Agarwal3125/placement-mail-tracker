@@ -221,7 +221,6 @@ def calculate_relevance_score(
     # Rule C: Sender domain matches institutional domains
     relaxed_domains = ["vit.ac.in", "vitstudent.ac.in"]
     matched_domains = [dom for dom in relaxed_domains if dom in domain]
-    passed_relaxed_domain = len(matched_domains) > 0
 
     # Final combined filter decision
     is_placement = classic_is_placement or (

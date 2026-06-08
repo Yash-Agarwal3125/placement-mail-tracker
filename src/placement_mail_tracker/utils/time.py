@@ -1,8 +1,7 @@
 """Time-related utility functions."""
 
-from datetime import datetime, timezone
 import logging
-from typing import Optional
+from datetime import UTC, datetime
 
 try:
     from dateutil.parser import parse as date_parse
@@ -20,9 +19,9 @@ def utc_now_iso() -> str:
     >>> utc_now_iso()
     '2026-05-24T12:34:56.789123+00:00'
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
-def parse_datetime_flexible(date_str: str) -> Optional[datetime]:
+def parse_datetime_flexible(date_str: str) -> datetime | None:
     """Parse a flexible date string into a datetime object."""
     if not date_str or not isinstance(date_str, str):
         return None

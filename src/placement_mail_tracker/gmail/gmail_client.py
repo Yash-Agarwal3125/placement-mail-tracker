@@ -134,6 +134,7 @@ class GmailClient:
         self.token_path = Path(settings.gmail_token_file)
         self.scopes = GMAIL_READONLY_SCOPES
         self._service: Resource | None = None
+        self.last_error: str | None = None
 
     def authenticate(self) -> Credentials:
         """Load, refresh, or create OAuth2 credentials for Gmail."""
@@ -200,6 +201,7 @@ class GmailClient:
 
     def _search(self, query: str, max_results: int) -> list[GmailEmail]:
         try:
+            self.last_error = None
             service = self._get_service()
             logger.info("Searching Gmail with query: %s", query)
             response = (
@@ -213,9 +215,15 @@ class GmailClient:
 
             return [self._fetch_message(message_ref["id"]) for message_ref in message_refs]
         except GmailAuthenticationError as error:
+            self.last_error = str(error)
+            if self.settings.is_production:
+                raise
             logger.warning("%s", error)
             return []
         except HttpError as error:
+            self.last_error = str(error)
+            if self.settings.is_production:
+                raise
             logger.exception("Gmail API request failed: %s", error)
             return []
 

@@ -9,15 +9,12 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
-
 from placement_mail_tracker.sheets.sheets_sync import (
     ACTIVE_OPP_HEADERS,
     COMPANY_HISTORY_HEADERS,
     company_to_sheet_row,
     opportunity_to_sheet_row,
 )
-
 
 # ===================================================================
 # opportunity_to_sheet_row

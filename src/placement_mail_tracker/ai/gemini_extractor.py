@@ -216,8 +216,11 @@ Additional rules:
 - opportunity_type should be internship, fulltime, internship_and_fulltime, or null.
 - update_type should summarize the email purpose, such as new_opportunity, deadline_update,
   shortlist, interview_update, oa_update, result_update, reminder, or null.
-- current_status MUST be inferred from the email content. Valid values are exactly one of: NEW, PPT, OA, SHORTLISTED, INTERVIEW, HR, SELECTED, OFFER_RECEIVED, REJECTED.
-- action_required should contain a brief sentence describing any action the user needs to take (e.g., "Submit resume", "Complete registration", "Attend interview"). Return null if no action is needed.
+- current_status MUST be inferred from the email content. Valid values are exactly one of:
+  NEW, PPT, OA, SHORTLISTED, INTERVIEW, HR, SELECTED, OFFER_RECEIVED, REJECTED.
+- action_required should contain a brief sentence describing any action the user needs to take
+  (e.g., "Submit resume", "Complete registration", "Attend interview"). Return null if no
+  action is needed.
 - Return exactly one JSON object with these keys and no extra keys:
 {keys}
 

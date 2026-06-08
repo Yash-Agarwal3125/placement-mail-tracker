@@ -1,10 +1,10 @@
 import json
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from placement_mail_tracker.utils.lock_manager import SingleInstanceLock, is_process_alive
 
 

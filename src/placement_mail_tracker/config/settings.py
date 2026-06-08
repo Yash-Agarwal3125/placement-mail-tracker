@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     digest_send_time: str = Field(default="08:00", alias="DIGEST_SEND_TIME")
 
     sync_interval_hours: int = Field(default=3, alias="SYNC_INTERVAL_HOURS")
+    failure_alert_threshold: int = Field(default=3, alias="FAILURE_ALERT_THRESHOLD")
+    heartbeat_inactivity_hours: float = Field(default=6.0, alias="HEARTBEAT_INACTIVITY_HOURS")
+    system_health_file: str = Field(
+        default="data/system_health.json",
+        alias="SYSTEM_HEALTH_FILE",
+    )
+    heartbeat_file: str = Field(default="data/heartbeat.json", alias="HEARTBEAT_FILE")
+    log_file: str = Field(default="logs/app.log", alias="LOG_FILE")
+    log_max_bytes: int = Field(default=10 * 1024 * 1024, alias="LOG_MAX_BYTES")
+    log_backup_count: int = Field(default=5, alias="LOG_BACKUP_COUNT")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -74,6 +84,31 @@ class Settings(BaseSettings):
         path = Path(self.database_url.replace("sqlite:///", "", 1))
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def environment(self) -> str:
+        """Return normalized application environment."""
+        return self.app_env.strip().lower()
+
+    @property
+    def is_development(self) -> bool:
+        """Return True when running in development mode."""
+        return self.environment == "development"
+
+    @property
+    def is_testing(self) -> bool:
+        """Return True when running in testing mode."""
+        return self.environment == "testing"
+
+    @property
+    def is_production(self) -> bool:
+        """Return True when running in production mode."""
+        return self.environment == "production"
+
+    @property
+    def allowed_environments(self) -> set[str]:
+        """Return supported environment names."""
+        return {"development", "testing", "production"}
 
 
 @lru_cache

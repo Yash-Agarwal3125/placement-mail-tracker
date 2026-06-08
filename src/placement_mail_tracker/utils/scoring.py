@@ -1,7 +1,8 @@
 """Priority scoring logic for Placement Opportunities."""
 
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta
+
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
 from placement_mail_tracker.utils.time import parse_datetime_flexible

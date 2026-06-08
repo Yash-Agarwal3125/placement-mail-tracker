@@ -27,7 +27,10 @@ class PlacementExtraction(BaseModel):
     important_notes: list[str] | None = Field(default=None)
     update_type: str | None = None
     current_status: str | None = None
-    action_required: str | None = Field(default=None, description="Action required by the user, if any.")
+    action_required: str | None = Field(
+        default=None,
+        description="Action required by the user, if any.",
+    )
 
     model_config = ConfigDict(extra="ignore")
 

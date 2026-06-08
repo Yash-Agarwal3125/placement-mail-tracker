@@ -1,13 +1,16 @@
 """Tests for Phase 8, 9: Smart Alerts and Notifications."""
 
-import pytest
 from datetime import datetime, timedelta
-from placement_mail_tracker.config.settings import Settings
+from unittest.mock import Mock
+
+import pytest
+
+from placement_mail_tracker.config.user_profile import UserProfile
+from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
 from placement_mail_tracker.utils.scoring import compute_priority
-from placement_mail_tracker.config.user_profile import UserProfile
-from placement_mail_tracker.db.manager import DatabaseManager
+
 
 @pytest.fixture
 def mock_profile():
@@ -49,8 +52,6 @@ def test_priority_scoring_medium(mock_profile):
         "deadline": (datetime.now() + timedelta(days=10)).isoformat()
     }
     assert compute_priority(opp, mock_profile) == "MEDIUM"
-
-from unittest.mock import Mock
 
 def test_alert_generation_logic():
     # Setup mock

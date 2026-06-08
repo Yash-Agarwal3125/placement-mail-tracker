@@ -19,7 +19,11 @@ Typical usage
 
     config = DeduplicationConfig()
 
-    incoming = {"company_name": "Google", "role": "SWE Intern", "internship_or_fulltime": "internship"}
+    incoming = {
+        "company_name": "Google",
+        "role": "SWE Intern",
+        "internship_or_fulltime": "internship",
+    }
     candidates = [...]  # list[dict] from DatabaseManager.fetch_active_opportunities()
 
     result = find_best_match(incoming, candidates, config=config)

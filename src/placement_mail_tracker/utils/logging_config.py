@@ -1,12 +1,20 @@
 """Central logging setup."""
 
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(
+    level: str = "INFO",
+    *,
+    log_file: str | Path = "logs/app.log",
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+) -> None:
     """Configure console and file logging for the application."""
-    log_dir = Path("logs")
+    log_path = Path(log_file)
+    log_dir = log_path.parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
@@ -14,7 +22,12 @@ def setup_logging(level: str = "INFO") -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(log_dir / "app.log", encoding="utf-8"),
+            RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            ),
         ],
         force=True,
     )

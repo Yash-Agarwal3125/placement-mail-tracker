@@ -2,7 +2,9 @@
 
 import json
 from pathlib import Path
+
 from pydantic import BaseModel, Field
+
 
 class UserProfile(BaseModel):
     """User profile for eligibility filtering."""
@@ -27,6 +29,6 @@ class UserProfile(BaseModel):
                 cgpa=8.0
             )
             
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
             return cls(**data)

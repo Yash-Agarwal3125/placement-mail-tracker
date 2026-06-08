@@ -6,8 +6,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.config.settings import Settings
+from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
 
 logger = logging.getLogger(__name__)
@@ -22,14 +22,17 @@ class DailyDigestGenerator:
         self.notifier = EmailNotifier(settings)
 
     def generate_and_send(self) -> bool:
-        """Generate the digest and send it via email if it's the right time and there are updates."""
+        """Generate and email the daily digest when it is due."""
         now = datetime.now()
         yesterday_iso = (now - timedelta(days=1)).isoformat()
         
         # Check send time
         send_hour, send_minute = map(int, self.settings.digest_send_time.split(':'))
         if now.hour < send_hour or (now.hour == send_hour and now.minute < send_minute):
-            logger.debug("Too early for daily digest. Waiting for %s", self.settings.digest_send_time)
+            logger.debug(
+                "Too early for daily digest. Waiting for %s",
+                self.settings.digest_send_time,
+            )
             return False
             
         # Avoid duplicate digests on the same day
@@ -77,7 +80,13 @@ class DailyDigestGenerator:
             self._record_digest_sent()
             return False
             
-        digest_body = self._format_digest(new_opps, status_changes, upcoming_events, deadlines, action_required)
+        digest_body = self._format_digest(
+            new_opps,
+            status_changes,
+            upcoming_events,
+            deadlines,
+            action_required,
+        )
         
         logger.info("Sending Daily Digest via email.")
         subject = f"Placement Daily Digest - {now.strftime('%d %b %Y')}"
@@ -104,13 +113,15 @@ class DailyDigestGenerator:
         if new_opps:
             lines.append("<h2>🌟 NEW OPPORTUNITIES</h2><ul>")
             for opp in new_opps:
-                lines.append(f"<li>{format_opp(opp)} (Priority: {opp.get('priority', 'MEDIUM')})</li>")
+                priority = opp.get("priority", "MEDIUM")
+                lines.append(f"<li>{format_opp(opp)} (Priority: {priority})</li>")
             lines.append("</ul>")
             
         if status_changes:
             lines.append("<h2>🔄 STATUS CHANGES</h2><ul>")
             for opp in status_changes:
-                lines.append(f"<li>{format_opp(opp)} ➔ <code>{opp.get('current_status', 'UNKNOWN')}</code></li>")
+                current_status = opp.get("current_status", "UNKNOWN")
+                lines.append(f"<li>{format_opp(opp)} ➔ <code>{current_status}</code></li>")
             lines.append("</ul>")
             
         if upcoming_events:
@@ -138,7 +149,13 @@ class DailyDigestGenerator:
         """Check the database to see if a digest was sent today."""
         today_str = now.strftime("%Y-%m-%d")
         row = self.database.connection.execute(
-            "SELECT id FROM notifications WHERE channel = 'digest' AND status = 'sent' AND date(created_at) = ?",
+            """
+            SELECT id
+            FROM notifications
+            WHERE channel = 'digest'
+              AND status = 'sent'
+              AND date(created_at) = ?
+            """,
             (today_str,)
         ).fetchone()
         return row is not None

@@ -11,6 +11,7 @@ src/placement_mail_tracker/ai/models.py
 src/placement_mail_tracker/config/__init__.py
 src/placement_mail_tracker/config/settings.py
 src/placement_mail_tracker/config/user_profile.py
+src/placement_mail_tracker/config/validator.py
 src/placement_mail_tracker/db/__init__.py
 src/placement_mail_tracker/db/connection.py
 src/placement_mail_tracker/db/manager.py
@@ -28,6 +29,10 @@ src/placement_mail_tracker/models/placement_record.py
 src/placement_mail_tracker/notifications/__init__.py
 src/placement_mail_tracker/notifications/email_notifier.py
 src/placement_mail_tracker/notifications/telegram.py
+src/placement_mail_tracker/reliability/__init__.py
+src/placement_mail_tracker/reliability/health.py
+src/placement_mail_tracker/reliability/heartbeat.py
+src/placement_mail_tracker/reliability/status.py
 src/placement_mail_tracker/scheduler/__init__.py
 src/placement_mail_tracker/scheduler/alert_generator.py
 src/placement_mail_tracker/scheduler/digest_generator.py
@@ -37,6 +42,7 @@ src/placement_mail_tracker/sheets/client.py
 src/placement_mail_tracker/sheets/sheets_sync.py
 src/placement_mail_tracker/utils/__init__.py
 src/placement_mail_tracker/utils/deduplication.py
+src/placement_mail_tracker/utils/lock_manager.py
 src/placement_mail_tracker/utils/logging_config.py
 src/placement_mail_tracker/utils/scoring.py
 src/placement_mail_tracker/utils/time.py
@@ -46,6 +52,12 @@ tests/test_eligibility.py
 tests/test_end_to_end.py
 tests/test_filters.py
 tests/test_followup_detection.py
+tests/test_heartbeat.py
+tests/test_lock_manager.py
+tests/test_logging_config.py
 tests/test_notifications.py
+tests/test_reliability_health.py
+tests/test_reliability_status.py
 tests/test_rule_engine.py
 tests/test_sheet_sync.py
+tests/test_validator.py

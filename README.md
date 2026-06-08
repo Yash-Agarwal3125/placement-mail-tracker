@@ -1,8 +1,11 @@
 # Placement Mail Tracker
 
-Placement Mail Tracker is a beginner-friendly Python project skeleton for tracking placement and internship emails from Gmail.
+Placement Mail Tracker is a lightweight Python system for tracking placement and
+internship emails from Gmail, extracting structured drive details, storing them in
+SQLite, syncing Google Sheets, and sending notifications.
 
-The initial version sets up the project architecture, configuration, logging, SQLite connectivity, and a reusable Gmail API client.
+It is designed for a personal Windows PC running Windows Task Scheduler. Each run
+starts, completes one sync cycle, updates local reliability state, and exits.
 
 ## Planned Features
 
@@ -11,8 +14,8 @@ The initial version sets up the project architecture, configuration, logging, SQ
 - Extract structured data using Google Gemini
 - Store extracted records in SQLite
 - Sync important records to Google Sheets
-- Send Telegram notifications for new updates
-- Run automatically every few hours
+- Send Telegram and email notifications for new updates
+- Run automatically every few hours through Windows Task Scheduler
 - Prepare for future GitHub Actions automation
 
 ## Tech Stack
@@ -107,15 +110,70 @@ Both JSON files are ignored by git.
 python scripts/init_db.py
 ```
 
-6. Run the starter application.
+6. Run one sync cycle.
 
 ```bash
-python -m placement_mail_tracker.app
+python main.py
 ```
+
+## Runtime Model
+
+The production runner is intentionally simple:
+
+```text
+Windows Task Scheduler
+-> python main.py
+-> validate config
+-> acquire local lock
+-> fetch Gmail
+-> process drives
+-> sync Google Sheets
+-> send notifications
+-> update heartbeat/state
+-> exit
+```
+
+The project does not use APScheduler, Celery, Redis, RabbitMQ, background
+workers, infinite loops, or a web server.
+
+## Environment Modes
+
+Set `APP_ENV` in `.env`.
+
+- `development`: missing Gmail, Sheets, or Gemini credentials are warnings so
+  beginner setup and local tests can continue.
+- `testing`: behaves like development for credentials and is intended for
+  automated tests.
+- `production`: validates required Gmail, Sheets, Gemini, database, and `.env`
+  settings at startup. Missing required credentials fail fast and return a
+  failed run status.
+
+Exit codes:
+
+- `0`: success
+- `1`: failed
+- `2`: partial success
+
+## Reliability Files
+
+- `logs/app.log`: rotating application log, 10 MB max per file, 5 backups.
+- `data/system_health.json`: tracks `last_success`, `last_failure`,
+  `consecutive_failures`, and whether the current failure streak was alerted.
+- `data/heartbeat.json`: updated only after a successful sync and includes the
+  last successful run, processed message count, created/updated drives, and
+  final status.
+
+If the last successful heartbeat is older than `HEARTBEAT_INACTIVITY_HOURS`
+defaulting to 6, the next scheduled run logs an inactivity warning. If
+`consecutive_failures` reaches `FAILURE_ALERT_THRESHOLD` defaulting to 3, the
+runner sends one failure alert to `NOTIFICATION_EMAIL` or `EMAIL_RECEIVER` for
+that failure streak.
 
 ## Current Status
 
-Gmail API integration, placement filtering, and Gemini extraction scaffolding are implemented. Google Sheets and Telegram are still placeholders.
+Gmail API integration, placement filtering, Gemini extraction, SQLite storage,
+Google Sheets sync, notification scaffolding, one-shot runner reliability,
+heartbeat tracking, failure alerting, and log rotation are implemented.
 
 ## Future Automation
 

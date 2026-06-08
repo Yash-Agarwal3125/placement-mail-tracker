@@ -4,8 +4,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.config.settings import Settings
+from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
 from placement_mail_tracker.utils.time import parse_datetime_flexible
 
@@ -117,7 +117,13 @@ class AlertGenerator:
         )
         self.database.connection.commit()
         
-    def _send_alert_email(self, opp: dict[str, Any], subject: str, alert_type: str, time_left: str) -> None:
+    def _send_alert_email(
+        self,
+        opp: dict[str, Any],
+        subject: str,
+        alert_type: str,
+        time_left: str,
+    ) -> None:
         """Format and send the alert email using EmailNotifier."""
         body = f"""
         <h2>{subject}</h2>
