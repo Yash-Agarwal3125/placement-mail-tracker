@@ -98,12 +98,12 @@ class GeminiPlacementExtractor:
         settings: Settings,
         *,
         model: GeminiModel | None = None,
-        max_retries: int = 6,  # 1 initial attempt + 5 retries
-        retry_delay_seconds: float = 2.0,
+        max_retries: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> None:
         self.settings = settings
-        self.max_retries = max_retries
-        self.retry_delay_seconds = retry_delay_seconds
+        self.max_retries = max_retries if max_retries is not None else settings.gemini_max_retries
+        self.retry_delay_seconds = retry_delay_seconds if retry_delay_seconds is not None else settings.gemini_retry_delay_seconds
         self._model = model
         self._client: genai.Client | None = None
 
@@ -136,46 +136,51 @@ class GeminiPlacementExtractor:
         prompt = build_extraction_prompt(email_content)
         last_error: Exception | None = None
 
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                model_name = self.settings.gemini_model
-                logger.info(
-                    "Requesting Gemini placement extraction, attempt %s (model: %s)",
-                    attempt,
-                    model_name,
-                )
-                response = self._generate_content(prompt)
-                raw_text = _response_text(response)
-                parsed = parse_json_response(raw_text)
-                return validate_extraction_result(parsed)
-            except (
-                GeminiExtractionError,
-                ValidationError,
-                json.JSONDecodeError,
-                TypeError,
-                ValueError,
-                genai_errors.APIError,
-            ) as error:
-                last_error = error
-                logger.warning("Gemini extraction attempt %s failed: %s", attempt, error)
-                if attempt < self.max_retries:
-                    backoff = 2**attempt
-                    time.sleep(backoff)
+        models_to_try = [self.settings.gemini_model] + self.settings.gemini_fallback_models
 
-        logger.error("Gemini extraction failed after %s attempts", self.max_retries)
+        for idx, model_name in enumerate(models_to_try):
+            if idx == 0:
+                logger.info("[GEMINI]\nUsing model: %s", model_name)
+            else:
+                logger.info("[GEMINI]\nSwitching to fallback model:\n%s", model_name)
+
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    logger.info(
+                        "Requesting Gemini placement extraction, attempt %s (model: %s)",
+                        attempt,
+                        model_name,
+                    )
+                    response = self._generate_content(prompt, model_name)
+                    raw_text = _response_text(response)
+                    parsed = parse_json_response(raw_text)
+                    return validate_extraction_result(parsed)
+                except (
+                    GeminiExtractionError,
+                    ValidationError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    genai_errors.APIError,
+                ) as error:
+                    last_error = error
+                    logger.warning("Gemini extraction attempt %s failed: %s", attempt, error)
+                    if attempt < self.max_retries:
+                        backoff = 2**attempt
+                        time.sleep(backoff)
+
+        logger.error("Gemini extraction failed after trying all fallback models")
         if last_error:
             raise GeminiExtractionError(str(last_error)) from last_error
         raise GeminiExtractionError("Unknown Gemini extraction failure")
 
-    def _generate_content(self, prompt: str) -> Any:
+    def _generate_content(self, prompt: str, model_name: str) -> Any:
         """Generate content using an injected fake model or the Gemini API."""
         if self._model is not None:
             return self._model.generate_content(prompt)
 
         if self._client is None:
             self._client = genai.Client(api_key=self.settings.gemini_api_key)
-
-        model_name = self.settings.gemini_model
 
         return self._client.models.generate_content(
             model=model_name,

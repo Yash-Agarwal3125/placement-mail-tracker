@@ -166,14 +166,14 @@ class GmailClient:
         self._save_token(credentials)
         return credentials
 
-    def fetch_latest_emails(self, max_results: int = 100) -> list[GmailEmail]:
-        """Fetch latest inbox emails from the configured query."""
-        query = self.settings.gmail_query
+    def fetch_emails_since(self, timestamp_seconds: int, max_results: int = 500) -> list[GmailEmail]:
+        """Fetch inbox emails newer than the specified Unix timestamp."""
+        query = f"in:inbox after:{timestamp_seconds}"
         return self._search(query=query, max_results=max_results)
 
-    def fetch_recent_messages(self, max_results: int = 100) -> list[dict[str, Any]]:
-        """Fetch latest inbox emails from the current day as dictionaries."""
-        emails = self.fetch_latest_emails(max_results=max_results)
+    def fetch_recent_messages_since(self, timestamp_seconds: int, max_results: int = 500) -> list[dict[str, Any]]:
+        """Fetch inbox emails newer than the specified timestamp as dictionaries."""
+        emails = self.fetch_emails_since(timestamp_seconds=timestamp_seconds, max_results=max_results)
         return [asdict(email) for email in emails]
 
     def fetch_unread_emails(self, max_results: int = 10) -> list[GmailEmail]:

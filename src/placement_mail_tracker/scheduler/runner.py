@@ -8,12 +8,14 @@ Phase 13: Email classification stored with each processed email.
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from googleapiclient.errors import HttpError
@@ -159,10 +161,25 @@ class PlacementTrackerRunner:
                 except Exception as e:
                     logger.warning("Could not fetch pending email %s: %s", pending_id, e)
 
+        # Read fetch_state.json
+        fetch_state_path = Path(self.settings.fetch_state_file)
+        if fetch_state_path.exists():
+            try:
+                state_data = json.loads(fetch_state_path.read_text(encoding="utf-8"))
+                last_fetch_iso = state_data.get("last_successful_fetch")
+                last_fetch_timestamp = int(datetime.fromisoformat(last_fetch_iso.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                # Default to 7 days ago if parsing fails
+                last_fetch_timestamp = int(time.time()) - (7 * 24 * 3600)
+        else:
+            # Default to 7 days ago
+            last_fetch_timestamp = int(time.time()) - (7 * 24 * 3600)
+
         try:
             for attempt in range(1, 4):
                 try:
-                    messages = gmail_client.fetch_recent_messages(
+                    messages = gmail_client.fetch_recent_messages_since(
+                        timestamp_seconds=last_fetch_timestamp,
                         max_results=self.settings.gmail_max_results
                     )
                     break
@@ -269,21 +286,25 @@ class PlacementTrackerRunner:
                 if rule_result.needs_gemini:
                     # Fall back to Gemini for missing critical fields
                     logger.info("Rule extraction incomplete; calling Gemini")
-                    extracted = extractor.extract_from_email(msg)
-                    if not extracted:
-                        raise ValueError("Gemini extraction returned empty results")
+                    try:
+                        extracted = extractor.extract_from_email(msg)
+                        if not extracted:
+                            raise ValueError("Gemini extraction returned empty results")
 
-                    extracted_dict = (
-                        asdict(extracted) if not isinstance(extracted, dict) else extracted
-                    )
-                    opp_data = map_extraction_to_opportunity(extracted_dict)
-                    gemini_calls += 1
+                        extracted_dict = (
+                            asdict(extracted) if not isinstance(extracted, dict) else extracted
+                        )
+                        opp_data = map_extraction_to_opportunity(extracted_dict)
+                        gemini_calls += 1
 
-                    # Merge: prefer Gemini data but keep rule-based status/classification
-                    if rule_result.current_status != "OPEN":
-                        opp_data["current_status"] = rule_result.current_status
-                    if not opp_data.get("current_status"):
-                        opp_data["current_status"] = rule_result.current_status
+                        # Merge: prefer Gemini data but keep rule-based status/classification
+                        if rule_result.current_status != "OPEN":
+                            opp_data["current_status"] = rule_result.current_status
+                        if not opp_data.get("current_status"):
+                            opp_data["current_status"] = rule_result.current_status
+                    except Exception as gemini_err:
+                        logger.warning("Gemini failed completely, falling back to rule engine: %s", gemini_err)
+                        opp_data = rule_result.to_dict()
                 else:
                     # Phase 3: Rule extraction sufficient - no Gemini call!
                     opp_data = rule_result.to_dict()
@@ -456,6 +477,15 @@ class PlacementTrackerRunner:
 
         if error_count:
             report.add_warning(f"{error_count} email(s) failed processing")
+        else:
+            # If everything succeeded (no errors), update fetch state
+            import json
+            fetch_state_path = Path(self.settings.fetch_state_file)
+            fetch_state_path.parent.mkdir(parents=True, exist_ok=True)
+            fetch_state_path.write_text(
+                json.dumps({"last_successful_fetch": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}),
+                encoding="utf-8"
+            )
 
         return report
 

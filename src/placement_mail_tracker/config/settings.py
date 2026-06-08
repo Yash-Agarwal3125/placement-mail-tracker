@@ -31,8 +31,10 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
-    gemini_secondary_model: str = Field(default="gemini-1.5-pro", alias="GEMINI_SECONDARY_MODEL")
-    gemini_max_retries: int = Field(default=5, alias="GEMINI_MAX_RETRIES")
+    gemini_fallback_models: list[str] = Field(
+        default_factory=lambda: ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    )
+    gemini_max_retries: int = Field(default=3, alias="GEMINI_MAX_RETRIES")
     gemini_retry_delay_seconds: float = Field(default=2.0, alias="GEMINI_RETRY_DELAY_SECONDS")
 
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
@@ -64,6 +66,7 @@ class Settings(BaseSettings):
         alias="SYSTEM_HEALTH_FILE",
     )
     heartbeat_file: str = Field(default="data/heartbeat.json", alias="HEARTBEAT_FILE")
+    fetch_state_file: str = Field(default="data/fetch_state.json", alias="FETCH_STATE_FILE")
     log_file: str = Field(default="logs/app.log", alias="LOG_FILE")
     log_max_bytes: int = Field(default=10 * 1024 * 1024, alias="LOG_MAX_BYTES")
     log_backup_count: int = Field(default=5, alias="LOG_BACKUP_COUNT")
