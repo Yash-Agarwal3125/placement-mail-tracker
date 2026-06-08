@@ -1,0 +1,7 @@
+{
+  "alert_sent_for_current_streak": true,
+  "consecutive_failures": 4,
+  "last_failure": "2026-06-08T10:38:33.484969+00:00",
+  "last_status": "PARTIAL_SUCCESS",
+  "last_success": null
+}

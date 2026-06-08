@@ -162,16 +162,13 @@ class GmailClient:
             str(self.credentials_path),
             self.scopes,
         )
-        credentials = flow.run_local_server(port=0)
+        credentials = flow.run_local_server(port=0, timeout_seconds=120)
         self._save_token(credentials)
         return credentials
 
     def fetch_latest_emails(self, max_results: int = 100) -> list[GmailEmail]:
-        """Fetch latest inbox emails from the current day."""
-        from datetime import datetime
-
-        today_str = datetime.now().strftime("%Y/%m/%d")
-        query = f"in:inbox after:{today_str}"
+        """Fetch latest inbox emails from the configured query."""
+        query = self.settings.gmail_query
         return self._search(query=query, max_results=max_results)
 
     def fetch_recent_messages(self, max_results: int = 100) -> list[dict[str, Any]]:

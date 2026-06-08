@@ -437,7 +437,7 @@ class GoogleSheetsSync:
         flow = InstalledAppFlow.from_client_secrets_file(
             str(self.credentials_path), SHEETS_SCOPES
         )
-        credentials = flow.run_local_server(port=0)
+        credentials = flow.run_local_server(port=0, timeout_seconds=120)
         self._save_token(credentials)
         return credentials
 

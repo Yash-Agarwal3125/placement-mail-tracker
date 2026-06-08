@@ -29,7 +29,7 @@
     "display_name": "'No Reply CDC Info' via VITIANS CDC Group, Vellore and Chennai Campus",
     "email": "vitianscdc2027@vitstudent.ac.in",
     "first_seen": "2026-05-27T09:58:21.682060+00:00",
-    "last_seen": "2026-06-04T07:19:15.242420+00:00",
+    "last_seen": "2026-06-08T10:38:08.227198+00:00",
     "matched_keywords": [
       "display:cdc",
       "display:helpdesk",
@@ -41,11 +41,13 @@
     "display_name": "'HOD, Department of Computational Intelligence' via B.Tech. - C S E (A I and M L) 2023 Group, Vellore Campus",
     "email": "23bai@vitstudent.ac.in",
     "first_seen": "2026-05-29T08:04:18.572155+00:00",
-    "last_seen": "2026-06-04T06:25:58.080209+00:00",
+    "last_seen": "2026-06-08T10:38:13.706224+00:00",
     "matched_keywords": [
+      "display:cdc",
+      "display:helpdesk",
       "domain:institutional"
     ],
-    "score": 40
+    "score": 100
   },
   {
     "display_name": "Unknown Institutional Aliases",
