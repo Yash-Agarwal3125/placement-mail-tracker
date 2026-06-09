@@ -23,6 +23,7 @@ config/*.json
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/*.json
 logs/*.log
 
 # IDE/editor

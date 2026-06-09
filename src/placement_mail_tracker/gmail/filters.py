@@ -68,7 +68,6 @@ NEGATIVE_KEYWORDS = (
     "club",
     "committee",
     "student organization",
-    "attendance",
     "event registration",
     "workshop",
     "nptel",
@@ -76,6 +75,16 @@ NEGATIVE_KEYWORDS = (
     "gravitas",
     "riviera",
     "chapter",
+    "fat schedule",
+    "cat schedule",
+    "exam schedule",
+    "patents granted",
+    "guest lecture",
+    "blood donation",
+    "hostel",
+    "journal publication",
+    "research paper",
+    "merchandise",
 )
 
 PLACEMENT_THRESHOLD = 45
