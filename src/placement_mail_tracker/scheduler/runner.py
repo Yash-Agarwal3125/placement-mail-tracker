@@ -169,11 +169,13 @@ class PlacementTrackerRunner:
                 last_fetch_iso = state_data.get("last_successful_fetch")
                 last_fetch_timestamp = int(datetime.fromisoformat(last_fetch_iso.replace("Z", "+00:00")).timestamp())
             except Exception:
-                # Default to 7 days ago if parsing fails
-                last_fetch_timestamp = int(time.time()) - (7 * 24 * 3600)
+                # Default to start of today if parsing fails
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                last_fetch_timestamp = int(today.timestamp())
         else:
-            # Default to 7 days ago
-            last_fetch_timestamp = int(time.time()) - (7 * 24 * 3600)
+            # Default to start of today
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            last_fetch_timestamp = int(today.timestamp())
 
         try:
             for attempt in range(1, 4):
