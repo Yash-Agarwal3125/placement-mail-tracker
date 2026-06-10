@@ -85,6 +85,8 @@ NEGATIVE_KEYWORDS = (
     "journal publication",
     "research paper",
     "merchandise",
+    "hackathon",
+    "ideathon",
 )
 
 PLACEMENT_THRESHOLD = 45

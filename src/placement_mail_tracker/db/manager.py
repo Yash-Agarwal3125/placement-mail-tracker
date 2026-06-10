@@ -620,6 +620,8 @@ class DatabaseManager:
         processed_status: str = "processed",
         error_message: str | None = None,
         email_classification: str | None = None,
+        retry_count: int | None = None,
+        last_retry_at: str | None = None,
     ) -> int:
         """Create or update a processed email record."""
         now = utc_now_iso()
@@ -629,9 +631,10 @@ class DatabaseManager:
                 gmail_message_id, opportunity_id, subject, sender,
                 received_at, filter_score, filter_decision,
                 processed_status, error_message, email_classification,
+                retry_count, last_retry_at,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 subject = excluded.subject,
@@ -642,6 +645,8 @@ class DatabaseManager:
                 processed_status = excluded.processed_status,
                 error_message = excluded.error_message,
                 email_classification = excluded.email_classification,
+                retry_count = COALESCE(excluded.retry_count, processed_emails.retry_count),
+                last_retry_at = COALESCE(excluded.last_retry_at, processed_emails.last_retry_at),
                 updated_at = excluded.updated_at;
             """,
             (
@@ -655,6 +660,8 @@ class DatabaseManager:
                 processed_status,
                 error_message,
                 email_classification,
+                retry_count,
+                last_retry_at,
                 now,
                 now,
             ),
@@ -745,9 +752,20 @@ class DatabaseManager:
         if existing_count > 0:
             drive_id = f"{drive_id}_{existing_count + 1:02d}"
 
+        target_hash = generate_unique_hash(opportunity)
+        existing_id = self.connection.execute(
+            "SELECT id FROM opportunities WHERE unique_hash = ? LIMIT 1", (target_hash,)
+        ).fetchone()
+
+        if existing_id:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("[DB]\nHash collision detected\nexisting_id=%s\nincoming_id=NEW", existing_id[0])
+            return existing_id[0]
+
         values = {
             **opportunity,
-            "unique_hash": generate_unique_hash(opportunity),
+            "unique_hash": target_hash,
             "source_email_id": source_email_id,
             "source_thread_id": source_thread_id,
             "drive_id": drive_id,
@@ -792,10 +810,23 @@ class DatabaseManager:
         source_email_id: str | None,
         source_thread_id: str | None = None,
     ) -> None:
+        target_hash = generate_unique_hash(opportunity)
+        existing_id = self.connection.execute(
+            "SELECT id FROM opportunities WHERE unique_hash = ? LIMIT 1", (target_hash,)
+        ).fetchone()
+
+        if existing_id and existing_id[0] != opportunity_id:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("[DB]\nHash collision detected\nexisting_id=%s\nincoming_id=%s", existing_id[0], opportunity_id)
+            target_hash = self.connection.execute(
+                "SELECT unique_hash FROM opportunities WHERE id = ?", (opportunity_id,)
+            ).fetchone()[0]
+
         values = {
             **opportunity,
             "id": opportunity_id,
-            "unique_hash": generate_unique_hash(opportunity),
+            "unique_hash": target_hash,
             "source_email_id": source_email_id,
             "source_thread_id": source_thread_id,
             "updated_at": utc_now_iso(),
@@ -895,6 +926,16 @@ class DatabaseManager:
                 self.connection.execute(
                     "ALTER TABLE processed_emails ADD COLUMN email_classification TEXT;"
                 )
+            except sqlite3.OperationalError:
+                pass
+        if "retry_count" not in pe_columns:
+            try:
+                self.connection.execute("ALTER TABLE processed_emails ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;")
+            except sqlite3.OperationalError:
+                pass
+        if "last_retry_at" not in pe_columns:
+            try:
+                self.connection.execute("ALTER TABLE processed_emails ADD COLUMN last_retry_at TEXT;")
             except sqlite3.OperationalError:
                 pass
 

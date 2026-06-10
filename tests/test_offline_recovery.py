@@ -1,11 +1,13 @@
-import pytest
-import time
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
+
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
+
 
 @pytest.fixture
 def test_settings(tmp_path):

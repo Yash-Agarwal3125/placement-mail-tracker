@@ -12,6 +12,7 @@ import json
 import logging
 import socket
 import sqlite3
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -146,12 +147,13 @@ class PlacementTrackerRunner:
         # Retry pending emails first
         pending_records = self.connection.execute(
             """
-            SELECT gmail_message_id
+            SELECT gmail_message_id, retry_count
             FROM processed_emails
             WHERE processed_status = 'PENDING_EXTRACTION';
             """
         ).fetchall()
         pending_ids = [row[0] for row in pending_records]
+        pending_counts = {row[0]: row[1] for row in pending_records}
         if pending_ids:
             logger.info("Found %s pending emails in retry queue", len(pending_ids))
             for pending_id in pending_ids:
@@ -234,7 +236,7 @@ class PlacementTrackerRunner:
                 SELECT id
                 FROM processed_emails
                 WHERE gmail_message_id = ?
-                  AND processed_status IN ('processed', 'skipped')
+                  AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE')
                 LIMIT 1;
                 """,
                 (msg_id,),

@@ -88,7 +88,7 @@ class SingleInstanceLock:
                 )
                 sys.exit(0)
             else:
-                logger.info("[LOCK] Removing stale lock from dead process (PID: %s)", pid)
+                logger.info("[LOCK]\nRemoving stale lock")
                 self._remove_lock_file()
 
         # Write new lock file
@@ -110,6 +110,7 @@ class SingleInstanceLock:
             "start_time": datetime.now().isoformat(),
             "hostname": socket.gethostname(),
             "script": sys.argv[0] if sys.argv else "unknown",
+            "owner": os.environ.get("USERNAME", "Unknown"),
         }
         try:
             self.lock_file.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")

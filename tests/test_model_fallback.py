@@ -1,10 +1,13 @@
+from unittest.mock import MagicMock
+
 import pytest
-import json
-from unittest.mock import MagicMock, patch
-from google.genai import errors as genai_errors
-from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor, GeminiExtractionError
+
+from placement_mail_tracker.ai.gemini_extractor import (
+    GeminiExtractionError,
+    GeminiPlacementExtractor,
+)
 from placement_mail_tracker.config.settings import Settings
-from placement_mail_tracker.ai.models import PlacementExtraction
+
 
 @pytest.fixture
 def test_settings():

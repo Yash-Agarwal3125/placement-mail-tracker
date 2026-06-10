@@ -162,12 +162,22 @@ class GeminiPlacementExtractor:
                     TypeError,
                     ValueError,
                     genai_errors.APIError,
+                    ConnectionError,
+                    TimeoutError,
                 ) as error:
                     last_error = error
                     logger.warning("Gemini extraction attempt %s failed: %s", attempt, error)
+                    
                     if attempt < self.max_retries:
-                        backoff = 2**attempt
-                        time.sleep(backoff)
+                        if isinstance(error, genai_errors.APIError):
+                            # Do not retry invalid API key (400, 401), quota exhausted (429), permission denied (403)
+                            # within the same model's attempt loop.
+                            if error.code in {400, 401, 403, 429}:
+                                break
+                                
+                        backoffs = [2, 5, 10]
+                        sleep_time = backoffs[attempt - 1] if attempt <= len(backoffs) else 10
+                        time.sleep(sleep_time)
 
         logger.error("Gemini extraction failed after trying all fallback models")
         if last_error:

@@ -1,11 +1,12 @@
-import sys
 import os
+import sys
 
 sys.path.append(os.path.abspath('src'))
 
+
 from placement_mail_tracker.config.settings import get_settings
 from placement_mail_tracker.gmail.gmail_client import GmailClient
-import json
+
 
 def analyze_emails():
     settings = get_settings()

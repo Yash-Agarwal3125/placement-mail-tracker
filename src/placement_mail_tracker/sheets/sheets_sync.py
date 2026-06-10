@@ -18,7 +18,6 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
-from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
@@ -93,7 +92,47 @@ class GoogleSheetsSync:
         self.last_error: str | None = None
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
-        """Sync all drives, companies, and dashboard to Google Sheets."""
+        """Sync all drives, companies, and dashboard to Google Sheets with resilience."""
+        backoffs = [2, 5, 10]
+        for attempt, backoff in enumerate(backoffs + [0]):
+            try:
+                return self._sync_active_opportunities_internal(database)
+            except Exception as e:
+                is_retryable = False
+                import http.client
+                import socket
+
+                from googleapiclient.errors import HttpError
+                
+                if isinstance(e, HttpError):
+                    if e.resp.status in {429, 500, 502, 503, 504}:
+                        is_retryable = True
+                elif isinstance(e, (socket.error, socket.timeout, http.client.HTTPException, ConnectionError, TimeoutError)):
+                    is_retryable = True
+                    
+                if is_retryable and attempt < len(backoffs):
+                    logger.warning("Google Sheets network error: %s. Retrying in %ss...", e, backoff)
+                    import time
+                    time.sleep(backoff)
+                else:
+                    # Non-retryable or out of retries
+                    if isinstance(e, HttpError):
+                        self.last_error = str(e)
+                        if self.settings.is_production:
+                            raise
+                        logger.exception("Unable to sync Google Sheet: %s", e)
+                        return {"created": 0, "updated": 0, "skipped": 0}
+                    elif isinstance(e, SheetsAuthenticationError):
+                        self.last_error = str(e)
+                        if self.settings.is_production:
+                            raise e
+                        logger.warning("%s", e)
+                        return {"created": 0, "updated": 0, "skipped": 0}
+                    else:
+                        raise
+
+    def _sync_active_opportunities_internal(self, database: DatabaseManager) -> dict[str, int]:
+        """Internal method to sync all drives, companies, and dashboard to Google Sheets."""
         if not self.settings.google_sheet_id:
             self.last_error = "GOOGLE_SHEET_ID is missing"
             if self.settings.is_production:
@@ -101,7 +140,7 @@ class GoogleSheetsSync:
             logger.warning("GOOGLE_SHEET_ID is missing; skipping Google Sheets sync")
             return {"created": 0, "updated": 0, "skipped": 0}
 
-        try:
+        if True:
             self.last_error = None
             self._ensure_tabs_exist()
 
@@ -145,18 +184,7 @@ class GoogleSheetsSync:
             # Phase 6: Apply formatting
             self._apply_formatting()
 
-        except SheetsAuthenticationError as error:
-            self.last_error = str(error)
-            if self.settings.is_production:
-                raise
-            logger.warning("%s", error)
-            return {"created": 0, "updated": 0, "skipped": 0}
-        except HttpError as error:
-            self.last_error = str(error)
-            if self.settings.is_production:
-                raise
-            logger.exception("Unable to sync Google Sheet: %s", error)
-            return {"created": 0, "updated": 0, "skipped": 0}
+
 
         return {"created": len(active_opps), "updated": 0, "skipped": 0}
 
@@ -232,19 +260,27 @@ class GoogleSheetsSync:
                     existing_by_key[key] = row_number
 
         rows_to_append = []
+        update_data = []
         for row in data_rows:
             if len(row) > key_index:
                 key = row[key_index].strip()
                 existing_row_number = existing_by_key.get(key)
                 if existing_row_number:
-                    values.update(
-                        spreadsheetId=self.settings.google_sheet_id,
-                        range=f"{_quote(tab_name)}!A{existing_row_number}:Z{existing_row_number}",
-                        valueInputOption="USER_ENTERED",
-                        body={"values": [row]},
-                    ).execute()
+                    update_data.append({
+                        "range": f"{_quote(tab_name)}!A{existing_row_number}:Z{existing_row_number}",
+                        "values": [row]
+                    })
                 else:
                     rows_to_append.append(row)
+
+        if update_data:
+            values.batchUpdate(
+                spreadsheetId=self.settings.google_sheet_id,
+                body={
+                    "valueInputOption": "USER_ENTERED",
+                    "data": update_data
+                }
+            ).execute()
 
         if rows_to_append:
             values.append(
