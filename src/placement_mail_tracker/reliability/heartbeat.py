@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,7 @@ class HeartbeatManager:
         if not last_success:
             return None
 
-        current = now or datetime.now(UTC)
+        current = now or datetime.now(timezone.utc)
         previous = _parse_datetime(last_success)
         if previous is None:
             return None
@@ -85,8 +85,8 @@ def _parse_datetime(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

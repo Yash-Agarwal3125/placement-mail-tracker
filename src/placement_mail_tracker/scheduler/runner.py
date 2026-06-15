@@ -109,45 +109,60 @@ class PlacementTrackerRunner:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
         report = RunReport(environment=self.settings.environment)
 
-        try:
-            logger.info("Initializing database manager and creating tables")
-            database = DatabaseManager(connection=self.connection)
-            database.create_tables()
-            
-            purged = database.purge_old_processed_emails(30)
-            if purged > 0:
-                logger.info("Purged %d old processed emails from DB", purged)
-        except Exception as database_error:
-            logger.exception("Database initialization failed: %s", database_error)
-            report.mark_component(
-                "database",
-                False,
-                str(database_error),
-                critical=True,
-            )
+        database = self._init_database(report)
+        if not database:
             return report
 
         logger.info("Initializing API clients")
         gmail_client = GmailClient(self.settings)
         extractor = GeminiExtractor(self.settings)
-
-        # Load user profile for eligibility filtering
-        user_profile = UserProfile.load()
         sheets_client = SheetsClient(self.settings)
+        user_profile = UserProfile.load()
 
-        # Daily digest (if configured)
+        self._run_daily_digest(database)
+
+        messages = self._fetch_messages(gmail_client, report)
+
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0, 
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0
+        }
+        if messages:
+            stats = self._process_messages(messages, database, gmail_client, extractor, user_profile)
+        
+        self._execute_sync_pipelines(database, sheets_client, report)
+        
+        self._finalize_report(report, stats)
+        return report
+
+    def _init_database(self, report: RunReport) -> DatabaseManager | None:
+        try:
+            logger.info("Initializing database manager and creating tables")
+            database = DatabaseManager(connection=self.connection)
+            database.create_tables()
+
+            purged = database.purge_old_processed_emails(30)
+            if isinstance(purged, int) and purged > 0:
+                logger.info("Purged %d old processed emails from DB", purged)
+            return database
+        except Exception as database_error:
+            logger.exception("Database initialization failed: %s", database_error)
+            report.mark_component("database", False, str(database_error), critical=True)
+            return None
+
+    def _run_daily_digest(self, database: DatabaseManager) -> None:
         try:
             from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
+
             if datetime.now().hour >= 8:
                 digest_gen = DailyDigestGenerator(database, self.settings)
                 digest_gen.generate_and_send()
         except Exception as e:
             logger.debug("Daily digest skipped: %s", e)
 
-        logger.info("Fetching recent messages from Gmail")
+    def _fetch_messages(self, gmail_client: GmailClient, report: RunReport) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
 
-        # Retry pending emails first
         pending_records = self.connection.execute(
             """
             SELECT gmail_message_id, retry_count
@@ -155,8 +170,8 @@ class PlacementTrackerRunner:
             WHERE processed_status = 'PENDING_EXTRACTION';
             """
         ).fetchall()
+
         pending_ids = [row[0] for row in pending_records]
-        pending_counts = {row[0]: row[1] for row in pending_records}
         if pending_ids:
             logger.info("Found %s pending emails in retry queue", len(pending_ids))
             for pending_id in pending_ids:
@@ -166,36 +181,38 @@ class PlacementTrackerRunner:
                 except Exception as e:
                     logger.warning("Could not fetch pending email %s: %s", pending_id, e)
 
-        # Read fetch_state.json
         fetch_state_path = Path(self.settings.fetch_state_file)
         if fetch_state_path.exists():
             try:
                 state_data = json.loads(fetch_state_path.read_text(encoding="utf-8"))
                 last_fetch_iso = state_data.get("last_successful_fetch")
-                last_fetch_timestamp = int(datetime.fromisoformat(last_fetch_iso.replace("Z", "+00:00")).timestamp())
+                last_fetch_timestamp = int(
+                    datetime.fromisoformat(last_fetch_iso.replace("Z", "+00:00")).timestamp()
+                )
             except Exception:
-                # Default to start of today if parsing fails
                 today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
                 last_fetch_timestamp = int(today.timestamp())
         else:
-            # Default to start of today
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             last_fetch_timestamp = int(today.timestamp())
 
         try:
             for attempt in range(1, 4):
                 try:
-                    messages = gmail_client.fetch_recent_messages_since(
+                    recent = gmail_client.fetch_recent_messages_since(
                         timestamp_seconds=last_fetch_timestamp,
-                        max_results=self.settings.gmail_max_results
+                        max_results=self.settings.gmail_max_results,
                     )
+                    messages.extend(recent)
                     break
                 except HttpError as api_error:
                     if api_error.resp.status in {429, 503} and attempt < 3:
                         sleep_time = attempt * 2.0
                         logger.warning(
                             "Retry attempt %s. Backoff duration %ss. Exception type: HttpError (%s)",
-                            attempt, sleep_time, api_error.resp.status
+                            attempt,
+                            sleep_time,
+                            api_error.resp.status,
                         )
                         time.sleep(sleep_time)
                     else:
@@ -203,311 +220,282 @@ class PlacementTrackerRunner:
         except Exception as fetch_error:
             logger.error("Could not fetch messages from Gmail API: %s", fetch_error)
             report.mark_component(
-                "gmail",
-                False,
-                str(fetch_error),
-                critical=self.settings.is_production,
+                "gmail", False, str(fetch_error), critical=self.settings.is_production
             )
-            return report
-
-        if gmail_client.last_error:
-            report.mark_component(
-                "gmail",
-                False,
-                gmail_client.last_error,
-                critical=self.settings.is_production,
-            )
+            return []
 
         logger.info("Fetched %s candidate messages", len(messages))
+        return messages
 
-        processed_count = 0
-        skipped_count = 0
-        error_count = 0
-        gemini_calls = 0
-        rule_only_count = 0
-        drives_created = 0
-        drives_updated = 0
+    def _process_messages(
+        self,
+        messages: list[dict[str, Any]],
+        database: DatabaseManager,
+        gmail_client: GmailClient,
+        extractor: GeminiExtractor,
+        user_profile: UserProfile,
+    ) -> dict[str, int]:
+        stats = {
+            "processed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "gemini_calls": 0,
+            "rule_only": 0,
+            "created": 0,
+            "updated": 0,
+        }
 
         for msg in messages:
-            msg_id = msg.get("message_id") or msg.get("id")
-            if not msg_id:
-                logger.warning("Email missing unique ID; skipping")
-                continue
+            self._process_single_message(msg, database, extractor, user_profile, stats)
 
-            already_processed = self.connection.execute(
-                """
-                SELECT id
-                FROM processed_emails
-                WHERE gmail_message_id = ?
-                  AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE')
-                LIMIT 1;
-                """,
-                (msg_id,),
-            ).fetchone()
+        return stats
 
-            if already_processed:
-                logger.info("Email %s already processed; skipping", msg_id)
-                continue
+    def _process_single_message(
+        self,
+        msg: dict[str, Any],
+        database: DatabaseManager,
+        extractor: GeminiExtractor,
+        user_profile: UserProfile,
+        stats: dict[str, int],
+    ) -> None:
+        msg_id = msg.get("message_id") or msg.get("id")
+        if not msg_id:
+            logger.warning("Email missing unique ID; skipping")
+            return
 
-            subject = msg.get("subject", "(no subject)")
-            sender = msg.get("sender", "")
-            body = msg.get("body_text") or msg.get("body") or ""
-            timestamp = msg.get("timestamp") or msg.get("received_at")
-            thread_id = msg.get("thread_id")
+        already_processed = self.connection.execute(
+            """
+            SELECT id
+            FROM processed_emails
+            WHERE gmail_message_id = ?
+              AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE')
+            LIMIT 1;
+            """,
+            (msg_id,),
+        ).fetchone()
 
-            # Phase 13: Classify email
-            classification = classify_email(subject, body)
+        if already_processed:
+            logger.info("Email %s already processed; skipping", msg_id)
+            return
 
-            logger.info("Evaluating email: Subject=%r Classification=%s", subject, classification)
-            decision = is_placement_mail(subject=subject, sender=sender, body=body)
+        subject = msg.get("subject", "(no subject)")
+        sender = msg.get("sender", "")
+        body = msg.get("body_text") or msg.get("body") or ""
+        timestamp = msg.get("timestamp") or msg.get("received_at")
+        thread_id = msg.get("thread_id")
 
-            if not decision.is_placement:
-                logger.info(
-                    "Email %s not relevant; skipping (classification=%s)",
-                    msg_id,
-                    classification,
-                )
-                database.log_processed_email(
-                    gmail_message_id=msg_id,
-                    subject=subject,
-                    sender=sender,
-                    received_at=timestamp,
-                    filter_score=decision.score,
-                    filter_decision=asdict(decision),
-                    processed_status="skipped",
-                    email_classification=classification,
-                )
-                skipped_count += 1
-                continue
+        classification = classify_email(subject, body)
+        logger.info("Evaluating email: Subject=%r Classification=%s", subject, classification)
+        decision = is_placement_mail(subject=subject, sender=sender, body=body)
 
-            try:
-                # ======================================================
-                # Phase 3: Rule-based extraction FIRST, Gemini fallback
-                # ======================================================
-                rule_result = rule_extract(subject, body, sender)
-                logger.info(
-                    "Rule extraction: confidence=%.0f%% needs_gemini=%s",
-                    rule_result.confidence * 100, rule_result.needs_gemini,
-                )
+        if not decision.is_placement:
+            logger.info(
+                "Email %s not relevant; skipping (classification=%s)", msg_id, classification
+            )
+            database.log_processed_email(
+                gmail_message_id=msg_id,
+                subject=subject,
+                sender=sender,
+                received_at=timestamp,
+                filter_score=decision.score,
+                filter_decision=asdict(decision),
+                processed_status="skipped",
+                email_classification=classification,
+            )
+            stats["skipped"] += 1
+            return
 
-                if rule_result.needs_gemini:
-                    # Fall back to Gemini for missing critical fields
-                    logger.info("Rule extraction incomplete; calling Gemini")
-                    try:
-                        extracted = extractor.extract_from_email(msg)
-                        if not extracted:
-                            raise ValueError("Gemini extraction returned empty results")
+        try:
+            rule_result = rule_extract(subject, body, sender)
+            logger.info(
+                "Rule extraction: confidence=%.0f%% needs_gemini=%s",
+                rule_result.confidence * 100,
+                rule_result.needs_gemini,
+            )
 
-                        extracted_dict = (
-                            asdict(extracted) if not isinstance(extracted, dict) else extracted
-                        )
-                        opp_data = map_extraction_to_opportunity(extracted_dict)
-                        gemini_calls += 1
-
-                        # Merge: prefer Gemini data but keep rule-based status/classification
-                        if rule_result.current_status != "OPEN":
-                            opp_data["current_status"] = rule_result.current_status
-                        if not opp_data.get("current_status"):
-                            opp_data["current_status"] = rule_result.current_status
-                    except Exception as gemini_err:
-                        logger.warning("Gemini failed completely, falling back to rule engine: %s", gemini_err)
-                        opp_data = rule_result.to_dict()
-                else:
-                    # Phase 3: Rule extraction sufficient - no Gemini call!
-                    opp_data = rule_result.to_dict()
-                    rule_only_count += 1
-                    logger.info("Rule extraction sufficient; skipping Gemini (saved API call)")
-
-                # Phase 4: Normalize company name
-                if opp_data.get("company_name"):
-                    opp_data["company_name"] = normalize_company_name(opp_data["company_name"])
-
-                # Phase 2: Detect status from email text if not already set
-                if not opp_data.get("current_status") or opp_data["current_status"] == "OPEN":
-                    detected_status = detect_status_from_text(subject, body)
-                    if detected_status != "OPEN":
-                        opp_data["current_status"] = detected_status
-
-                with self.connection:
-                    # Fuzzy deduplication pre-scan
-                    active_opportunities = database.get_active_opportunities()
-                    best_match = find_best_match(opp_data, active_opportunities)
-                    if best_match and best_match.is_duplicate:
-                        logger.info(
-                            "Fuzzy duplicate detected for %s - %s (Confidence: %s%%)",
-                            opp_data["company_name"], opp_data["role"],
-                            best_match.confidence_score,
-                        )
-                        opp_data["company_name"] = best_match.candidate["company_name"]
-                        opp_data["role"] = best_match.candidate["role"]
-
-                    # Format Email Received Date
-                    formatted_date = timestamp
-                    try:
-                        if timestamp:
-                            dt = datetime.fromisoformat(timestamp)
-                            formatted_date = dt.strftime("%d-%b-%Y %I:%M %p")
-                    except Exception:
-                        pass
-
-                    opp_data["email_received_at"] = formatted_date
-                    opp_data["last_update_timestamp"] = utc_now_iso()
-
-                    # Phase 5: Eligibility Filter
-                    eligibility_status = evaluate_eligibility(opp_data, user_profile)
-                    if eligibility_status != "MANUAL_REVIEW":
-                        opp_data["eligibility_status"] = eligibility_status
-
-                    # Feature 8: Priority Scoring
-                    from placement_mail_tracker.utils.scoring import compute_priority
-                    opp_data["priority"] = compute_priority(opp_data, user_profile)
-
-                    # Phase 1: Insert or update drive (not create duplicate)
-                    opp_id, created = database.insert_or_update_opportunity(
-                        opp_data,
-                        source_email_id=msg_id,
-                        source_thread_id=thread_id,
-                        email_classification=classification,
+            if rule_result.needs_gemini:
+                logger.info("Rule extraction incomplete; calling Gemini")
+                try:
+                    extracted = extractor.extract_from_email(msg)
+                    if not extracted:
+                        raise ValueError("Gemini extraction returned empty results")
+                    extracted_dict = (
+                        asdict(extracted) if not isinstance(extracted, dict) else extracted
                     )
-                    action = "inserted" if created else "updated"
-                    if created:
-                        drives_created += 1
-                    else:
-                        drives_updated += 1
+                    opp_data = map_extraction_to_opportunity(extracted_dict)
+                    stats["gemini_calls"] += 1
+
+                    if rule_result.current_status != "OPEN":
+                        opp_data["current_status"] = rule_result.current_status
+                    if not opp_data.get("current_status"):
+                        opp_data["current_status"] = rule_result.current_status
+                except Exception as gemini_err:
+                    logger.warning(
+                        "Gemini failed completely, falling back to rule engine: %s", gemini_err
+                    )
+                    opp_data = rule_result.to_dict()
+            else:
+                opp_data = rule_result.to_dict()
+                stats["rule_only"] += 1
+                logger.info("Rule extraction sufficient; skipping Gemini (saved API call)")
+
+            if opp_data.get("company_name"):
+                opp_data["company_name"] = normalize_company_name(opp_data["company_name"])
+
+            if not opp_data.get("current_status") or opp_data["current_status"] == "OPEN":
+                detected_status = detect_status_from_text(subject, body)
+                if detected_status != "OPEN":
+                    opp_data["current_status"] = detected_status
+
+            with self.connection:
+                active_opportunities = database.get_active_opportunities()
+                best_match = find_best_match(opp_data, active_opportunities)
+                if best_match and best_match.is_duplicate:
                     logger.info(
-                        "[DB] Drive %s: %s - %s (classification=%s, priority=%s)",
-                        action,
+                        "Fuzzy duplicate detected for %s - %s (Confidence: %s%%)",
                         opp_data["company_name"],
                         opp_data["role"],
-                        classification,
-                        opp_data["priority"],
+                        best_match.confidence_score,
                     )
+                    opp_data["company_name"] = best_match.candidate["company_name"]
+                    opp_data["role"] = best_match.candidate["role"]
 
-                database.log_processed_email(
-                    gmail_message_id=msg_id,
-                    subject=subject,
-                    sender=sender,
-                    received_at=timestamp,
-                    opportunity_id=opp_id,
-                    filter_score=decision.score,
-                    filter_decision=asdict(decision),
-                    processed_status="processed",
+                formatted_date = timestamp
+                try:
+                    if timestamp:
+                        if "T" in timestamp:
+                            dt = datetime.fromisoformat(timestamp)
+                        else:
+                            dt = datetime.strptime(timestamp, "%d-%b-%Y %I:%M %p")
+                        formatted_date = dt.strftime("%d-%b-%Y %I:%M %p")
+                except Exception:
+                    pass
+
+                opp_data["email_received_at"] = formatted_date
+                opp_data["last_update_timestamp"] = utc_now_iso()
+
+                eligibility_status = evaluate_eligibility(opp_data, user_profile)
+                if eligibility_status != "MANUAL_REVIEW":
+                    opp_data["eligibility_status"] = eligibility_status
+
+                from placement_mail_tracker.utils.scoring import compute_priority
+
+                opp_data["priority"] = compute_priority(opp_data, user_profile)
+
+                opp_id, created = database.insert_or_update_opportunity(
+                    opp_data,
+                    source_email_id=msg_id,
+                    source_thread_id=thread_id,
                     email_classification=classification,
                 )
-                processed_count += 1
-
-            except Exception as error:
-                logger.exception("Failed to process email %s: %s", msg_id, error)
-                database.log_processed_email(
-                    gmail_message_id=msg_id,
-                    subject=subject,
-                    sender=sender,
-                    received_at=timestamp,
-                    filter_score=decision.score,
-                    filter_decision=asdict(decision),
-                    processed_status="PENDING_EXTRACTION",
-                    error_message=str(error),
-                    email_classification=classification,
+                action = "inserted" if created else "updated"
+                if created:
+                    stats["created"] += 1
+                else:
+                    stats["updated"] += 1
+                logger.info(
+                    "[DB] Drive %s: %s - %s (classification=%s, priority=%s)",
+                    action,
+                    opp_data["company_name"],
+                    opp_data["role"],
+                    classification,
+                    opp_data["priority"],
                 )
-                error_count += 1
 
-        # Sync to Google Sheets
+            database.log_processed_email(
+                gmail_message_id=msg_id,
+                subject=subject,
+                sender=sender,
+                received_at=timestamp,
+                opportunity_id=opp_id,
+                filter_score=decision.score,
+                filter_decision=asdict(decision),
+                processed_status="processed",
+                email_classification=classification,
+            )
+            stats["processed"] += 1
+
+        except Exception as error:
+            logger.exception("Failed to process email %s: %s", msg_id, error)
+            database.log_processed_email(
+                gmail_message_id=msg_id,
+                subject=subject,
+                sender=sender,
+                received_at=timestamp,
+                filter_score=decision.score,
+                filter_decision=asdict(decision),
+                processed_status="PENDING_EXTRACTION",
+                error_message=str(error),
+                email_classification=classification,
+            )
+            stats["errors"] += 1
+
+    def _execute_sync_pipelines(
+        self, database: DatabaseManager, sheets_client: SheetsClient, report: RunReport
+    ) -> None:
         sheets_sync_successful = False
         logger.info("[SYNC] Starting Sheet Sync")
         try:
-            for attempt in range(1, 4):
-                try:
-                    sheets_client.sync.sync_active_opportunities(database)
-                    sheets_sync_successful = True
-                    logger.info("[SYNC] Google Sheets Write Success")
-                    break
-                except Exception as e:
-                    import http.client
-                    is_retryable = False
-                    if isinstance(e, HttpError) and e.resp.status in {429, 500, 502, 503, 504}:
-                        is_retryable = True
-                    elif isinstance(e, (socket.error, socket.timeout, http.client.HTTPException, ConnectionError, TimeoutError)):
-                        is_retryable = True
-                    
-                    if is_retryable and attempt < 3:
-                        backoff = attempt * 2.0
-                        logger.warning("Retry attempt %s. Backoff duration %ss. Exception type: %s (%s)", attempt, backoff, type(e).__name__, e)
-                        time.sleep(backoff)
-                    else:
-                        raise
-        except Exception as sync_error:
-            logger.error("[SYNC] Google Sheets Write Failed: %s", sync_error)
-            report.mark_component(
-                "sheets",
-                False,
-                str(sync_error),
-                critical=self.settings.is_production,
-            )
+            sheets_client.sync.sync_active_opportunities(database)
+            sheets_sync_successful = True
+            logger.info("[SYNC] Google Sheets Write Success")
+        except Exception as e:
+            logger.exception("[SYNC] Google Sheets Sync Failed: %s", e)
 
-        if not sheets_sync_successful and sheets_client.sync.last_error:
+        if not sheets_sync_successful:
             report.mark_component(
-                "sheets",
+                "google_sheets",
                 False,
                 sheets_client.sync.last_error,
                 critical=self.settings.is_production,
             )
 
-        # Feature 2 & 3: Smart Alerting
         logger.info("Checking for upcoming deadlines and events")
         try:
             from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
+
             alert_generator = AlertGenerator(database, self.settings)
             alert_generator.check_and_send_alerts()
         except Exception as e:
             logger.exception("Alert generation failed: %s", e)
-            report.mark_component(
-                "notifications",
-                False,
-                str(e),
-                critical=False,
-            )
+            report.mark_component("notifications", False, str(e), critical=False)
 
-        # Summary
+    def _finalize_report(self, report: RunReport, stats: dict[str, int]) -> None:
         gemini_savings = (
-            f"{(rule_only_count / (rule_only_count + gemini_calls) * 100):.0f}%"
-            if (rule_only_count + gemini_calls) > 0
+            f"{(stats['rule_only'] / (stats['rule_only'] + stats['gemini_calls']) * 100):.0f}%"
+            if (stats["rule_only"] + stats["gemini_calls"]) > 0
             else "N/A"
         )
 
         logger.info(
             "Sync cycle finished: processed=%s skipped=%s error=%s "
             "gemini_calls=%s rule_only=%s gemini_savings=%s",
-            processed_count, skipped_count, error_count,
-            gemini_calls, rule_only_count, gemini_savings,
+            stats["processed"],
+            stats["skipped"],
+            stats["errors"],
+            stats["gemini_calls"],
+            stats["rule_only"],
+            gemini_savings,
         )
 
         report.metrics = SyncMetrics(
-            processed_messages=processed_count,
-            skipped_messages=skipped_count,
-            error_messages=error_count,
-            drives_created=drives_created,
-            drives_updated=drives_updated,
-            gemini_calls=gemini_calls,
-            rule_only=rule_only_count,
+            processed_messages=stats["processed"],
+            skipped_messages=stats["skipped"],
+            error_messages=stats["errors"],
+            drives_created=stats["created"],
+            drives_updated=stats["updated"],
+            gemini_calls=stats["gemini_calls"],
+            rule_only=stats["rule_only"],
         )
 
-        if error_count:
-            report.add_warning(f"{error_count} email(s) failed processing")
-            
-        # Always update fetch state to prevent Gmail API quota waste on next run.
-        # Failed emails are safely stored in the database with PENDING_EXTRACTION status
-        # and will be retried automatically from the DB queue.
+        if stats["errors"]:
+            report.add_warning(f"{stats['errors']} email(s) failed processing")
+
         import json
+
         fetch_state_path = Path(self.settings.fetch_state_file)
         fetch_state_path.parent.mkdir(parents=True, exist_ok=True)
         fetch_state_path.write_text(
             json.dumps({"last_successful_fetch": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}),
-            encoding="utf-8"
+            encoding="utf-8",
         )
-
-        return report
-
-
-def run_once(connection: sqlite3.Connection, settings: Settings) -> RunReport:
-    """Run one full sync cycle."""
-    return PlacementTrackerRunner(connection=connection, settings=settings).run_once()

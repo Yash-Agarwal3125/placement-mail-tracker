@@ -93,24 +93,40 @@ class GoogleSheetsSync:
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
         """Sync all drives, companies, and dashboard to Google Sheets with resilience."""
-        try:
-            return self._sync_active_opportunities_internal(database)
-        except Exception as e:
-            from googleapiclient.errors import HttpError
-            if isinstance(e, HttpError):
-                self.last_error = str(e)
-                if self.settings.is_production:
-                    raise
-                logger.exception("Unable to sync Google Sheet: %s", e)
-                return {"created": 0, "updated": 0, "skipped": 0}
-            elif isinstance(e, SheetsAuthenticationError):
-                self.last_error = str(e)
-                if self.settings.is_production:
-                    raise e
-                logger.warning("%s", e)
-                return {"created": 0, "updated": 0, "skipped": 0}
-            else:
-                raise
+        import time
+        from googleapiclient.errors import HttpError
+        import socket
+        import http.client
+
+        for attempt in range(1, 4):
+            try:
+                return self._sync_active_opportunities_internal(database)
+            except Exception as e:
+                is_retryable = False
+                if isinstance(e, HttpError) and e.resp.status in {429, 500, 502, 503, 504}:
+                    is_retryable = True
+                elif isinstance(e, (socket.error, socket.timeout, http.client.HTTPException, ConnectionError, TimeoutError)):
+                    is_retryable = True
+                
+                if is_retryable and attempt < 3:
+                    backoff = 2 if attempt == 1 else 5
+                    logger.warning("Retry attempt %s. Backoff duration %ss. Exception type: %s (%s)", attempt, backoff, type(e).__name__, e)
+                    time.sleep(backoff)
+                else:
+                    if isinstance(e, HttpError):
+                        self.last_error = str(e)
+                        if self.settings.is_production:
+                            raise
+                        logger.exception("Unable to sync Google Sheet: %s", e)
+                        return {"created": 0, "updated": 0, "skipped": 0}
+                    elif isinstance(e, SheetsAuthenticationError):
+                        self.last_error = str(e)
+                        if self.settings.is_production:
+                            raise e
+                        logger.warning("%s", e)
+                        return {"created": 0, "updated": 0, "skipped": 0}
+                    else:
+                        raise
 
     def _sync_active_opportunities_internal(self, database: DatabaseManager) -> dict[str, int]:
         """Internal method to sync all drives, companies, and dashboard to Google Sheets."""

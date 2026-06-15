@@ -1,6 +1,6 @@
 """Tests for heartbeat updates and missed-run detection."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from placement_mail_tracker.reliability.heartbeat import HeartbeatManager
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
@@ -22,7 +22,7 @@ def test_heartbeat_updates_after_success(tmp_path) -> None:
 
 def test_inactivity_detection_warns_after_threshold(tmp_path) -> None:
     heartbeat = HeartbeatManager(tmp_path / "heartbeat.json")
-    previous = datetime(2026, 6, 8, 0, 0, tzinfo=UTC)
+    previous = datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc)
     heartbeat.heartbeat_path.write_text(
         f'{{"last_successful_run": "{previous.isoformat()}"}}',
         encoding="utf-8",
@@ -39,7 +39,7 @@ def test_inactivity_detection_warns_after_threshold(tmp_path) -> None:
 
 def test_inactivity_detection_allows_recent_success(tmp_path) -> None:
     heartbeat = HeartbeatManager(tmp_path / "heartbeat.json")
-    previous = datetime(2026, 6, 8, 0, 0, tzinfo=UTC)
+    previous = datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc)
     heartbeat.heartbeat_path.write_text(
         f'{{"last_successful_run": "{previous.isoformat()}"}}',
         encoding="utf-8",

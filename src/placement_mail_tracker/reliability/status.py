@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from placement_mail_tracker.utils.time import utc_now_iso
 
 
-class RunStatus(StrEnum):
+class RunStatus(str, Enum):
     """Final status for one scheduled sync run."""
 
     SUCCESS = "SUCCESS"
