@@ -93,43 +93,24 @@ class GoogleSheetsSync:
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
         """Sync all drives, companies, and dashboard to Google Sheets with resilience."""
-        backoffs = [2, 5, 10]
-        for attempt, backoff in enumerate(backoffs + [0]):
-            try:
-                return self._sync_active_opportunities_internal(database)
-            except Exception as e:
-                is_retryable = False
-                import http.client
-                import socket
-
-                from googleapiclient.errors import HttpError
-                
-                if isinstance(e, HttpError):
-                    if e.resp.status in {429, 500, 502, 503, 504}:
-                        is_retryable = True
-                elif isinstance(e, (socket.error, socket.timeout, http.client.HTTPException, ConnectionError, TimeoutError)):
-                    is_retryable = True
-                    
-                if is_retryable and attempt < len(backoffs):
-                    logger.warning("Google Sheets network error: %s. Retrying in %ss...", e, backoff)
-                    import time
-                    time.sleep(backoff)
-                else:
-                    # Non-retryable or out of retries
-                    if isinstance(e, HttpError):
-                        self.last_error = str(e)
-                        if self.settings.is_production:
-                            raise
-                        logger.exception("Unable to sync Google Sheet: %s", e)
-                        return {"created": 0, "updated": 0, "skipped": 0}
-                    elif isinstance(e, SheetsAuthenticationError):
-                        self.last_error = str(e)
-                        if self.settings.is_production:
-                            raise e
-                        logger.warning("%s", e)
-                        return {"created": 0, "updated": 0, "skipped": 0}
-                    else:
-                        raise
+        try:
+            return self._sync_active_opportunities_internal(database)
+        except Exception as e:
+            from googleapiclient.errors import HttpError
+            if isinstance(e, HttpError):
+                self.last_error = str(e)
+                if self.settings.is_production:
+                    raise
+                logger.exception("Unable to sync Google Sheet: %s", e)
+                return {"created": 0, "updated": 0, "skipped": 0}
+            elif isinstance(e, SheetsAuthenticationError):
+                self.last_error = str(e)
+                if self.settings.is_production:
+                    raise e
+                logger.warning("%s", e)
+                return {"created": 0, "updated": 0, "skipped": 0}
+            else:
+                raise
 
     def _sync_active_opportunities_internal(self, database: DatabaseManager) -> dict[str, int]:
         """Internal method to sync all drives, companies, and dashboard to Google Sheets."""
@@ -246,11 +227,20 @@ class GoogleSheetsSync:
             ).execute()
 
         # Get existing rows
+        # We only need to fetch columns up to the key_index for deduplication
+        end_col = chr(ord('A') + key_index)
+        logger.info("[SYNC] Starting sheet read for %s range A:%s", tab_name, end_col)
+        import time
+        start_time = time.time()
+        
         response = values.get(
             spreadsheetId=self.settings.google_sheet_id,
-            range=f"{_quote(tab_name)}!A:Z",
+            range=f"{_quote(tab_name)}!A:{end_col}",
         ).execute()
+        
+        duration = time.time() - start_time
         existing_rows = response.get("values", [])
+        logger.info("[SYNC] Finished sheet read for %s. Fetched %s rows in %.2fs", tab_name, len(existing_rows), duration)
 
         existing_by_key: dict[str, int] = {}
         for row_number, row in enumerate(existing_rows[1:], start=2):
@@ -308,17 +298,21 @@ class GoogleSheetsSync:
 
         values = self._values()
 
-        values.clear(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{_quote('Dashboard')}!A:B",
-        ).execute()
-
+        import time
+        start_time = time.time()
+        
+        # We skip the clear() call to avoid temporary blank screens and reduce API calls.
+        # Since the dashboard metrics are fixed in number (8 metrics), updating
+        # the fixed range will cleanly overwrite the old values without leaving ghost rows.
         values.update(
             spreadsheetId=self.settings.google_sheet_id,
             range=f"{_quote('Dashboard')}!A1:B{len(dashboard_data) + 1}",
             valueInputOption="USER_ENTERED",
             body={"values": [DASHBOARD_HEADERS] + dashboard_data},
         ).execute()
+        
+        duration = time.time() - start_time
+        logger.info("[SYNC] Finished dashboard update in %.2fs", duration)
 
     def _apply_formatting(self) -> None:
         """Phase 6: Apply freeze header, conditional formatting, auto-sort."""

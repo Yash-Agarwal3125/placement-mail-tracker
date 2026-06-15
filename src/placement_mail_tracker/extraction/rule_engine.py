@@ -199,6 +199,12 @@ _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"human\s*resource\s*(round|interview))",
         re.IGNORECASE,
     )),
+    ("OA", re.compile(
+        r"(online\s*(assessment|test)|oa\s*(scheduled|date|link)|"
+        r"hackerrank|coding\s*test|assessment\s*scheduled|"
+        r"aptitude\s*test)",
+        re.IGNORECASE,
+    )),
     ("SHORTLISTED", re.compile(
         r"(shortlist|short[\-\s]list|shortlisted\s*students?|"
         r"selected\s*for\s*(next|further|interview)|qualified)",
@@ -208,12 +214,6 @@ _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"(interview\s*(scheduled|process|round|date)|"
         r"next\s*round.*selection|technical\s*interview|"
         r"gd.*round|group\s*discussion)",
-        re.IGNORECASE,
-    )),
-    ("OA", re.compile(
-        r"(online\s*(assessment|test)|oa\s*(scheduled|date|link)|"
-        r"hackerrank|coding\s*test|assessment\s*scheduled|"
-        r"aptitude\s*test)",
         re.IGNORECASE,
     )),
     ("REGISTERED", re.compile(
@@ -347,6 +347,19 @@ _COMPANY_FROM_SUBJECT = [
     ),
 ]
 
+_COMPANY_FROM_BODY_PATTERNS = [
+    re.compile(
+        r"(?:company|organization|employer)\s*[:\-]?\s*"
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:welcome to|hiring for)\s+"
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
+        re.IGNORECASE,
+    ),
+]
+
 
 @dataclass
 class RuleExtractionResult:
@@ -368,10 +381,14 @@ class RuleExtractionResult:
     def needs_gemini(self) -> bool:
         """Return True if critical fields are missing and Gemini should be called."""
         critical_missing = []
+        is_follow_up = self.email_classification in (
+            "OA_UPDATE", "INTERVIEW_UPDATE", "SHORTLIST_UPDATE", "OFFER_UPDATE", "DRIVE_UPDATE"
+        )
         if not self.company_name:
             critical_missing.append("company_name")
         if not self.role:
-            critical_missing.append("role")
+            if not (is_follow_up and self.company_name and self.current_status != "OPEN"):
+                critical_missing.append("role")
         if self.current_status == "OPEN" and self.email_classification == "IRRELEVANT":
             critical_missing.append("status")
         return len(critical_missing) > 0
@@ -419,9 +436,15 @@ def extract_from_email(
     result.current_status = detect_status_from_text(subject, body)
 
     # 3. Extract company name
+    ext_source = "SUBJECT"
     company = _first_match(_COMPANY_FROM_SUBJECT, subject)
+    if not company:
+        ext_source = "BODY"
+        company = _first_match(_COMPANY_FROM_BODY_PATTERNS, body[:200])
+
     if company:
         result.company_name = normalize_company_name(company)
+        logger.info("Extracted company '%s' from %s", result.company_name, ext_source)
 
     # 4. Extract role
     result.role = _first_match(_ROLE_PATTERNS, combined)

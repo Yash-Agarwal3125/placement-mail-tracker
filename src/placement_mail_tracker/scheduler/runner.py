@@ -12,7 +12,6 @@ import json
 import logging
 import socket
 import sqlite3
-import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -44,7 +43,7 @@ from placement_mail_tracker.utils.time import utc_now_iso
 # ---------------------------------------------------------------------------
 # Safeguard 1: Set a global network socket timeout to prevent infinite hangs
 # ---------------------------------------------------------------------------
-socket.setdefaulttimeout(15.0)
+socket.setdefaulttimeout(60.0)
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +190,8 @@ class PlacementTrackerRunner:
                     if api_error.resp.status in {429, 503} and attempt < 3:
                         sleep_time = attempt * 2.0
                         logger.warning(
-                            "Gmail API rate limit hit (%s). Retrying in %ss...",
-                            api_error.resp.status, sleep_time,
+                            "Retry attempt %s. Backoff duration %ss. Exception type: HttpError (%s)",
+                            attempt, sleep_time, api_error.resp.status
                         )
                         time.sleep(sleep_time)
                     else:
@@ -418,9 +417,18 @@ class PlacementTrackerRunner:
                     sheets_sync_successful = True
                     logger.info("[SYNC] Google Sheets Write Success")
                     break
-                except HttpError as sheets_error:
-                    if sheets_error.resp.status in {429, 503} and attempt < 3:
-                        time.sleep(attempt * 2.0)
+                except Exception as e:
+                    import http.client
+                    is_retryable = False
+                    if isinstance(e, HttpError) and e.resp.status in {429, 500, 502, 503, 504}:
+                        is_retryable = True
+                    elif isinstance(e, (socket.error, socket.timeout, http.client.HTTPException, ConnectionError, TimeoutError)):
+                        is_retryable = True
+                    
+                    if is_retryable and attempt < 3:
+                        backoff = attempt * 2.0
+                        logger.warning("Retry attempt %s. Backoff duration %ss. Exception type: %s (%s)", attempt, backoff, type(e).__name__, e)
+                        time.sleep(backoff)
                     else:
                         raise
         except Exception as sync_error:

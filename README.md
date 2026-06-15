@@ -1,180 +1,143 @@
-# Placement Mail Tracker
+# 🎓 Placement Mail Tracker
 
-Placement Mail Tracker is a lightweight Python system for tracking placement and
-internship emails from Gmail, extracting structured drive details, storing them in
-SQLite, syncing Google Sheets, and sending notifications.
+![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+![Status](https://img.shields.io/badge/status-Production--Ready-success)
 
-It is designed for a personal Windows PC running Windows Task Scheduler. Each run
-starts, completes one sync cycle, updates local reliability state, and exits.
+**Placement Mail Tracker** is a robust, lightweight, and self-healing Python automation system designed for university students and job seekers. It securely monitors your Gmail inbox for placement and internship opportunities, extracts key structured details using Google Gemini AI, stores the records locally in SQLite, and seamlessly synchronizes them to a Google Sheet. 
 
-## Planned Features
+It is specifically engineered to run as a **zero-touch, one-shot batch process** via Windows Task Scheduler.
 
-- Read emails from Gmail using the Gmail API and OAuth2
-- Filter placement and internship emails
-- Extract structured data using Google Gemini
-- Store extracted records in SQLite
-- Sync important records to Google Sheets
-- Send Telegram and email notifications for new updates
-- Run automatically every few hours through Windows Task Scheduler
-- Prepare for future GitHub Actions automation
+---
 
-## Tech Stack
+## ✨ Core Features
 
-- Python 3.12+
-- SQLite
-- python-dotenv
-- Google Gmail API
-- Google Gemini API
-- Google Sheets API
-- Telegram Bot API
+- **📧 Automated Email Monitoring:** Securely reads your inbox using the official Google Gmail API (OAuth2).
+- **🧠 AI-Powered Extraction:** Leverages Google Gemini AI to intelligently parse unstructured emails and extract structured data (company name, role, deadlines, eligibility).
+- **🗄️ Resilient Local Storage:** Persists all discovered opportunities to a local SQLite database with strict transactional safety.
+- **📊 Google Sheets Synchronization:** Automatically syncs extracted data to your personal Google Sheet. Handles rate limits and offline states gracefully.
+- **🔔 Smart Notifications:** Sends failure alerts and summaries via SMTP Email (and is designed to support Telegram).
+- **🛡️ Self-Healing & Reliability:** Includes a single-instance lock, heartbeat tracking, offline recovery, token corruption healing, and consecutive failure alerting.
 
-## Project Structure
+---
 
-```text
-placement-mail-tracker/
-|-- .github/
-|   `-- workflows/
-|       `-- ci.yml
-|-- config/
-|   `-- .gitkeep
-|-- data/
-|   `-- .gitkeep
-|-- logs/
-|   `-- .gitkeep
-|-- scripts/
-|   `-- init_db.py
-|-- src/
-|   `-- placement_mail_tracker/
-|       |-- app.py
-|       |-- config/
-|       |-- db/
-|       |-- filters/
-|       |-- gmail/
-|       |   |-- client.py
-|       |   `-- gmail_client.py
-|       |-- ai/
-|       |-- gemini/
-|       |-- models/
-|       |-- notifications/
-|       |-- scheduler/
-|       |-- sheets/
-|       `-- utils/
-|-- tests/
-|   |-- test_gmail_parsing.py
-|   `-- test_imports.py
-|-- .env.example
-|-- .gitignore
-|-- pyproject.toml
-`-- requirements.txt
+## 🏗️ Architecture & Runtime Model
+
+The production runner operates on a straightforward one-shot model. It does not use background workers, Celery, Redis, or infinite loops, making it extremely resource-efficient.
+
+```mermaid
+graph TD
+    A[Windows Task Scheduler] -->|Triggers every 3 hours| B(python main.py)
+    B --> C{Acquire Local Lock}
+    C -->|Locked| D[Exit]
+    C -->|Acquired| E[Fetch Unread Gmail]
+    E --> F[Filter & Extract via Gemini]
+    F --> G[(Store in SQLite)]
+    G --> H[Sync to Google Sheets]
+    H --> I[Send Notifications]
+    I --> J[Update Heartbeat & Health State]
+    J --> K[Exit 0]
 ```
 
-## Setup
+---
 
-1. Create and activate a virtual environment.
+## 🚀 Quick Setup Guide
 
-```bash
+For comprehensive, step-by-step instructions, including Google Cloud setup and Task Scheduler configuration, please refer to the [📖 Operations & User Manual](USER_MANUAL.md).
+
+### 1. Prerequisites
+- **Python 3.12+**
+- A Google Cloud Console Account (to enable Gmail & Sheets APIs)
+- A Google Gemini API Key
+
+### 2. Installation
+```powershell
+# Create and activate a virtual environment
 python -m venv .venv
-```
+.venv\Scripts\Activate.ps1
 
-2. Install dependencies.
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-3. Copy environment variables.
+### 3. Configuration
+1. Copy the environment template:
+   ```powershell
+   cp .env.example .env
+   ```
+2. Update `.env` with your Google Gemini API key, Google Sheet ID, and SMTP credentials.
+3. Download your Google Cloud Desktop OAuth Credentials and save them as `config/credentials.json`.
 
-```bash
-cp .env.example .env
-```
-
-4. Update `.env` with your API keys and configuration.
-
-For Gmail, create an OAuth client in Google Cloud Console, enable the Gmail API, and place the downloaded OAuth client file at:
-
-```text
-config/credentials.json
-```
-
-The first Gmail run opens a browser for OAuth consent and saves the local token to:
-
-```text
-config/token.json
-```
-
-Both JSON files are ignored by git.
-
-5. Initialize the SQLite database.
-
-```bash
-python scripts/init_db.py
-```
-
-6. Run one sync cycle.
-
-```bash
+### 4. First-Time Run
+Execute the main script. A browser window will open asking you to grant the application access to your Gmail and Google Sheets.
+```powershell
 python main.py
 ```
+*Once authenticated, secure OAuth tokens are saved locally in `config/`. You will not need to authenticate again.*
 
-## Runtime Model
+---
 
-The production runner is intentionally simple:
+## ⚙️ Environment Modes
 
-```text
-Windows Task Scheduler
--> python main.py
--> validate config
--> acquire local lock
--> fetch Gmail
--> process drives
--> sync Google Sheets
--> send notifications
--> update heartbeat/state
--> exit
+You can control the application's strictness by setting `APP_ENV` in your `.env` file:
+
+- `production`: **(Default)** Validates all required credentials (Gmail, Sheets, Gemini, DB) at startup. Fails fast if anything is missing.
+- `development`: Missing credentials log as warnings, allowing you to test specific modules locally without a full setup.
+- `testing`: Optimized for the automated test suite.
+
+**Exit Codes:**
+- `0`: Success
+- `1`: Critical Failure
+- `2`: Partial Success (e.g., ran successfully but encountered warnings or rate limits)
+
+---
+
+## 🩺 Reliability & Self-Healing
+
+The system is designed to run unattended on a personal Windows machine and automatically recover from common failures:
+- **`tracker.lock`**: Prevents concurrent runs if a previous sync cycle hangs or overlaps.
+- **`system_health.json`**: Tracks consecutive failures. If failures exceed the `FAILURE_ALERT_THRESHOLD` (default: 3), an emergency SMTP alert is sent to the configured `NOTIFICATION_EMAIL`.
+- **`heartbeat.json`**: Records the last successful sync. If the system stops running for more than 6 hours, an inactivity warning is logged upon the next execution.
+- **Token Auto-Healing**: If power failures corrupt the OAuth JSON tokens, the system gracefully deletes them and safely aborts rather than crashing indefinitely.
+
+---
+
+## 🧪 Testing & Auditing
+
+The project includes an extensive suite of unit, integration, and End-to-End (E2E) tests.
+
+**Run the Security & Configuration Audit:**
+```powershell
+python scripts/run_audit.py
 ```
 
-The project does not use APScheduler, Celery, Redis, RabbitMQ, background
-workers, infinite loops, or a web server.
+**Run the Full Test Suite:**
+```powershell
+python -m pytest
+```
 
-## Environment Modes
+---
 
-Set `APP_ENV` in `.env`.
+## 📁 Project Structure
 
-- `development`: missing Gmail, Sheets, or Gemini credentials are warnings so
-  beginner setup and local tests can continue.
-- `testing`: behaves like development for credentials and is intended for
-  automated tests.
-- `production`: validates required Gmail, Sheets, Gemini, database, and `.env`
-  settings at startup. Missing required credentials fail fast and return a
-  failed run status.
-
-Exit codes:
-
-- `0`: success
-- `1`: failed
-- `2`: partial success
-
-## Reliability Files
-
-- `logs/app.log`: rotating application log, 10 MB max per file, 5 backups.
-- `data/system_health.json`: tracks `last_success`, `last_failure`,
-  `consecutive_failures`, and whether the current failure streak was alerted.
-- `data/heartbeat.json`: updated only after a successful sync and includes the
-  last successful run, processed message count, created/updated drives, and
-  final status.
-
-If the last successful heartbeat is older than `HEARTBEAT_INACTIVITY_HOURS`
-defaulting to 6, the next scheduled run logs an inactivity warning. If
-`consecutive_failures` reaches `FAILURE_ALERT_THRESHOLD` defaulting to 3, the
-runner sends one failure alert to `NOTIFICATION_EMAIL` or `EMAIL_RECEIVER` for
-that failure streak.
-
-## Current Status
-
-Gmail API integration, placement filtering, Gemini extraction, SQLite storage,
-Google Sheets sync, notification scaffolding, one-shot runner reliability,
-heartbeat tracking, failure alerting, and log rotation are implemented.
-
-## Future Automation
-
-The `.github/workflows/ci.yml` file is included as a starting point for future GitHub Actions checks.
+```text
+placement-mail-tracker/
+├── config/              # Google OAuth credentials and tokens
+├── data/                # SQLite database and health/heartbeat trackers
+├── logs/                # Rotating application and scheduler logs
+├── scripts/             # Utility scripts (.bat wrapper, audit, smtp test)
+├── src/
+│   └── placement_mail_tracker/
+│       ├── config/      # Settings and validation
+│       ├── db/          # SQLite schema and operations
+│       ├── filters/     # Email subject/sender filtering rules
+│       ├── gemini/      # AI extraction logic
+│       ├── gmail/       # Gmail API client
+│       ├── reliability/ # Health, locks, and heartbeat tracking
+│       ├── scheduler/   # Main run cycle orchestrator
+│       └── sheets/      # Google Sheets API client
+├── tests/               # Pytest suite
+├── .env                 # Environment variables
+├── main.py              # Application entry point
+└── USER_MANUAL.md       # Detailed operations guide
+```

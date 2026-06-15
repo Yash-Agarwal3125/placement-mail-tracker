@@ -11,7 +11,10 @@ This script executes a single synchronization cycle:
 from __future__ import annotations
 
 import logging
+import os
 import sys
+
+import psutil
 
 from placement_mail_tracker.config.settings import get_settings
 from placement_mail_tracker.config.validator import ConfigValidator
@@ -46,7 +49,42 @@ def main() -> int:
     logger.info("==================================================")
     logger.info("Environment: %s", settings.app_env)
     logger.info("Database URL: %s", settings.database_url)
-
+    parent = psutil.Process(os.getppid())
+    try:
+        logger.info("==================================================")
+        logger.info("[RUN_DIAGNOSTICS]")
+        logger.info("PID=%s", os.getpid())
+        logger.info("PPID=%s", os.getppid())
+        logger.info("ParentName=%s", parent.name())
+        logger.info("ParentExe=%s", parent.exe())
+        logger.info("ParentCmdLine=%s", " ".join(parent.cmdline()))
+        try:
+            grandparent = parent.parent()
+            if grandparent:
+                logger.info("GrandParentName=%s", grandparent.name())
+                logger.info("GrandParentExe=%s", grandparent.exe())
+                logger.info("GrandParentCmdLine=%s", " ".join(grandparent.cmdline()))
+                logger.info("Process tree:")
+                logger.info("  %s", grandparent.name())
+                logger.info("    ↓")
+                logger.info("  %s", parent.name())
+                logger.info("    ↓")
+                logger.info("  Current Process (%s)", os.getpid())
+        except Exception as gp_err:
+            logger.warning("Could not fetch grandparent info: %s", gp_err)
+        logger.info("CurrentWorkingDirectory=%s", os.getcwd())
+        logger.info("Executable=%s", sys.executable)
+        logger.info("CommandLine=%s", " ".join(sys.argv))
+        logger.info("Username=%s", psutil.Process().username())
+        logger.info("==================================================")
+    except Exception as e:
+        logger.warning("Failed to collect run diagnostics: %s", e)
+    logger.info(
+        "[RUN_SOURCE] PID=%s Parent=%s ParentName=%s",
+        os.getpid(),
+        parent.pid,
+        parent.name()
+    )
     inactivity = heartbeat_manager.detect_inactivity(
         max_inactive_hours=settings.heartbeat_inactivity_hours
     )
