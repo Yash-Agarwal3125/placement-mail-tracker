@@ -281,6 +281,63 @@ class GoogleSheetsSync:
                 body={"values": rows_to_append},
             ).execute()
 
+        # Purge rows older than 60 days based on Column A (email_received_at)
+        from datetime import datetime, timedelta
+        cutoff_date = datetime.now() - timedelta(days=60)
+        
+        # Re-fetch column A to find rows to delete (since we may have updated/appended)
+        response_a = values.get(
+            spreadsheetId=self.settings.google_sheet_id,
+            range=f"{_quote(tab_name)}!A:A",
+        ).execute()
+        
+        rows_a = response_a.get("values", [])
+        rows_to_delete = []
+        for row_idx, row in enumerate(rows_a):
+            if row_idx == 0:  # Skip header
+                continue
+            if not row or not row[0]:
+                continue
+            date_str = row[0].strip()
+            try:
+                # Expected format: 15-Jun-2026 10:30 AM or ISO format
+                if "T" in date_str:
+                    dt = datetime.fromisoformat(date_str)
+                else:
+                    dt = datetime.strptime(date_str, "%d-%b-%Y %I:%M %p")
+                if dt < cutoff_date:
+                    rows_to_delete.append(row_idx)
+            except Exception:
+                pass
+                
+        if rows_to_delete:
+            # Get sheetId for the tab_name
+            service = self._get_service()
+            sheet_metadata = service.spreadsheets().get(spreadsheetId=self.settings.google_sheet_id).execute()
+            sheet_id = next((s["properties"]["sheetId"] for s in sheet_metadata.get("sheets", []) if s["properties"]["title"] == tab_name), None)
+            
+            if sheet_id is not None:
+                delete_requests = []
+                # Delete in reverse order so indices don't shift
+                for row_idx in sorted(rows_to_delete, reverse=True):
+                    delete_requests.append({
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": row_idx,
+                                "endIndex": row_idx + 1
+                            }
+                        }
+                    })
+                
+                if delete_requests:
+                    service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.settings.google_sheet_id,
+                        body={"requests": delete_requests}
+                    ).execute()
+                    logger.info("[SYNC] Purged %d old rows from %s", len(delete_requests), tab_name)
+
     def _sync_dashboard(self, database: DatabaseManager) -> None:
         """Phase 10: Compute and sync static dashboard metrics."""
         metrics = database.get_dashboard_metrics()

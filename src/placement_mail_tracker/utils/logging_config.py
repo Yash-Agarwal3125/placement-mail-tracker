@@ -5,6 +5,23 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+import re
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that redacts sensitive information."""
+    
+    PATTERNS = [
+        re.compile(r"(?i)(password|secret|token|api[_-]?key|credentials)[\s]*[:=][\s]*['\"]?([^'\"\s,\}]+)['\"]?"),
+        re.compile(r"AIza[0-9A-Za-z-_]{35}"),
+        re.compile(r"1//[0-9A-Za-z-_]+"),
+    ]
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        for pattern in self.PATTERNS:
+            msg = pattern.sub(r"\1=***REDACTED***", msg)
+        return msg
+
 def setup_logging(
     level: str = "INFO",
     *,
@@ -17,17 +34,21 @@ def setup_logging(
     log_dir = log_path.parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    formatter = RedactingFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            RotatingFileHandler(
-                log_path,
-                maxBytes=max_bytes,
-                backupCount=backup_count,
-                encoding="utf-8",
-            ),
-        ],
+        handlers=[console_handler, file_handler],
         force=True,
     )

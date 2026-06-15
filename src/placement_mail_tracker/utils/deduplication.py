@@ -588,7 +588,16 @@ def find_all_matches(
     if config is None:
         config = DeduplicationConfig()
 
-    results = [compare_opportunities(incoming, c, config=config) for c in candidates]
+    inc_company = normalize_string(incoming.get(FIELD_COMPANY, ""))
+    first_char = inc_company[0] if inc_company else ""
+
+    filtered_candidates = []
+    for c in candidates:
+        cand_company = normalize_string(c.get(FIELD_COMPANY, ""))
+        if not first_char or not cand_company or cand_company[0] == first_char:
+            filtered_candidates.append(c)
+
+    results = [compare_opportunities(incoming, c, config=config) for c in filtered_candidates]
     duplicates = [r for r in results if r.is_duplicate]
     duplicates.sort(key=lambda r: r.confidence_score, reverse=True)
     return duplicates

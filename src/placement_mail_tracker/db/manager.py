@@ -75,12 +75,25 @@ PERSONAL_STATUSES = (
 )
 
 
+def _get_year_from_opportunity(opportunity: dict[str, Any]) -> str:
+    email_received_at = opportunity.get("email_received_at")
+    if email_received_at:
+        try:
+            # handle both "2026-12-31T23:59:59" and "%d-%b-%Y %I:%M %p" formats
+            if "T" in email_received_at:
+                return str(datetime.fromisoformat(email_received_at).year)
+            # Try to parse the human readable format used by runner.py
+            return str(datetime.strptime(email_received_at, "%d-%b-%Y %I:%M %p").year)
+        except Exception:
+            pass
+    return str(datetime.now().year)
+
 def generate_unique_hash(opportunity: dict[str, Any]) -> str:
     """Generate a stable hash for duplicate prevention by drive.
 
     Phase 5: Uses company + role + package + year as uniqueness key.
     """
-    year = str(datetime.now().year)
+    year = _get_year_from_opportunity(opportunity)
 
     parts = [
         _normalize_key(opportunity.get("company_name", "")),
@@ -96,6 +109,7 @@ def generate_drive_id(
     company_name: str,
     role: str | None = None,
     category: str | None = None,
+    year: str | None = None,
 ) -> str:
     """Generate a human-readable drive ID.
 
@@ -104,7 +118,7 @@ def generate_drive_id(
         DELL_2027_SUMMER_INTERN
         STANDARDCHARTERED_2027_SUMMER
     """
-    year = datetime.now().year
+    year = year or str(datetime.now().year)
 
     # Normalize company to uppercase slug
     normalized = normalize_company_name(company_name)
@@ -133,7 +147,6 @@ def generate_drive_id(
         parts.append(cat_slug)
 
     return "_".join(parts)
-
 
 class DatabaseManager:
     """High-level SQLite manager for the drive-centric placement tracker.
@@ -607,6 +620,19 @@ class DatabaseManager:
     # Processed Emails, Notifications
     # ------------------------------------------------------------------
 
+    def purge_old_processed_emails(self, days: int = 30) -> int:
+        """Purge processed_emails older than the specified number of days."""
+        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor = self.connection.execute(
+            """
+            DELETE FROM processed_emails
+            WHERE created_at < ?
+            """,
+            (cutoff_date,)
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
     def log_processed_email(
         self,
         *,
@@ -742,6 +768,7 @@ class DatabaseManager:
             company_name,
             role=opportunity.get("role"),
             category=opportunity.get("internship_or_fulltime"),
+            year=_get_year_from_opportunity(opportunity)
         )
 
         # Ensure uniqueness by appending sequence
