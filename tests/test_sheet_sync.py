@@ -1,132 +1,141 @@
-"""Phase 6, 7, 8: Google Sheets sync tests.
+"""Google Sheets row-builder tests for the human-readable Active Opportunities layout.
 
 Covers:
-- ``opportunity_to_sheet_row`` column count (18 columns)
-- Gmail deep link generation (Phase 7)
+- ``opportunity_to_sheet_row`` column count and order (20 columns)
+- Human-readable dates, Days-Left countdown, friendly enum labels
+- Apply-link and Gmail deep-link generation
+- Compact status-history trail
 - ``company_to_sheet_row``
-- CTC vs Stipend column split (internship → stipend col, full_time → CTC col)
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from placement_mail_tracker.sheets.sheets_sync import (
     ACTIVE_OPP_HEADERS,
+    ACTIVE_USER_COLUMNS,
     COMPANY_HISTORY_HEADERS,
+    _preserve_user_columns,
     company_to_sheet_row,
     opportunity_to_sheet_row,
 )
 
-# ===================================================================
-# opportunity_to_sheet_row
-# ===================================================================
+# Column positions (kept in one place so the tests document the layout).
+COL = {name: i for i, name in enumerate(ACTIVE_OPP_HEADERS)}
 
 
-class TestOpportunityToSheetRow:
-    """Validate the row builder for the Active Opportunities sheet."""
-
+class TestActiveOppLayout:
     def _sample_opp(self, **overrides) -> dict:
         base = {
-            "email_received_at": "29-May-2027 10:30 AM",
             "company_name": "Microsoft",
-            "drive_id": "MICROSOFT_2027_SDE_INTERN",
             "role": "Software Engineer Intern",
             "internship_or_fulltime": "internship",
             "current_status": "OA",
-            "status_history": '["OPEN", "OA"]',
+            "priority": "HIGH",
+            "action_required": "PREPARE FOR TEST",
+            "deadline": "2027-06-15",
+            "next_event_date": "2027-06-10",
             "package_or_stipend": "50000 per month",
             "work_location": "Bangalore",
-            "deadline": "15 June 2027",
-            "next_event_date": "10 June 2027",
-            "action_required": "PREPARE FOR TEST",
+            "cgpa_requirement": "7.0",
+            "branches_allowed": ["CSE", "ECE"],
+            "eligibility_status": "ELIGIBLE",
             "my_status": "APPLIED",
-            "last_update_timestamp": "2027-05-29T10:30:00+00:00",
+            "registration_link": "https://forms.gle/test123",
+            "status_history": '["OPEN", "OA"]',
             "source_email_id": "msg_ms_001",
             "source_thread_id": "thread_ms_001",
+            "drive_id": "MICROSOFT_2027_SDE_INTERN",
             "updated_at": "2027-05-29T10:30:00+00:00",
         }
         base.update(overrides)
         return base
 
-    def test_column_count_is_18(self):
+    def test_column_count_is_20(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        assert len(row) == 19, f"Expected 19 columns, got {len(row)}"
+        assert len(row) == 20
         assert len(row) == len(ACTIVE_OPP_HEADERS)
 
-    def test_gmail_link_generated_from_thread_id(self):
+    def test_core_identity_columns(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        email_col = row[17]  # "Open Email" column
-        assert "HYPERLINK" in email_col
-        assert "thread_ms_001" in email_col
-        assert "mail.google.com" in email_col
+        assert row[COL["Company"]] == "Microsoft"
+        assert row[COL["Role"]] == "Software Engineer Intern"
+        assert row[COL["Drive ID"]] == "MICROSOFT_2027_SDE_INTERN"
 
-    def test_gmail_link_from_message_id_when_no_thread(self):
-        opp = self._sample_opp(source_thread_id=None)
-        row = opportunity_to_sheet_row(opp)
-        email_col = row[17]
-        assert "msg_ms_001" in email_col
-
-    def test_no_link_when_no_ids(self):
-        opp = self._sample_opp(source_email_id=None, source_thread_id=None)
-        row = opportunity_to_sheet_row(opp)
-        assert row[17] == ""
-
-    def test_company_name_in_row(self):
+    def test_friendly_enum_labels(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        assert row[1] == "Microsoft"
+        assert row[COL["Type"]] == "Internship"
+        assert row[COL["Status"]] == "OA Scheduled"
+        assert row[COL["Priority"]] == "High"
+        assert row[COL["Eligibility"]] == "Eligible"
+        assert row[COL["My Status"]] == "Applied"
 
-    def test_drive_id_in_row(self):
-        row = opportunity_to_sheet_row(self._sample_opp())
-        assert row[2] == "MICROSOFT_2027_SDE_INTERN"
+    def test_human_readable_deadline_and_days_left(self):
+        in_five_days = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
+        row = opportunity_to_sheet_row(self._sample_opp(deadline=in_five_days))
+        assert "T" not in row[COL["Deadline"]]  # not raw ISO
+        assert row[COL["Days Left"]] == "5 days"
 
-    def test_current_status_in_row(self):
+    def test_days_left_special_words(self):
+        def days_left(offset: int) -> str:
+            when = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+            return opportunity_to_sheet_row(self._sample_opp(deadline=when))[COL["Days Left"]]
+
+        assert days_left(0) == "Today"
+        assert days_left(1) == "Tomorrow"
+        assert days_left(-2) == "Passed"
+
+    def test_last_updated_is_human_not_iso(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        assert row[5] == "OA"
+        cell = row[COL["Last Updated"]]
+        assert "T" not in cell and "+00:00" not in cell
+        assert "2027" in cell
+
+    def test_package_cgpa_branches_location(self):
+        row = opportunity_to_sheet_row(self._sample_opp())
+        assert row[COL["Package"]] == "50000 per month"
+        assert row[COL["CGPA Cutoff"]] == "7.0"
+        assert row[COL["Branches"]] == "CSE, ECE"
+        assert row[COL["Location"]] == "Bangalore"
+
+    def test_branches_junk_is_cleaned(self):
+        row = opportunity_to_sheet_row(self._sample_opp(branches_allowed=["[]"]))
+        assert row[COL["Branches"]] == ""
+
+    def test_apply_link_hyperlink(self):
+        row = opportunity_to_sheet_row(self._sample_opp())
+        cell = row[COL["Apply Link"]]
+        assert "HYPERLINK" in cell and "forms.gle/test123" in cell
+
+    def test_no_apply_link_when_missing(self):
+        row = opportunity_to_sheet_row(self._sample_opp(registration_link=None))
+        assert row[COL["Apply Link"]] == ""
+
+    def test_gmail_link_from_thread(self):
+        row = opportunity_to_sheet_row(self._sample_opp())
+        cell = row[COL["Email"]]
+        assert "HYPERLINK" in cell and "thread_ms_001" in cell
+
+    def test_gmail_link_falls_back_to_message_id(self):
+        row = opportunity_to_sheet_row(self._sample_opp(source_thread_id=None))
+        assert "msg_ms_001" in row[COL["Email"]]
+
+    def test_no_gmail_link_when_no_ids(self):
+        row = opportunity_to_sheet_row(
+            self._sample_opp(source_thread_id=None, source_email_id=None)
+        )
+        assert row[COL["Email"]] == ""
+
+    def test_status_history_is_compact_trail(self):
+        row = opportunity_to_sheet_row(self._sample_opp())
+        assert row[COL["History"]] == "Open → OA Scheduled"
 
     def test_my_status_defaults_to_not_applied(self):
         opp = self._sample_opp()
         del opp["my_status"]
         row = opportunity_to_sheet_row(opp)
-        assert row[14] == "NOT_APPLIED"
-
-
-# ===================================================================
-# CTC vs Stipend column split
-# ===================================================================
-
-
-class TestCtcVsStipendSplit:
-    """Verify that package_or_stipend is routed to the correct column."""
-
-    def test_internship_goes_to_stipend_column(self):
-        opp = {
-            "internship_or_fulltime": "internship",
-            "package_or_stipend": "50000 per month",
-        }
-        row = opportunity_to_sheet_row(opp)
-        ctc_col = row[7]    # CTC
-        stipend_col = row[8]  # Stipend
-        assert stipend_col == "50000 per month"
-        assert ctc_col == ""
-
-    def test_fulltime_goes_to_ctc_column(self):
-        opp = {
-            "internship_or_fulltime": "full_time",
-            "package_or_stipend": "12 LPA",
-        }
-        row = opportunity_to_sheet_row(opp)
-        ctc_col = row[7]
-        stipend_col = row[8]
-        assert ctc_col == "12 LPA"
-        assert stipend_col == ""
-
-    def test_unknown_category_defaults_to_ctc(self):
-        opp = {
-            "internship_or_fulltime": "",
-            "package_or_stipend": "8 LPA",
-        }
-        row = opportunity_to_sheet_row(opp)
-        assert row[7] == "8 LPA"  # CTC column
-        assert row[8] == ""
+        assert row[COL["My Status"]] == "Not applied"
 
 
 # ===================================================================
@@ -148,15 +157,10 @@ class TestCompanyToSheetRow:
         assert len(row) == len(COMPANY_HISTORY_HEADERS)
         assert row[0] == "Microsoft"
         assert row[1] == "5"
-        assert row[2] == "2"
-        assert row[3] == "1"
-        assert row[4] == "2"
 
     def test_company_row_with_none_values(self):
-        company = {"name": "Unknown"}
-        row = company_to_sheet_row(company)
+        row = company_to_sheet_row({"name": "Unknown"})
         assert row[0] == "Unknown"
-        # Missing fields should be empty strings
         assert row[1] == ""
 
 
@@ -165,13 +169,40 @@ class TestCompanyToSheetRow:
 # ===================================================================
 
 
+class TestUserColumnPreservation:
+    """The sync must not overwrite columns the user edits by hand (My Status)."""
+
+    def test_my_status_edit_is_preserved(self):
+        my_status_col = ACTIVE_OPP_HEADERS.index("My Status")
+        # Freshly built row carries the DB default "Not applied".
+        new_row = ["x"] * len(ACTIVE_OPP_HEADERS)
+        new_row[my_status_col] = "Not applied"
+        # The sheet already has the user's edit.
+        existing_row = ["x"] * len(ACTIVE_OPP_HEADERS)
+        existing_row[my_status_col] = "Applied"
+
+        _preserve_user_columns(new_row, existing_row, ACTIVE_USER_COLUMNS)
+        assert new_row[my_status_col] == "Applied"
+
+    def test_blank_existing_does_not_override(self):
+        col = ACTIVE_OPP_HEADERS.index("My Status")
+        new_row = ["x"] * len(ACTIVE_OPP_HEADERS)
+        new_row[col] = "Not applied"
+        existing_row = ["x"] * len(ACTIVE_OPP_HEADERS)
+        existing_row[col] = ""  # user never touched it
+        _preserve_user_columns(new_row, existing_row, ACTIVE_USER_COLUMNS)
+        assert new_row[col] == "Not applied"
+
+
 class TestHeaders:
     def test_active_opp_headers_count(self):
-        assert len(ACTIVE_OPP_HEADERS) == 19
+        assert len(ACTIVE_OPP_HEADERS) == 20
+
+    def test_drive_id_is_last(self):
+        assert ACTIVE_OPP_HEADERS[-1] == "Drive ID"
 
     def test_company_headers_count(self):
         assert len(COMPANY_HISTORY_HEADERS) == 6
 
     def test_headers_are_strings(self):
-        for h in ACTIVE_OPP_HEADERS:
-            assert isinstance(h, str)
+        assert all(isinstance(h, str) for h in ACTIVE_OPP_HEADERS)

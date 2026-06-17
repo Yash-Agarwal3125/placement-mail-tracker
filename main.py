@@ -11,10 +11,7 @@ This script executes a single synchronization cycle:
 from __future__ import annotations
 
 import logging
-import os
 import sys
-
-import psutil
 
 from placement_mail_tracker.config.settings import get_settings
 from placement_mail_tracker.config.validator import ConfigValidator
@@ -23,7 +20,7 @@ from placement_mail_tracker.db.schema import create_tables
 from placement_mail_tracker.reliability.health import FailureAlertManager, SystemHealthManager
 from placement_mail_tracker.reliability.heartbeat import HeartbeatManager
 from placement_mail_tracker.reliability.status import RunReport, RunStatus
-from placement_mail_tracker.scheduler.runner import run_once
+from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
 from placement_mail_tracker.utils.lock_manager import SingleInstanceLock
 from placement_mail_tracker.utils.logging_config import setup_logging
 
@@ -49,42 +46,8 @@ def main() -> int:
     logger.info("==================================================")
     logger.info("Environment: %s", settings.app_env)
     logger.info("Database URL: %s", settings.database_url)
-    parent = psutil.Process(os.getppid())
-    try:
-        logger.info("==================================================")
-        logger.info("[RUN_DIAGNOSTICS]")
-        logger.info("PID=%s", os.getpid())
-        logger.info("PPID=%s", os.getppid())
-        logger.info("ParentName=%s", parent.name())
-        logger.info("ParentExe=%s", parent.exe())
-        logger.info("ParentCmdLine=%s", " ".join(parent.cmdline()))
-        try:
-            grandparent = parent.parent()
-            if grandparent:
-                logger.info("GrandParentName=%s", grandparent.name())
-                logger.info("GrandParentExe=%s", grandparent.exe())
-                logger.info("GrandParentCmdLine=%s", " ".join(grandparent.cmdline()))
-                logger.info("Process tree:")
-                logger.info("  %s", grandparent.name())
-                logger.info("    ↓")
-                logger.info("  %s", parent.name())
-                logger.info("    ↓")
-                logger.info("  Current Process (%s)", os.getpid())
-        except Exception as gp_err:
-            logger.warning("Could not fetch grandparent info: %s", gp_err)
-        logger.info("CurrentWorkingDirectory=%s", os.getcwd())
-        logger.info("Executable=%s", sys.executable)
-        logger.info("CommandLine=%s", " ".join(sys.argv))
-        logger.info("Username=%s", psutil.Process().username())
-        logger.info("==================================================")
-    except Exception as e:
-        logger.warning("Failed to collect run diagnostics: %s", e)
-    logger.info(
-        "[RUN_SOURCE] PID=%s Parent=%s ParentName=%s",
-        os.getpid(),
-        parent.pid,
-        parent.name()
-    )
+    logger.info("==================================================")
+
     inactivity = heartbeat_manager.detect_inactivity(
         max_inactive_hours=settings.heartbeat_inactivity_hours
     )
@@ -116,7 +79,8 @@ def main() -> int:
                 create_tables(connection)
                 
                 # 3. Execute the full E2E orchestration pipeline
-                cycle_report = run_once(connection, settings)
+                runner = PlacementTrackerRunner(connection, settings)
+                cycle_report = runner.run_once()
                 _merge_report(report, cycle_report)
 
         return _finalize_run(report, settings, health_manager, heartbeat_manager)

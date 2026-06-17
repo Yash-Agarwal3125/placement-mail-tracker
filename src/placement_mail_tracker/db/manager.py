@@ -24,7 +24,7 @@ from typing import Any
 
 from placement_mail_tracker.db.connection import get_connection
 from placement_mail_tracker.extraction.rule_engine import normalize_company_name
-from placement_mail_tracker.utils.time import utc_now_iso
+from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ VALID_STATUSES = (
     "EXPIRED",
     "COMPLETED",
 )
+
+# Cap on stored status-history entries per drive (prevents unbounded growth).
+MAX_STATUS_HISTORY = 20
 
 # Phase 12: Personal status values
 PERSONAL_STATUSES = (
@@ -245,6 +248,8 @@ class DatabaseManager:
                 processed_status TEXT NOT NULL,
                 error_message TEXT,
                 email_classification TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_retry_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE SET NULL
@@ -286,10 +291,14 @@ class DatabaseManager:
                 ON opportunities(drive_id);
             CREATE INDEX IF NOT EXISTS idx_opportunities_thread_id
                 ON opportunities(source_thread_id);
+            CREATE INDEX IF NOT EXISTS idx_opportunities_company_name
+                ON opportunities(company_name);
             CREATE INDEX IF NOT EXISTS idx_updates_opportunity_id
                 ON updates(opportunity_id);
             CREATE INDEX IF NOT EXISTS idx_processed_emails_message_id
                 ON processed_emails(gmail_message_id);
+            CREATE INDEX IF NOT EXISTS idx_processed_emails_status
+                ON processed_emails(processed_status);
             CREATE INDEX IF NOT EXISTS idx_notifications_opportunity_id
                 ON notifications(opportunity_id);
             """
@@ -337,6 +346,9 @@ class DatabaseManager:
 
             if new_status and (not history or history[-1] != new_status):
                 history.append(new_status)
+            # Bound the history so a long-running, chatty thread can't grow it
+            # without limit (we observed 38-entry flapping arrays in the wild).
+            history = history[-MAX_STATUS_HISTORY:]
             normalized["status_history"] = json.dumps(history)
             normalized["current_status"] = new_status
         else:
@@ -439,23 +451,19 @@ class DatabaseManager:
         now = datetime.now()
         tomorrow = now + timedelta(days=1)
 
+        # Extracted dates are rarely ISO ("15 June 2026", "15-Jun-2026 10:30 AM",
+        # etc.), so parse them flexibly instead of with datetime.fromisoformat.
         def _is_tomorrow(date_str: str | None) -> bool:
             if not date_str:
                 return False
-            try:
-                dt = datetime.fromisoformat(date_str)
-                return dt.date() == tomorrow.date()
-            except (ValueError, TypeError):
-                return False
+            dt = parse_datetime_flexible(date_str)
+            return dt is not None and dt.date() == tomorrow.date()
 
         def _is_today(date_str: str | None) -> bool:
             if not date_str:
                 return False
-            try:
-                dt = datetime.fromisoformat(date_str)
-                return dt.date() == now.date()
-            except (ValueError, TypeError):
-                return False
+            dt = parse_datetime_flexible(date_str)
+            return dt is not None and dt.date() == now.date()
 
         if status == "OFFER_RECEIVED":
             return "REVIEW OFFER"
@@ -591,7 +599,11 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     def get_dashboard_metrics(self) -> dict[str, Any]:
-        """Compute dashboard metrics (Phase 10)."""
+        """Compute dashboard metrics (Phase 10).
+
+        "This week" counts are genuinely date-bounded (next 7 days) rather than
+        a raw status tally, so the dashboard reflects what is actually coming up.
+        """
         all_opps = self.fetch_active_opportunities()
 
         active_statuses = {"OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR"}
@@ -599,7 +611,6 @@ class DatabaseManager:
         active_drives = sum(1 for o in all_opps if o.get("current_status") in active_statuses)
         applications_open = sum(1 for o in all_opps if o.get("current_status") == "OPEN")
         offers = sum(1 for o in all_opps if o.get("current_status") == "OFFER_RECEIVED")
-        interviews = sum(1 for o in all_opps if o.get("current_status") == "INTERVIEW")
 
         total = len(all_opps)
         companies = len(set(o.get("company_name", "") for o in all_opps))
@@ -608,8 +619,16 @@ class DatabaseManager:
         return {
             "active_drives": active_drives,
             "applications_open": applications_open,
-            "oa_this_week": sum(1 for o in all_opps if o.get("current_status") == "OA"),
-            "interviews_this_week": interviews,
+            "oa_this_week": sum(1 for o in all_opps if _within_next_days(o.get("oa_date"), 7)),
+            "interviews_this_week": sum(
+                1 for o in all_opps if _within_next_days(o.get("interview_date"), 7)
+            ),
+            "deadlines_this_week": sum(
+                1 for o in all_opps if _within_next_days(o.get("deadline"), 7)
+            ),
+            "action_required": sum(
+                1 for o in all_opps if (o.get("action_required") or "").strip()
+            ),
             "offers_received": offers,
             "companies_applied": companies,
             "selection_rate": selection_rate,
@@ -785,9 +804,10 @@ class DatabaseManager:
         ).fetchone()
 
         if existing_id:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning("[DB]\nHash collision detected\nexisting_id=%s\nincoming_id=NEW", existing_id[0])
+            logger.warning(
+                "[DB] Hash collision detected existing_id=%s incoming_id=NEW",
+                existing_id[0],
+            )
             return existing_id[0]
 
         values = {
@@ -843,9 +863,10 @@ class DatabaseManager:
         ).fetchone()
 
         if existing_id and existing_id[0] != opportunity_id:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning("[DB]\nHash collision detected\nexisting_id=%s\nincoming_id=%s", existing_id[0], opportunity_id)
+            logger.warning(
+                "[DB] Hash collision detected existing_id=%s incoming_id=%s",
+                existing_id[0], opportunity_id,
+            )
             target_hash = self.connection.execute(
                 "SELECT unique_hash FROM opportunities WHERE id = ?", (opportunity_id,)
             ).fetchone()[0]
@@ -957,12 +978,17 @@ class DatabaseManager:
                 pass
         if "retry_count" not in pe_columns:
             try:
-                self.connection.execute("ALTER TABLE processed_emails ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;")
+                self.connection.execute(
+                    "ALTER TABLE processed_emails "
+                    "ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;"
+                )
             except sqlite3.OperationalError:
                 pass
         if "last_retry_at" not in pe_columns:
             try:
-                self.connection.execute("ALTER TABLE processed_emails ADD COLUMN last_retry_at TEXT;")
+                self.connection.execute(
+                    "ALTER TABLE processed_emails ADD COLUMN last_retry_at TEXT;"
+                )
             except sqlite3.OperationalError:
                 pass
 
@@ -1105,6 +1131,21 @@ class DatabaseManager:
 # ------------------------------------------------------------------
 # Module-level Helpers
 # ------------------------------------------------------------------
+
+
+def _within_next_days(date_str: str | None, days: int) -> bool:
+    """Return True when ``date_str`` parses to a date within the next ``days``.
+
+    Today and future dates up to the horizon count; past dates do not. Dates are
+    parsed flexibly because extracted values are rarely ISO formatted.
+    """
+    if not date_str:
+        return False
+    parsed = parse_datetime_flexible(str(date_str))
+    if parsed is None:
+        return False
+    now = datetime.now()
+    return now.date() <= parsed.date() <= (now + timedelta(days=days)).date()
 
 
 def _normalize_key(value: str | None) -> str:

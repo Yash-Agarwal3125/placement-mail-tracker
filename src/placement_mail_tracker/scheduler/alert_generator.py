@@ -11,6 +11,16 @@ from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
 
+# Placeholder company values that mean extraction failed — never alert on these.
+_UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
+
+
+def _is_identifiable(opp: dict[str, Any]) -> bool:
+    """Return True when the drive has a real company name to act on."""
+    name = opp.get("company_name")
+    return bool(name) and str(name).strip().casefold() not in _UNIDENTIFIED_COMPANIES
+
+
 class AlertGenerator:
     """Generates smart notifications based on proximity to deadlines/events."""
     
@@ -25,10 +35,15 @@ class AlertGenerator:
         active_opps = self.database.fetch_active_opportunities()
         
         for opp in active_opps:
+            # Skip drives we can't attribute to a real company — an
+            # "Unknown Deadline in <11 hours" alert is noise, not signal.
+            if not _is_identifiable(opp):
+                continue
+
             # Only send alerts if eligible
             if opp.get("eligibility_status") not in {"ELIGIBLE", "MANUAL_REVIEW"}:
                 continue
-                
+
             self._check_deadline_alerts(opp, now)
             self._check_event_alerts(opp, now)
             

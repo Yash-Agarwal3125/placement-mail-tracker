@@ -1,6 +1,6 @@
 # 🎓 Placement Mail Tracker
 
-![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![Status](https://img.shields.io/badge/status-Production--Ready-success)
 
@@ -31,7 +31,7 @@ graph TD
     B --> C{Acquire Local Lock}
     C -->|Locked| D[Exit]
     C -->|Acquired| E[Fetch Unread Gmail]
-    E --> F[Filter & Extract via Gemini]
+    E --> F[Filter, then Rule-based Extract<br/>Gemini only as fallback]
     F --> G[(Store in SQLite)]
     G --> H[Sync to Google Sheets]
     H --> I[Send Notifications]
@@ -46,7 +46,7 @@ graph TD
 For comprehensive, step-by-step instructions, including Google Cloud setup and Task Scheduler configuration, please refer to the [📖 Operations & User Manual](USER_MANUAL.md).
 
 ### 1. Prerequisites
-- **Python 3.12+**
+- **Python 3.10+**
 - A Google Cloud Console Account (to enable Gmail & Sheets APIs)
 - A Google Gemini API Key
 
@@ -67,6 +67,18 @@ pip install -r requirements.txt
    ```
 2. Update `.env` with your Google Gemini API key, Google Sheet ID, and SMTP credentials.
 3. Download your Google Cloud Desktop OAuth Credentials and save them as `config/credentials.json`.
+4. **Create `config/user_profile.json`** with your real details — eligibility
+   filtering (which decides the Active vs Filtered tab) depends on it. If the
+   file is missing, a default profile is used and a warning is logged.
+   ```json
+   {
+     "degree": "B.Tech",
+     "branch": "Computer Science",
+     "campus": "Vellore",
+     "graduation_year": 2027,
+     "cgpa": 8.0
+   }
+   ```
 
 ### 4. First-Time Run
 Execute the main script. A browser window will open asking you to grant the application access to your Gmail and Google Sheets.
@@ -92,6 +104,30 @@ You can control the application's strictness by setting `APP_ENV` in your `.env`
 
 ---
 
+## 📊 Your Spreadsheet
+
+The tracker maintains four tabs, designed to be read at a glance (most
+actionable columns first, human-readable dates in your local time):
+
+- **Active Opportunities** — drives you are eligible for. Columns:
+  `Company · Role · Type · Status · Priority · Action Required · Deadline ·
+  Days Left · Next Event · Package · Location · CGPA Cutoff · Branches ·
+  Eligibility · My Status · Apply Link · Email · History · Last Updated · Drive ID`.
+- **Filtered Opportunities** — same columns, for drives you are *not* eligible
+  for (wrong branch/degree/CGPA).
+- **Company History** — per-company totals (drives, selected, rejected, active).
+- **Dashboard** — at-a-glance counts: Action Required, Deadlines This Week,
+  OA/Interviews This Week, Offers, Selection Rate, etc.
+
+**`My Status` is yours to edit.** Mark a drive `Applied` / `Shortlisted` /
+`Selected` etc. directly in the sheet — the tracker **preserves your edits**
+across syncs and never overwrites them. Every other column is refreshed from
+your inbox automatically. Use the column filter (enabled on row 1) to sort by
+`Days Left`, `Deadline`, or `Priority`. The `Drive ID` column is an internal
+key kept last — you can hide it.
+
+---
+
 ## 🩺 Reliability & Self-Healing
 
 The system is designed to run unattended on a personal Windows machine and automatically recover from common failures:
@@ -106,14 +142,14 @@ The system is designed to run unattended on a personal Windows machine and autom
 
 The project includes an extensive suite of unit, integration, and End-to-End (E2E) tests.
 
-**Run the Security & Configuration Audit:**
-```powershell
-python scripts/run_audit.py
-```
-
 **Run the Full Test Suite:**
 ```powershell
 python -m pytest
+```
+
+**Run the Linter (same check CI runs):**
+```powershell
+ruff check .
 ```
 
 ---
@@ -123,20 +159,23 @@ python -m pytest
 ```text
 placement-mail-tracker/
 ├── config/              # Google OAuth credentials and tokens
-├── data/                # SQLite database and health/heartbeat trackers
+├── data/                # SQLite database and health/heartbeat/fetch state
 ├── logs/                # Rotating application and scheduler logs
-├── scripts/             # Utility scripts (.bat wrapper, audit, smtp test)
+├── scripts/             # Utility scripts (.bat wrapper)
 ├── src/
 │   └── placement_mail_tracker/
-│       ├── config/      # Settings and validation
-│       ├── db/          # SQLite schema and operations
-│       ├── filters/     # Email subject/sender filtering rules
-│       ├── gemini/      # AI extraction logic
-│       ├── gmail/       # Gmail API client
-│       ├── reliability/ # Health, locks, and heartbeat tracking
-│       ├── scheduler/   # Main run cycle orchestrator
-│       └── sheets/      # Google Sheets API client
+│       ├── ai/          # Gemini extraction (fallback) + Pydantic models
+│       ├── config/      # Settings, validation, user profile
+│       ├── db/          # SQLite schema, manager, connection, migration
+│       ├── extraction/  # Rule-based extraction, classification, eligibility
+│       ├── gmail/       # Gmail API client + relevance filters
+│       ├── notifications/ # SMTP email notifier (Telegram stub)
+│       ├── reliability/ # Health, heartbeat, run status
+│       ├── scheduler/   # Run-cycle orchestrator, digest, alerts
+│       ├── sheets/      # Google Sheets sync
+│       └── utils/       # Dedup, scoring, lock, time, logging, trusted senders
 ├── tests/               # Pytest suite
+├── CLAUDE.md            # Engineering operating guide
 ├── .env                 # Environment variables
 ├── main.py              # Application entry point
 └── USER_MANUAL.md       # Detailed operations guide

@@ -36,7 +36,9 @@ def test_runner_offline_recovery_reads_state(
 ):
     # Create the fetch_state.json manually
     state_file = Path(test_settings.fetch_state_file)
-    state_file.write_text(json.dumps({"last_successful_fetch": "2026-06-01T12:00:00Z"}), encoding="utf-8")
+    state_file.write_text(
+        json.dumps({"last_successful_fetch": "2026-06-01T12:00:00Z"}), encoding="utf-8"
+    )
     
     runner = PlacementTrackerRunner(connection=MagicMock(), settings=test_settings)
     
@@ -53,7 +55,8 @@ def test_runner_offline_recovery_reads_state(
     mock_gmail_instance.fetch_recent_messages_since.assert_called_once()
     
     # The timestamp for 2026-06-01T12:00:00Z is 1780315200
-    called_timestamp = mock_gmail_instance.fetch_recent_messages_since.call_args[1]["timestamp_seconds"]
+    call_kwargs = mock_gmail_instance.fetch_recent_messages_since.call_args[1]
+    called_timestamp = call_kwargs["timestamp_seconds"]
     assert isinstance(called_timestamp, int)
     
     # Verify the state file is updated to the current time after a successful run

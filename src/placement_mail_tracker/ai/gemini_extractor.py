@@ -103,7 +103,11 @@ class GeminiPlacementExtractor:
     ) -> None:
         self.settings = settings
         self.max_retries = max_retries if max_retries is not None else settings.gemini_max_retries
-        self.retry_delay_seconds = retry_delay_seconds if retry_delay_seconds is not None else settings.gemini_retry_delay_seconds
+        self.retry_delay_seconds = (
+            retry_delay_seconds
+            if retry_delay_seconds is not None
+            else settings.gemini_retry_delay_seconds
+        )
         self._model = model
         self._client: genai.Client | None = None
 
@@ -170,8 +174,9 @@ class GeminiPlacementExtractor:
                     
                     if attempt < self.max_retries:
                         if isinstance(error, genai_errors.APIError):
-                            # Do not retry invalid API key (400, 401), quota exhausted (429), permission denied (403)
-                            # within the same model's attempt loop.
+                            # Do not retry within the same model's attempt loop for
+                            # invalid API key (400/401), permission denied (403) or
+                            # quota exhausted (429); move on to the fallback model.
                             if error.code in {400, 401, 403, 429}:
                                 break
                                 
@@ -227,12 +232,20 @@ Additional rules:
 - Use only the information present in the email.
 - Use null for unknown scalar fields.
 - Use null for unknown list fields instead of an empty list.
+- role is the job title / position being offered (e.g., "Software Engineer Intern",
+  "Data Analyst"). Infer it from the subject or body; only use null if truly absent.
 - eligible_branches, hiring_process, and important_notes must be JSON arrays when known.
+- cgpa_requirement should be the minimum CGPA as a plain number string (e.g., "7.5"),
+  or null if not stated.
+- registration_deadline, interview_date, and oa_date MUST be returned in ISO 8601 format:
+  "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time is given. Convert any human-written date
+  (e.g., "9 June 2026 (2 pm)") to this format. Use null if no date is present.
 - opportunity_type should be internship, fulltime, internship_and_fulltime, or null.
 - update_type should summarize the email purpose, such as new_opportunity, deadline_update,
   shortlist, interview_update, oa_update, result_update, reminder, or null.
 - current_status MUST be inferred from the email content. Valid values are exactly one of:
-  NEW, PPT, OA, SHORTLISTED, INTERVIEW, HR, SELECTED, OFFER_RECEIVED, REJECTED.
+  OPEN, REGISTERED, SHORTLISTED, OA, INTERVIEW, HR, SELECTED, OFFER_RECEIVED, REJECTED.
+  Use OPEN for a newly announced drive or pre-placement talk.
 - action_required should contain a brief sentence describing any action the user needs to take
   (e.g., "Submit resume", "Complete registration", "Attend interview"). Return null if no
   action is needed.

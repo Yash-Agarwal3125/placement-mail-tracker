@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 
 from placement_mail_tracker.gmail.gmail_client import GmailEmail
-from placement_mail_tracker.utils.trusted_senders import TrustedSenderManager
+from placement_mail_tracker.utils.trusted_senders import get_shared_manager
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +144,9 @@ def calculate_relevance_score(
     disp_lower = display_name_clean.lower()
     email_lower = email_clean.lower()
 
-    # 1. Evaluate Trusted Sender score (additive signal)
-    sender_manager = TrustedSenderManager()
+    # 1. Evaluate Trusted Sender score (additive signal). Reuse one cached
+    # manager per process to avoid re-reading the JSON store for every email.
+    sender_manager = get_shared_manager()
     is_trusted, sender_score = sender_manager.process_and_discover(sender, subject)
 
     # 2. Original scoring logic for unit tests compatibility
@@ -241,20 +242,17 @@ def calculate_relevance_score(
         and not negative_hits
     )
 
-    # Output detailed logs for Task 1 at INFO level (so they are visible by default)
-    logger.info("==========================================")
-    logger.info("[DEBUG] Evaluating email")
-    logger.info("[DEBUG] Subject: %s", subject)
-    logger.info("[DEBUG] Sender: %s", sender)
-    logger.info("[DEBUG] Display Name: %s", display_name_clean)
-    logger.info("[DEBUG] Email Address: %s", email_clean)
-    logger.info("[DEBUG] Sender score: %s (Is Trusted: %s)", sender_score, is_trusted)
-    logger.info("[DEBUG] Subject keyword matches: %s", matched_subj_kws or classic_subject_matches)
-    logger.info(
-        "[DEBUG] Sender keyword matches: %s", matched_sender_kws or classic_matched_sender_terms
+    # Detailed per-email diagnostics belong at DEBUG; running an inbox at INFO
+    # otherwise emits ~14 lines per email and floods the log.
+    logger.debug("Evaluating email | subject=%r sender=%r", subject, sender)
+    logger.debug("Display name=%r email=%r", display_name_clean, email_clean)
+    logger.debug("Sender score=%s (trusted=%s)", sender_score, is_trusted)
+    logger.debug(
+        "Subject matches=%s sender matches=%s domain matches=%s",
+        matched_subj_kws or classic_subject_matches,
+        matched_sender_kws or classic_matched_sender_terms,
+        matched_domains,
     )
-    logger.info("[DEBUG] Domain matches: %s", matched_domains)
-    logger.info("[DEBUG] Final relevance decision: %s", "TRUE" if is_placement else "FALSE")
 
     rejection_reasons = []
     if not is_placement:
@@ -266,8 +264,15 @@ def calculate_relevance_score(
             rejection_reasons.append(f"negative terms found: {negative_hits}")
         if not (passed_relaxed_subject or passed_relaxed_sender):
             rejection_reasons.append("does not match relaxed subject or sender name filters")
-        logger.info("[DEBUG] Rejection reason: %s", ", ".join(rejection_reasons))
-    logger.info("==========================================")
+
+    # One concise INFO summary per email.
+    logger.info(
+        "Filter: %s (score=%s, trusted=%s)%s",
+        "RELEVANT" if is_placement else "skip",
+        sender_score,
+        is_trusted,
+        "" if is_placement else f" — {', '.join(rejection_reasons)}",
+    )
 
     # Use combined metadata
     return FilterDecision(

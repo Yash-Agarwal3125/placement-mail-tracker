@@ -1,25 +1,30 @@
 """Central logging setup."""
 
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-
-import re
 
 class RedactingFormatter(logging.Formatter):
     """Formatter that redacts sensitive information."""
     
     PATTERNS = [
-        re.compile(r"(?i)(password|secret|token|api[_-]?key|credentials)[\s]*[:=][\s]*['\"]?([^'\"\s,\}]+)['\"]?"),
-        re.compile(r"AIza[0-9A-Za-z-_]{35}"),
-        re.compile(r"1//[0-9A-Za-z-_]+"),
+        (
+            re.compile(
+                r"(?i)(password|secret|token|api[_-]?key|credentials)"
+                r"[\s]*[:=][\s]*['\"]?([^'\"\s,\}]+)['\"]?"
+            ),
+            r"\1=***REDACTED***",
+        ),
+        (re.compile(r"(AIza[0-9A-Za-z-_]{35})"), r"***REDACTED_API_KEY***"),
+        (re.compile(r"(1//[0-9A-Za-z-_]+)"), r"***REDACTED_OAUTH_TOKEN***"),
     ]
 
     def format(self, record: logging.LogRecord) -> str:
         msg = super().format(record)
-        for pattern in self.PATTERNS:
-            msg = pattern.sub(r"\1=***REDACTED***", msg)
+        for pattern, repl in self.PATTERNS:
+            msg = pattern.sub(repl, msg)
         return msg
 
 def setup_logging(

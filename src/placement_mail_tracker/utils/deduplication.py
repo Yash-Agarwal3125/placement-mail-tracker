@@ -588,12 +588,12 @@ def find_all_matches(
     if config is None:
         config = DeduplicationConfig()
 
-    inc_company = normalize_string(incoming.get(FIELD_COMPANY, ""))
+    inc_company = normalize_company(incoming.get(FIELD_COMPANY, ""))
     first_char = inc_company[0] if inc_company else ""
 
     filtered_candidates = []
     for c in candidates:
-        cand_company = normalize_string(c.get(FIELD_COMPANY, ""))
+        cand_company = normalize_company(c.get(FIELD_COMPANY, ""))
         if not first_char or not cand_company or cand_company[0] == first_char:
             filtered_candidates.append(c)
 

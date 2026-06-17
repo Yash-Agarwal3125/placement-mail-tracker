@@ -38,7 +38,8 @@ from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
 from placement_mail_tracker.sheets.client import SheetsClient
 from placement_mail_tracker.utils.deduplication import find_best_match
-from placement_mail_tracker.utils.time import utc_now_iso
+from placement_mail_tracker.utils.scoring import compute_priority
+from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
 
 # ---------------------------------------------------------------------------
 # Safeguard 1: Set a global network socket timeout to prevent infinite hangs
@@ -46,6 +47,39 @@ from placement_mail_tracker.utils.time import utc_now_iso
 socket.setdefaulttimeout(60.0)
 
 logger = logging.getLogger(__name__)
+
+# Classifications that represent a status update to an existing drive rather
+# than a brand-new opportunity. Used to decide when Gemini can be skipped.
+_FOLLOWUP_CLASSIFICATIONS = frozenset(
+    {"OA_UPDATE", "INTERVIEW_UPDATE", "SHORTLIST_UPDATE", "OFFER_UPDATE", "DRIVE_UPDATE"}
+)
+
+# Placeholder company values that mean "extraction failed", not a real drive.
+_UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
+
+# Gemini occasionally emits a status vocabulary that differs from the rest of
+# the system (which keys everything off OPEN/REGISTERED/...). Map the strays to
+# the canonical values so such drives still appear in the Active sheet and get
+# the right action_required.
+_STATUS_CANONICAL = {
+    "NEW": "OPEN",
+    "PPT": "OPEN",
+    "PRE_PLACEMENT_TALK": "OPEN",
+    "APPLIED": "REGISTERED",
+}
+
+
+def _is_identifiable_company(name: str | None) -> bool:
+    """Return True when ``name`` is a real company (not blank/Unknown)."""
+    return bool(name) and name.strip().casefold() not in _UNIDENTIFIED_COMPANIES
+
+
+def canonicalize_status(status: str | None) -> str | None:
+    """Map model status synonyms (NEW, PPT, ...) onto the system vocabulary."""
+    if not status:
+        return status
+    upper = status.strip().upper()
+    return _STATUS_CANONICAL.get(upper, upper)
 
 
 def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
@@ -67,8 +101,37 @@ def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
         "work_location": extraction.get("location") or extraction.get("work_location"),
         "hiring_process": extraction.get("hiring_process"),
         "important_notes": extraction.get("important_notes"),
-        "current_status": extraction.get("current_status"),
+        "current_status": canonicalize_status(extraction.get("current_status")),
     }
+
+
+def _derive_next_event_date(opportunity: dict[str, Any]) -> str | None:
+    """Return the soonest scheduled event (OA or interview) as a string.
+
+    Picks the earliest of ``oa_date``/``interview_date`` that is today or in the
+    future; falls back to the earliest parseable one if all are in the past.
+    Returns ``None`` when neither date is present/parseable so an existing value
+    is preserved. Dates stay as their original strings for display; downstream
+    consumers re-parse with :func:`parse_datetime_flexible`.
+    """
+    candidates: list[tuple[datetime, str]] = []
+    for field_name in ("oa_date", "interview_date"):
+        raw = opportunity.get(field_name)
+        if not raw:
+            continue
+        parsed = parse_datetime_flexible(str(raw))
+        if parsed:
+            candidates.append((parsed, str(raw)))
+
+    if not candidates:
+        return None
+
+    now = datetime.now()
+    upcoming = sorted((c for c in candidates if c[0] >= now), key=lambda c: c[0])
+    if upcoming:
+        return upcoming[0][1]
+    # All events are in the past – keep the most recent one for reference.
+    return sorted(candidates, key=lambda c: c[0], reverse=True)[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -121,25 +184,32 @@ class PlacementTrackerRunner:
 
         self._run_daily_digest(database)
 
+        # Capture the fetch-window boundary BEFORE fetching. Any email that
+        # arrives after this instant is picked up on the next run, and the
+        # window is only advanced if the fetch actually succeeds (see
+        # _finalize_report) so a transient Gmail outage never drops mail.
+        fetch_started_at = utc_now_iso()
         messages = self._fetch_messages(gmail_client, report)
 
         stats = {
-            "processed": 0, "skipped": 0, "errors": 0, 
+            "processed": 0, "skipped": 0, "errors": 0,
             "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0
         }
         if messages:
-            stats = self._process_messages(messages, database, gmail_client, extractor, user_profile)
-        
+            stats = self._process_messages(
+                messages, database, gmail_client, extractor, user_profile
+            )
+
         self._execute_sync_pipelines(database, sheets_client, report)
-        
-        self._finalize_report(report, stats)
+
+        self._finalize_report(report, stats, fetch_started_at)
         return report
 
     def _init_database(self, report: RunReport) -> DatabaseManager | None:
         try:
             logger.info("Initializing database manager and creating tables")
+            # DatabaseManager.__init__ already creates tables; no second call needed.
             database = DatabaseManager(connection=self.connection)
-            database.create_tables()
 
             purged = database.purge_old_processed_emails(30)
             if isinstance(purged, int) and purged > 0:
@@ -209,7 +279,7 @@ class PlacementTrackerRunner:
                     if api_error.resp.status in {429, 503} and attempt < 3:
                         sleep_time = attempt * 2.0
                         logger.warning(
-                            "Retry attempt %s. Backoff duration %ss. Exception type: HttpError (%s)",
+                            "Retry attempt %s. Backoff %ss. Exception: HttpError (%s)",
                             attempt,
                             sleep_time,
                             api_error.resp.status,
@@ -313,7 +383,23 @@ class PlacementTrackerRunner:
                 rule_result.needs_gemini,
             )
 
-            if rule_result.needs_gemini:
+            # Phase 6 cost guard: a follow-up on a thread we already track does
+            # not need Gemini. The existing drive already carries company/role,
+            # and rule-based status/date detection is enough to update it. This
+            # spares a paid Gemini call for the common "OA scheduled /
+            # shortlisted / interview" follow-ups that arrive in-thread.
+            existing_thread_drive = (
+                database.fetch_opportunity_by_thread_id(thread_id) if thread_id else None
+            )
+            known_thread_followup = bool(
+                existing_thread_drive is not None
+                and (
+                    rule_result.current_status != "OPEN"
+                    or rule_result.email_classification in _FOLLOWUP_CLASSIFICATIONS
+                )
+            )
+
+            if rule_result.needs_gemini and not known_thread_followup:
                 logger.info("Rule extraction incomplete; calling Gemini")
                 try:
                     extracted = extractor.extract_from_email(msg)
@@ -337,10 +423,44 @@ class PlacementTrackerRunner:
             else:
                 opp_data = rule_result.to_dict()
                 stats["rule_only"] += 1
-                logger.info("Rule extraction sufficient; skipping Gemini (saved API call)")
+                # Preserve identity fields from the tracked drive so a rule-only
+                # follow-up never overwrites a real company/role with a blank.
+                if known_thread_followup and existing_thread_drive is not None:
+                    if not opp_data.get("company_name"):
+                        opp_data["company_name"] = existing_thread_drive["company_name"]
+                    if not opp_data.get("role"):
+                        opp_data["role"] = existing_thread_drive["role"]
+                    logger.info(
+                        "Known-thread follow-up; updating via rules, skipped Gemini"
+                    )
+                else:
+                    logger.info("Rule extraction sufficient; skipping Gemini (saved API call)")
 
             if opp_data.get("company_name"):
                 opp_data["company_name"] = normalize_company_name(opp_data["company_name"])
+
+            # Don't create brand-new drives we can't even attribute to a company.
+            # Such rows (company "Unknown" + garbage role) pollute the DB/sheet and
+            # have previously fired useless deadline alerts. Follow-ups on a known
+            # thread are exempt because their identity comes from the tracked drive.
+            if not known_thread_followup and not _is_identifiable_company(
+                opp_data.get("company_name")
+            ):
+                logger.info(
+                    "Email %s has no identifiable company; not creating a drive", msg_id
+                )
+                database.log_processed_email(
+                    gmail_message_id=msg_id,
+                    subject=subject,
+                    sender=sender,
+                    received_at=timestamp,
+                    filter_score=decision.score,
+                    filter_decision=asdict(decision),
+                    processed_status="skipped",
+                    email_classification=classification,
+                )
+                stats["skipped"] += 1
+                return
 
             if not opp_data.get("current_status") or opp_data["current_status"] == "OPEN":
                 detected_status = detect_status_from_text(subject, body)
@@ -378,7 +498,12 @@ class PlacementTrackerRunner:
                 if eligibility_status != "MANUAL_REVIEW":
                     opp_data["eligibility_status"] = eligibility_status
 
-                from placement_mail_tracker.utils.scoring import compute_priority
+                # Derive the next upcoming event so deadline/event alerts, the
+                # daily digest, priority scoring and the sheet all have a value
+                # to work with (these features were previously dormant).
+                next_event = _derive_next_event_date(opp_data)
+                if next_event:
+                    opp_data["next_event_date"] = next_event
 
                 opp_data["priority"] = compute_priority(opp_data, user_profile)
 
@@ -460,7 +585,9 @@ class PlacementTrackerRunner:
             logger.exception("Alert generation failed: %s", e)
             report.mark_component("notifications", False, str(e), critical=False)
 
-    def _finalize_report(self, report: RunReport, stats: dict[str, int]) -> None:
+    def _finalize_report(
+        self, report: RunReport, stats: dict[str, int], fetch_started_at: str
+    ) -> None:
         gemini_savings = (
             f"{(stats['rule_only'] / (stats['rule_only'] + stats['gemini_calls']) * 100):.0f}%"
             if (stats["rule_only"] + stats["gemini_calls"]) > 0
@@ -491,11 +618,18 @@ class PlacementTrackerRunner:
         if stats["errors"]:
             report.add_warning(f"{stats['errors']} email(s) failed processing")
 
-        import json
-
-        fetch_state_path = Path(self.settings.fetch_state_file)
-        fetch_state_path.parent.mkdir(parents=True, exist_ok=True)
-        fetch_state_path.write_text(
-            json.dumps({"last_successful_fetch": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}),
-            encoding="utf-8",
-        )
+        # Only advance the fetch window when Gmail was actually reachable.
+        # Persisting the timestamp captured *before* the fetch (not "now")
+        # guarantees emails that arrived mid-run are still seen next time.
+        if report.gmail_ok:
+            fetch_state_path = Path(self.settings.fetch_state_file)
+            fetch_state_path.parent.mkdir(parents=True, exist_ok=True)
+            fetch_state_path.write_text(
+                json.dumps({"last_successful_fetch": fetch_started_at}),
+                encoding="utf-8",
+            )
+        else:
+            logger.warning(
+                "Gmail fetch did not succeed; leaving fetch window unchanged "
+                "so no emails are skipped on the next run"
+            )

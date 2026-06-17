@@ -11,21 +11,16 @@ from placement_mail_tracker.utils.lock_manager import SingleInstanceLock
 # 1. Hash Collision Handling
 def test_hash_collision_does_not_crash(db_manager: DatabaseManager, sample_opportunity):
     opp1 = sample_opportunity(company_name="Google", role="SDE")
-    opp2 = sample_opportunity(company_name="Google", role="SDE")
-    
+
     # Insert first one
     id1, created1 = db_manager.insert_or_update_opportunity(
         opp1, source_email_id="email1"
     )
     assert created1 is True
-    
-    # Insert second one, which will have the same unique_hash.
-    # It should fall back to existing. But wait, `insert_or_update_opportunity` 
-    # uses find_duplicate_opportunity which already handles this gracefully.
-    # Let's test the direct _insert_opportunity hash collision protection we added:
-    target_hash = opp1["company_name"] # Not actual hash, but just to simulate
-    
-    # _insert_opportunity directly
+
+    # Insert second one, which will have the same unique_hash. It should fall
+    # back to the existing record. _insert_opportunity has explicit hash
+    # collision protection that returns the existing id instead of duplicating.
     id2 = db_manager._insert_opportunity(opp1, source_email_id="email2")
     
     assert id1 == id2 # Our fix makes it return the existing ID if it collides!
@@ -90,16 +85,23 @@ def test_gemini_network_resilience(mock_generate, mock_sleep, mock_settings):
     mock_generate.side_effect = [
         ConnectionError("WinError 10053"),
         TimeoutError("Timeout"),
-        MagicMock(text='{"company_name": "Google", "role_title": "SDE"}') # Will fail parsing without proper text but let's mock _response_text or parse
+        MagicMock(text='{"company_name": "Google", "role_title": "SDE"}'),
     ]
-    
+
     # We need to patch _response_text and parse_json_response to not fail
-    with patch("placement_mail_tracker.ai.gemini_extractor._response_text", return_value='{}'), \
-         patch("placement_mail_tracker.ai.gemini_extractor.parse_json_response", return_value={"company_name": "Google", "role_title": "SDE"}), \
-         patch("placement_mail_tracker.ai.gemini_extractor.validate_extraction_result", return_value={"company_name": "Google"}):
-        
-        result = extractor.extract_from_text("Test content")
-        
+    extractor_mod = "placement_mail_tracker.ai.gemini_extractor"
+    with patch(f"{extractor_mod}._response_text", return_value='{}'), \
+         patch(
+             f"{extractor_mod}.parse_json_response",
+             return_value={"company_name": "Google", "role_title": "SDE"},
+         ), \
+         patch(
+             f"{extractor_mod}.validate_extraction_result",
+             return_value={"company_name": "Google"},
+         ):
+
+        extractor.extract_from_text("Test content")
+
         assert mock_generate.call_count == 3
         assert mock_sleep.call_count == 2
         mock_sleep.assert_any_call(2)

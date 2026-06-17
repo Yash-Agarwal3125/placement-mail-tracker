@@ -433,10 +433,13 @@ class TestEndToEnd:
         for email in CDC_EMAILS:
             _process_email(db_manager, email)
 
+        from placement_mail_tracker.sheets.sheets_sync import ACTIVE_OPP_HEADERS
+
+        email_idx = ACTIVE_OPP_HEADERS.index("Email")
         all_opps = db_manager.fetch_active_opportunities()
         for opp in all_opps:
             row = opportunity_to_sheet_row(opp)
-            email_col = row[17]
+            email_col = row[email_idx]
             # All drives have source_email_id or source_thread_id
             if opp.get("source_thread_id") or opp.get("source_email_id"):
                 assert "HYPERLINK" in email_col or email_col == ""

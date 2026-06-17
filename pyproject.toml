@@ -13,7 +13,10 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+# Match the minimum supported runtime (requires-python = ">=3.10"). The code
+# is regularly run on CPython 3.10, where datetime.UTC / enum.StrEnum do not
+# exist, so do NOT raise py311+ upgrade lints here.
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

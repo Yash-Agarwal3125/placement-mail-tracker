@@ -25,8 +25,7 @@ def test_successful_fallback(test_settings):
     extractor = GeminiPlacementExtractor(test_settings)
     
     # We will mock the `_generate_content` directly to simulate model failures
-    mock_responses = []
-    
+
     # 1st call: gemini-2.5-flash fails
     def generate_content_side_effect(prompt, model_name):
         if model_name == "gemini-2.5-flash":

@@ -107,7 +107,10 @@ Placement Mail Tracker (Personal Automation)
         backoffs = [2, 5, 10]
         for attempt, backoff in enumerate(backoffs + [0], 1):
             try:
-                logger.info("Connecting to Gmail SMTP server for %s: %s", subject_log, message["Subject"])
+                logger.info(
+                    "Connecting to Gmail SMTP server for %s: %s",
+                    subject_log, message["Subject"],
+                )
                 with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
                     server.ehlo()
                     server.starttls()
@@ -116,7 +119,10 @@ Placement Mail Tracker (Personal Automation)
                     server.send_message(message)
                 logger.info("SMTP email sent successfully to %s", self.email_receiver)
                 return True
-            except (smtplib.SMTPServerDisconnected, ssl.SSLEOFError, TimeoutError, ConnectionResetError) as error:
+            except (
+                smtplib.SMTPServerDisconnected, ssl.SSLEOFError,
+                TimeoutError, ConnectionResetError,
+            ) as error:
                 if attempt <= len(backoffs):
                     logger.warning("[SMTP]\nRetry attempt %s/%s", attempt, len(backoffs))
                     time.sleep(backoff)

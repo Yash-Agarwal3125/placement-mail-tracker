@@ -7,6 +7,9 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.egg-info/
+build/
+dist/
 
 # Virtual environments
 .venv/

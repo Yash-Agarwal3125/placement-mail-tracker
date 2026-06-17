@@ -207,14 +207,15 @@ class TrustedSenderManager:
         existing = self.senders.get(email)
 
         if existing:
-            # Update timestamps and potentially increase score if new keywords match
+            # Update timestamps in memory. Only persist to disk when something
+            # meaningful changed (score/keywords); refreshing last_seen on every
+            # email is not worth a file rewrite per message.
             existing.last_seen = now
             if calculated_score > existing.score:
                 existing.score = calculated_score
                 existing.matched_keywords = list(set(existing.matched_keywords + matched_keywords))
                 logger.info("Updated trusted sender score for %s to %s", email, calculated_score)
-
-            self.save_senders()
+                self.save_senders()
             return existing.score >= self.trust_threshold, existing.score
 
         # Discovered a brand new sender with positive placement signals!
@@ -235,3 +236,19 @@ class TrustedSenderManager:
             return calculated_score >= self.trust_threshold, calculated_score
 
         return False, calculated_score
+
+
+_SHARED_MANAGER: TrustedSenderManager | None = None
+
+
+def get_shared_manager() -> TrustedSenderManager:
+    """Return a process-wide :class:`TrustedSenderManager`.
+
+    The filter path runs once per email; rebuilding the manager (and re-reading
+    ``trusted_senders.json``) every time is wasteful. A single cached instance
+    keeps discovered senders in memory for the life of the run.
+    """
+    global _SHARED_MANAGER
+    if _SHARED_MANAGER is None:
+        _SHARED_MANAGER = TrustedSenderManager()
+    return _SHARED_MANAGER
