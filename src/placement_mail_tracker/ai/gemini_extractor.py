@@ -52,7 +52,8 @@ Extract:
 - important_notes
 - update_type
 - current_status
-- action_required"""
+- action_required
+- degree_level: "BTECH" if B.Tech only, "MTECH" if M.Tech only, "ANY" if both, null if unknown"""
 
 SIGNATURE_PATTERNS = (
     r"\n--\s*\n.*$",
