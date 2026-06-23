@@ -52,9 +52,9 @@ class TestActiveOppLayout:
         base.update(overrides)
         return base
 
-    def test_column_count_is_20(self):
+    def test_column_count_is_22(self):
         row = opportunity_to_sheet_row(self._sample_opp())
-        assert len(row) == 20
+        assert len(row) == 22
         assert len(row) == len(ACTIVE_OPP_HEADERS)
 
     def test_core_identity_columns(self):
@@ -196,7 +196,7 @@ class TestUserColumnPreservation:
 
 class TestHeaders:
     def test_active_opp_headers_count(self):
-        assert len(ACTIVE_OPP_HEADERS) == 20
+        assert len(ACTIVE_OPP_HEADERS) == 22
 
     def test_drive_id_is_last(self):
         assert ACTIVE_OPP_HEADERS[-1] == "Drive ID"

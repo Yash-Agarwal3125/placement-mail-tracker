@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass
 from email.utils import parsedate_to_datetime
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,10 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.config.settings import Settings
+
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"[ \t]{2,}")
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,15 @@ class GmailEmail:
     timestamp: str
     body_text: str
     snippet: str
+
+
+def _strip_html(html_text: str) -> str:
+    """Remove HTML tags and decode entities, collapsing whitespace."""
+    text = _SCRIPT_STYLE_RE.sub(" ", html_text)
+    text = _TAG_RE.sub(" ", text)
+    text = unescape(text)
+    text = _WHITESPACE_RE.sub(" ", text)
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 def decode_base64url(data: str | None) -> str:
@@ -94,7 +109,7 @@ def extract_body_text(payload: dict[str, Any]) -> str:
             return
 
         if mime_type == "text/html":
-            html_parts.append(decode_base64url(body_data))
+            html_parts.append(_strip_html(decode_base64url(body_data)))
             return
 
         for child in part.get("parts", []) or []:
@@ -170,7 +185,7 @@ class GmailClient:
         self, timestamp_seconds: int, max_results: int = 500
     ) -> list[GmailEmail]:
         """Fetch inbox emails newer than the specified Unix timestamp."""
-        query = f"in:inbox after:{timestamp_seconds}"
+        query = f"after:{timestamp_seconds}"
         return self._search(query=query, max_results=max_results)
 
     def fetch_recent_messages_since(

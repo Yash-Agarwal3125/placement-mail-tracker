@@ -40,6 +40,8 @@ ACTIVE_OPP_HEADERS = [
     "Company",
     "Role",
     "Type",
+    "Degree",
+    "Category",
     "Status",
     "Priority",
     "Action Required",
@@ -162,10 +164,12 @@ class GoogleSheetsSync:
         active_opps = database.fetch_active_drives_only()
 
         eligible_opps = [
-            opp for opp in active_opps if opp.get("eligibility_status") == "ELIGIBLE"
+            opp for opp in active_opps
+            if "NOT_ELIGIBLE" not in (opp.get("eligibility_status") or "")
         ]
         filtered_opps = [
-            opp for opp in active_opps if opp.get("eligibility_status") != "ELIGIBLE"
+            opp for opp in active_opps
+            if "NOT_ELIGIBLE" in (opp.get("eligibility_status") or "")
         ]
 
         self._sync_tab_data(
@@ -646,10 +650,13 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
     clickable, and the status history is shown as a compact arrow trail.
     """
     deadline_raw = opportunity.get("deadline")
+    role = opportunity.get("role") or ""
     return [
         _cell(opportunity.get("company_name")),
-        _cell(opportunity.get("role")),
+        "" if role.strip() in ("", "Unknown Role") else _cell(role),
         _friendly(opportunity.get("internship_or_fulltime"), _TYPE_LABELS),
+        _friendly(opportunity.get("degree_level"), _DEGREE_LABELS),
+        _friendly(opportunity.get("dream_category"), _CATEGORY_LABELS),
         _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _friendly(opportunity.get("priority"), _PRIORITY_LABELS),
         _cell(opportunity.get("action_required")),
@@ -745,6 +752,10 @@ _STATUS_LABELS = {
 }
 
 _PRIORITY_LABELS = {"HIGH": "High", "MEDIUM": "Medium", "LOW": "Low"}
+
+_DEGREE_LABELS = {"BTECH": "B.Tech", "MTECH": "M.Tech", "ANY": "Any", "UNKNOWN": ""}
+
+_CATEGORY_LABELS = {"NORMAL": "", "DREAM": "Dream", "SUPER_DREAM": "Super Dream"}
 
 _ELIGIBILITY_LABELS = {
     "ELIGIBLE": "Eligible",

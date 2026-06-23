@@ -69,7 +69,6 @@ NEGATIVE_KEYWORDS = (
     "committee",
     "student organization",
     "event registration",
-    "workshop",
     "nptel",
     "academic notice",
     "gravitas",
@@ -85,9 +84,10 @@ NEGATIVE_KEYWORDS = (
     "journal publication",
     "research paper",
     "merchandise",
-    "hackathon",
-    "ideathon",
 )
+
+# Soft negatives reduce score but don't block the relaxed path.
+SOFT_NEGATIVE_KEYWORDS = ("hackathon", "ideathon", "workshop")
 
 PLACEMENT_THRESHOLD = 45
 
@@ -178,6 +178,9 @@ def calculate_relevance_score(
         term for term in IRRELEVANT_SENDERS if _contains_term(normalized_sender, term)
     ]
     negative_hits = [term for term in NEGATIVE_KEYWORDS if _contains_term(combined_text, term)]
+    soft_negative_hits = [
+        term for term in SOFT_NEGATIVE_KEYWORDS if _contains_term(combined_text, term)
+    ]
 
     if newsletter_hits:
         classic_ignored_reasons.append(f"newsletter_or_marketing_terms:{','.join(newsletter_hits)}")
@@ -190,6 +193,10 @@ def calculate_relevance_score(
     if negative_hits:
         classic_ignored_reasons.append(f"negative_terms:{','.join(negative_hits)}")
         classic_score -= 50
+
+    if soft_negative_hits:
+        classic_ignored_reasons.append(f"soft_negative_terms:{','.join(soft_negative_hits)}")
+        classic_score -= 15
 
     if not classic_matched_keywords and not classic_matched_sender_terms:
         classic_ignored_reasons.append("no_placement_signals")
@@ -262,6 +269,8 @@ def calculate_relevance_score(
             rejection_reasons.append(f"irrelevant sender found: {irrelevant_sender_hits}")
         if negative_hits:
             rejection_reasons.append(f"negative terms found: {negative_hits}")
+        if soft_negative_hits:
+            rejection_reasons.append(f"soft negative terms found: {soft_negative_hits}")
         if not (passed_relaxed_subject or passed_relaxed_sender):
             rejection_reasons.append("does not match relaxed subject or sender name filters")
 
