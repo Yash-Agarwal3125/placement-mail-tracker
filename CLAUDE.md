@@ -26,6 +26,7 @@ It must survive being run unattended for months on a personal machine.
 7. **Preserve existing behaviour** unless there is a compelling, justified reason
    to change it. Favour incremental change over rewrites.
 8. **Every behavioural change keeps the test suite green** (`python -m pytest`).
+9. **Don't use different git branch or commit only use the one that existes(main) if multiple are available ask the user**
 
 ## Architecture map
 
