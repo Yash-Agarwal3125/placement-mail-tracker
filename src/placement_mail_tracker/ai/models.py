@@ -31,6 +31,7 @@ class PlacementExtraction(BaseModel):
         default=None,
         description="Action required by the user, if any.",
     )
+    degree_level: str | None = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -74,6 +75,7 @@ class PlacementExtraction(BaseModel):
         "update_type",
         "current_status",
         "action_required",
+        "degree_level",
         mode="before",
     )
     @classmethod

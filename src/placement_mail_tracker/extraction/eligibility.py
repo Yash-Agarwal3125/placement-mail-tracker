@@ -40,7 +40,13 @@ NON_BTECH_DEGREES = [
 
 def evaluate_eligibility(opp_data: dict, profile: UserProfile) -> str:
     """Evaluate if the opportunity matches the user profile."""
-    
+    # Structured degree check takes precedence over text-based heuristics.
+    extracted_degree = (opp_data.get("degree_level") or "").upper()
+    if extracted_degree == "MTECH":
+        user_deg = profile.degree.lower().replace(".", "").replace(" ", "")
+        if user_deg in ("btech", "be"):
+            return "NOT_ELIGIBLE_DEGREE"
+
     eligibility_text = str(opp_data.get("eligibility") or "").lower()
     branches_allowed = str(opp_data.get("branches_allowed") or "").lower()
     cgpa_req_str = str(opp_data.get("cgpa_requirement") or "").lower()

@@ -221,7 +221,9 @@ class DatabaseManager:
                 next_event_date TEXT,
                 eligibility_status TEXT NOT NULL DEFAULT 'MANUAL_REVIEW',
                 applied_date TEXT,
-                priority TEXT NOT NULL DEFAULT 'MEDIUM'
+                priority TEXT NOT NULL DEFAULT 'MEDIUM',
+                degree_level TEXT NOT NULL DEFAULT 'UNKNOWN',
+                dream_category TEXT NOT NULL DEFAULT 'NORMAL'
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -464,6 +466,10 @@ class DatabaseManager:
                 return False
             dt = parse_datetime_flexible(date_str)
             return dt is not None and dt.date() == now.date()
+
+        role = (opportunity.get("role") or "").strip()
+        if not role or role == "Unknown Role":
+            return "VERIFY ROLE"
 
         if status == "OFFER_RECEIVED":
             return "REVIEW OFFER"
@@ -830,7 +836,8 @@ class DatabaseManager:
                 current_status, status_history, last_update_timestamp,
                 email_received_at, drive_id, source_thread_id,
                 action_required, email_classification, my_status,
-                next_event_date, eligibility_status, applied_date, priority
+                next_event_date, eligibility_status, applied_date, priority,
+                degree_level, dream_category
             )
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
@@ -841,7 +848,8 @@ class DatabaseManager:
                 :current_status, :status_history, :last_update_timestamp,
                 :email_received_at, :drive_id, :source_thread_id,
                 :action_required, :email_classification, :my_status,
-                :next_event_date, :eligibility_status, :applied_date, :priority
+                :next_event_date, :eligibility_status, :applied_date, :priority,
+                COALESCE(:degree_level, 'UNKNOWN'), COALESCE(:dream_category, 'NORMAL')
             );
             """,
             values,
@@ -909,7 +917,9 @@ class DatabaseManager:
                 next_event_date = COALESCE(:next_event_date, next_event_date),
                 eligibility_status = COALESCE(:eligibility_status, eligibility_status),
                 applied_date = COALESCE(:applied_date, applied_date),
-                priority = COALESCE(:priority, priority)
+                priority = COALESCE(:priority, priority),
+                degree_level = COALESCE(:degree_level, degree_level),
+                dream_category = COALESCE(:dream_category, dream_category)
             WHERE id = :id;
             """,
             values,
@@ -937,6 +947,8 @@ class DatabaseManager:
             "eligibility_status": "TEXT NOT NULL DEFAULT 'MANUAL_REVIEW'",
             "applied_date": "TEXT",
             "priority": "TEXT NOT NULL DEFAULT 'MEDIUM'",
+            "degree_level": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+            "dream_category": "TEXT NOT NULL DEFAULT 'NORMAL'",
         }
 
         for col_name, col_def in new_columns.items():
@@ -1012,7 +1024,7 @@ class DatabaseManager:
             "current_status", "status_history", "last_update_timestamp",
             "email_received_at", "action_required", "email_classification",
             "my_status", "next_event_date", "eligibility_status",
-            "applied_date", "priority",
+            "applied_date", "priority", "degree_level", "dream_category",
         ):
             if fld in {"company_name", "role"}:
                 continue
@@ -1027,6 +1039,12 @@ class DatabaseManager:
                 normalized[fld] = value if value else "MANUAL_REVIEW"
             elif fld == "priority":
                 normalized[fld] = value if value else "MEDIUM"
+            elif fld == "degree_level":
+                # None means UNKNOWN — SQL COALESCE preserves a better existing value.
+                normalized[fld] = value if value and value != "UNKNOWN" else None
+            elif fld == "dream_category":
+                # None means NORMAL — SQL COALESCE preserves a better existing value.
+                normalized[fld] = value if value and value != "NORMAL" else None
             else:
                 normalized[fld] = _normalize_scalar(value)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import sqlite3
 import time
@@ -47,6 +48,26 @@ from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_i
 socket.setdefaulttimeout(60.0)
 
 logger = logging.getLogger(__name__)
+
+_LPA_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:lpa|lakh(?:s)?|lac(?:s)?)", re.IGNORECASE)
+
+
+def _parse_lpa(package_str: str | None) -> float | None:
+    if not package_str:
+        return None
+    m = _LPA_RE.search(str(package_str))
+    return float(m.group(1)) if m else None
+
+
+def _classify_dream(lpa: float | None) -> str:
+    if lpa is None:
+        return "NORMAL"
+    if lpa >= 40:
+        return "SUPER_DREAM"
+    if lpa >= 20:
+        return "DREAM"
+    return "NORMAL"
+
 
 # Classifications that represent a status update to an existing drive rather
 # than a brand-new opportunity. Used to decide when Gemini can be skipped.
@@ -102,6 +123,7 @@ def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
         "hiring_process": extraction.get("hiring_process"),
         "important_notes": extraction.get("important_notes"),
         "current_status": canonicalize_status(extraction.get("current_status")),
+        "degree_level": extraction.get("degree_level") or "UNKNOWN",
     }
 
 
@@ -435,6 +457,16 @@ class PlacementTrackerRunner:
                     )
                 else:
                     logger.info("Rule extraction sufficient; skipping Gemini (saved API call)")
+
+            # Merge degree_level: prefer rule result over UNKNOWN from Gemini.
+            if (
+                opp_data.get("degree_level") in (None, "UNKNOWN")
+                and rule_result.degree_level != "UNKNOWN"
+            ):
+                opp_data["degree_level"] = rule_result.degree_level
+            opp_data["dream_category"] = _classify_dream(
+                _parse_lpa(opp_data.get("package_or_stipend"))
+            )
 
             if opp_data.get("company_name"):
                 opp_data["company_name"] = normalize_company_name(opp_data["company_name"])

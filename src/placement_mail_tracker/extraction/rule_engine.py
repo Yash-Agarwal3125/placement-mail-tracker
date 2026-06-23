@@ -347,6 +347,18 @@ _COMPANY_FROM_SUBJECT = [
     ),
 ]
 
+_DEGREE_LEVEL_PATTERNS: dict[str, re.Pattern[str]] = {
+    "MTECH": re.compile(
+        r"\b(m\.?\s*tech(?:nology)?|post[\s\-]*grad(?:uate)?|"
+        r"masters?\s+(?:degree|students?|program))\b",
+        re.IGNORECASE,
+    ),
+    "BTECH": re.compile(
+        r"\b(b\.?\s*tech(?:nology)?|under[\s\-]*grad(?:uate)?|bachelor(?:s)?)\b",
+        re.IGNORECASE,
+    ),
+}
+
 _COMPANY_FROM_BODY_PATTERNS = [
     re.compile(
         r"(?:company|organization|employer)\s*[:\-]?\s*"
@@ -376,6 +388,7 @@ class RuleExtractionResult:
     email_classification: str = "IRRELEVANT"
     confidence: float = 0.0
     missing_fields: list[str] = field(default_factory=list)
+    degree_level: str = "UNKNOWN"
 
     @property
     def needs_gemini(self) -> bool:
@@ -404,6 +417,7 @@ class RuleExtractionResult:
             "work_location": self.location,
             "registration_link": self.registration_link,
             "current_status": self.current_status,
+            "degree_level": self.degree_level,
         }
 
 
@@ -469,6 +483,16 @@ def extract_from_email(
 
     # 10. Extract registration link
     result.registration_link = _first_match(_LINK_PATTERNS, combined)
+
+    # 11. Detect degree level
+    has_mtech = bool(_DEGREE_LEVEL_PATTERNS["MTECH"].search(combined))
+    has_btech = bool(_DEGREE_LEVEL_PATTERNS["BTECH"].search(combined))
+    if has_mtech and has_btech:
+        result.degree_level = "ANY"
+    elif has_mtech:
+        result.degree_level = "MTECH"
+    elif has_btech:
+        result.degree_level = "BTECH"
 
     # Calculate confidence
     filled = sum(1 for v in [
