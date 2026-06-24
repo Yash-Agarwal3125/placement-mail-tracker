@@ -90,6 +90,20 @@ _STATUS_CANONICAL = {
 }
 
 
+def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
+    """Log warnings for common data quality issues; never blocks processing."""
+    company = opp_data.get("company_name") or ""
+    if not opp_data.get("package_or_stipend"):
+        logger.warning("[DQ] %s (%s): missing stipend/package", company, msg_id)
+    if not opp_data.get("eligibility") and not opp_data.get("branches_allowed"):
+        logger.warning("[DQ] %s (%s): missing eligibility info", company, msg_id)
+    deadline = opp_data.get("deadline")
+    if deadline:
+        from placement_mail_tracker.utils.time import parse_datetime_flexible
+        if parse_datetime_flexible(str(deadline)) is None:
+            logger.warning("[DQ] %s (%s): unparseable deadline %r", company, msg_id, deadline)
+
+
 def _is_identifiable_company(name: str | None) -> bool:
     """Return True when ``name`` is a real company (not blank/Unknown)."""
     return bool(name) and name.strip().casefold() not in _UNIDENTIFIED_COMPANIES
@@ -498,6 +512,8 @@ class PlacementTrackerRunner:
                 detected_status = detect_status_from_text(subject, body)
                 if detected_status != "OPEN":
                     opp_data["current_status"] = detected_status
+
+            _warn_data_quality(opp_data, msg_id)
 
             with self.connection:
                 active_opportunities = database.get_active_opportunities()

@@ -1,10 +1,7 @@
 """Google Sheets synchronization for placement drives.
 
-Phase 6: Redesigned spreadsheet with comprehensive columns.
-Phase 7: Gmail deep link generation.
-Phase 8: Newest updates on top (sorted by last_updated DESC).
-Phase 9: Active Opportunities sheet (excludes REJECTED/WITHDRAWN/EXPIRED/COMPLETED).
-Phase 10: Dashboard sheet with metrics.
+4 tabs: ACTION REQUIRED, ALL DRIVES, UPCOMING EVENTS, DASHBOARD.
+Uses clear-then-write per sync (no key-based dedup needed).
 """
 
 from __future__ import annotations
@@ -27,45 +24,43 @@ from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
+from placement_mail_tracker.extraction.eligibility import format_eligibility_string
 from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
 
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# Decision-first, human-readable column schema. Most actionable fields are
-# leftmost; the internal Drive ID is kept last because the sync uses it as the
-# row dedupe key. Update ACTIVE_KEY_INDEX if the Drive ID column moves.
-ACTIVE_OPP_HEADERS = [
+# ACTION REQUIRED: actionable drives needing user attention
+ACTION_REQUIRED_HEADERS = [
     "Company",
-    "Role",
-    "Type",
-    "Degree",
-    "Category",
     "Status",
-    "Priority",
-    "Action Required",
-    "Deadline",
-    "Days Left",
-    "Next Event",
-    "Package",
-    "Location",
-    "CGPA Cutoff",
-    "Branches",
+    "Package/Stipend",
     "Eligibility",
-    "My Status",
-    "Apply Link",
-    "Email",
-    "History",
-    "Last Updated",
-    "Drive ID",
+    "Deadline",
+    "Next Action",
 ]
 
-# Column the sync uses to match/update existing rows (Drive ID, last column).
-ACTIVE_KEY_INDEX = ACTIVE_OPP_HEADERS.index("Drive ID")
+# ALL DRIVES: one row per drive (eligible + needs-review)
+ALL_DRIVES_HEADERS = [
+    "Company",
+    "Role",
+    "Received Date",
+    "Package/Stipend",
+    "Eligibility",
+    "Location",
+    "Deadline",
+    "Current Status",
+    "Last Update",
+]
 
-# Columns the user fills in by hand; the sync must NOT overwrite their edits.
-ACTIVE_USER_COLUMNS = [ACTIVE_OPP_HEADERS.index("My Status")]
+# UPCOMING EVENTS: OA / interview dates sorted ascending
+UPCOMING_EVENTS_HEADERS = [
+    "Date",
+    "Company",
+    "Event Type",
+    "Action",
+]
 
 COMPANY_HISTORY_HEADERS = [
     "Company",
@@ -80,6 +75,21 @@ DASHBOARD_HEADERS = [
     "Metric",
     "Value",
 ]
+
+# Backwards-compat alias used by tests and test_end_to_end.py.
+# Points to ALL DRIVES schema.
+ACTIVE_OPP_HEADERS = ALL_DRIVES_HEADERS
+
+# No user-owned columns in the new design (My Status removed).
+ACTIVE_USER_COLUMNS: list[int] = []
+
+# Not used in clear-and-write; kept so import-time references don't crash.
+ACTIVE_KEY_INDEX = -1
+
+# Statuses that need user attention (shown in ACTION REQUIRED tab)
+_ACTIONABLE_STATUSES = frozenset(
+    {"OPEN", "REGISTERED", "SHORTLISTED", "OA", "INTERVIEW", "HR"}
+)
 
 
 class SheetsAuthenticationError(RuntimeError):
@@ -109,7 +119,7 @@ class GoogleSheetsSync:
         self.last_error: str | None = None
 
     def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
-        """Sync all drives, companies, and dashboard to Google Sheets with resilience."""
+        """Sync all drives and dashboard to Google Sheets with resilience."""
         for attempt in range(1, 4):
             try:
                 return self._sync_active_opportunities_internal(database)
@@ -148,7 +158,6 @@ class GoogleSheetsSync:
                         raise
 
     def _sync_active_opportunities_internal(self, database: DatabaseManager) -> dict[str, int]:
-        """Internal method to sync all drives, companies, and dashboard to Google Sheets."""
         if not self.settings.google_sheet_id:
             self.last_error = "GOOGLE_SHEET_ID is missing"
             if self.settings.is_production:
@@ -159,75 +168,88 @@ class GoogleSheetsSync:
         self.last_error = None
         self._ensure_tabs_exist()
 
-        # Phase 9: Active Opportunities (excludes terminal statuses)
-        # Phase 5 (Eligibility Filter): Split by ELIGIBLE vs NOT_ELIGIBLE_*
         active_opps = database.fetch_active_drives_only()
 
-        eligible_opps = [
+        # Visible = eligible + needs-manual-review (not actively NOT_ELIGIBLE_*)
+        visible_opps = [
             opp for opp in active_opps
             if "NOT_ELIGIBLE" not in (opp.get("eligibility_status") or "")
         ]
-        filtered_opps = [
-            opp for opp in active_opps
-            if "NOT_ELIGIBLE" in (opp.get("eligibility_status") or "")
-        ]
 
-        self._sync_tab_data(
-            tab_name="Active Opportunities",
-            headers=ACTIVE_OPP_HEADERS,
-            data_rows=[opportunity_to_sheet_row(opp) for opp in eligible_opps],
-            key_index=ACTIVE_KEY_INDEX,  # Drive ID
-            user_columns=ACTIVE_USER_COLUMNS,
+        # ACTION REQUIRED: visible drives needing user action, sorted by deadline
+        action_opps = [
+            opp for opp in visible_opps
+            if (opp.get("action_required") or "").strip()
+            or (opp.get("current_status") or "").upper() in _ACTIONABLE_STATUSES
+        ]
+        action_opps.sort(key=lambda o: (not bool(o.get("deadline")), o.get("deadline") or ""))
+
+        self._clear_and_write_tab(
+            tab_name="ACTION REQUIRED",
+            headers=ACTION_REQUIRED_HEADERS,
+            rows=[action_required_row(opp) for opp in action_opps],
         )
 
-        self._sync_tab_data(
-            tab_name="Filtered Opportunities",
-            headers=ACTIVE_OPP_HEADERS,
-            data_rows=[opportunity_to_sheet_row(opp) for opp in filtered_opps],
-            key_index=ACTIVE_KEY_INDEX,  # Drive ID
-            user_columns=ACTIVE_USER_COLUMNS,
+        # ALL DRIVES: newest-update first
+        all_sorted = sorted(
+            visible_opps,
+            key=lambda o: o.get("updated_at") or o.get("last_update_timestamp") or "",
+            reverse=True,
+        )
+        self._clear_and_write_tab(
+            tab_name="ALL DRIVES",
+            headers=ALL_DRIVES_HEADERS,
+            rows=[opportunity_to_sheet_row(opp) for opp in all_sorted],
+        )
+
+        # UPCOMING EVENTS: sorted by date ascending
+        self._clear_and_write_tab(
+            tab_name="UPCOMING EVENTS",
+            headers=UPCOMING_EVENTS_HEADERS,
+            rows=_build_upcoming_events(visible_opps),
         )
 
         # Company History
         companies = database.get_company_history()
-        self._sync_tab_data(
+        self._clear_and_write_tab(
             tab_name="Company History",
             headers=COMPANY_HISTORY_HEADERS,
-            data_rows=[company_to_sheet_row(comp) for comp in companies],
-            key_index=0,  # Company Name
+            rows=[company_to_sheet_row(comp) for comp in companies],
         )
 
-        # Phase 10: Dashboard
         self._sync_dashboard(database)
-
-        # Phase 6: Apply formatting
         self._apply_formatting()
 
         return {"created": len(active_opps), "updated": 0, "skipped": 0}
 
     def _ensure_tabs_exist(self) -> None:
-        """Ensure all required tabs exist in the spreadsheet."""
         service = self._get_service()
         spreadsheet = (
             service.spreadsheets()
             .get(spreadsheetId=self.settings.google_sheet_id)
             .execute()
         )
-        existing_tabs = [
-            s.get("properties", {}).get("title")
+        existing_sheets = {
+            s.get("properties", {}).get("title"): s.get("properties", {}).get("sheetId")
             for s in spreadsheet.get("sheets", [])
-        ]
+        }
 
         required_tabs = [
-            "Active Opportunities",
-            "Filtered Opportunities",
+            "ACTION REQUIRED",
+            "ALL DRIVES",
+            "UPCOMING EVENTS",
             "Company History",
             "Dashboard",
         ]
+        stale_tabs = {"Active Opportunities", "Filtered Opportunities"}
+
         requests = []
         for tab in required_tabs:
-            if tab not in existing_tabs:
+            if tab not in existing_sheets:
                 requests.append({"addSheet": {"properties": {"title": tab}}})
+        for title, sheet_id in existing_sheets.items():
+            if title in stale_tabs and sheet_id is not None:
+                requests.append({"deleteSheet": {"sheetId": sheet_id}})
 
         if requests:
             service.spreadsheets().batchUpdate(
@@ -235,6 +257,31 @@ class GoogleSheetsSync:
                 body={"requests": requests},
             ).execute()
 
+    def _clear_and_write_tab(
+        self,
+        tab_name: str,
+        headers: list[str],
+        rows: list[list[str]],
+    ) -> None:
+        """Clear the tab then write headers + rows in one call."""
+        values = self._values()
+        sheet_id = self.settings.google_sheet_id
+
+        values.clear(
+            spreadsheetId=sheet_id,
+            range=f"{_quote(tab_name)}!A:Z",
+        ).execute()
+
+        all_data: list[list[str]] = [headers] + rows
+        values.update(
+            spreadsheetId=sheet_id,
+            range=f"{_quote(tab_name)}!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": all_data},
+        ).execute()
+        logger.info("[SYNC] Wrote %d rows to %s", len(rows), tab_name)
+
+    # Kept for backwards compatibility with existing callers.
     def _sync_tab_data(
         self,
         tab_name: str,
@@ -243,166 +290,9 @@ class GoogleSheetsSync:
         key_index: int,
         user_columns: list[int] | None = None,
     ) -> None:
-        """Sync rows to a tab, matching existing rows by ``key_index``.
-
-        ``user_columns`` lists column indices the user edits by hand (e.g. "My
-        Status"); for matched rows their existing sheet value is preserved so a
-        sync never clobbers the user's own tracking.
-        """
-        values = self._values()
-
-        # Ensure header
-        response = values.get(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{_quote(tab_name)}!A1:Z1",
-        ).execute()
-        existing_header = (
-            response.get("values", [[]])[0] if response.get("values") else []
-        )
-
-        if existing_header != headers:
-            values.update(
-                spreadsheetId=self.settings.google_sheet_id,
-                range=f"{_quote(tab_name)}!A1:Z1",
-                valueInputOption="RAW",
-                body={"values": [headers]},
-            ).execute()
-            # A header change means the column layout changed. Wipe stale data
-            # rows (written in the old order) so the tab rebuilds cleanly instead
-            # of leaving misaligned rows the key-based dedupe can't match.
-            if existing_header:
-                logger.info("[SYNC] Layout change on %s; clearing stale rows", tab_name)
-                values.clear(
-                    spreadsheetId=self.settings.google_sheet_id,
-                    range=f"{_quote(tab_name)}!A2:Z",
-                ).execute()
-
-        # Get existing rows
-        # We only need to fetch columns up to the key_index for deduplication
-        end_col = chr(ord('A') + key_index)
-        logger.info("[SYNC] Starting sheet read for %s range A:%s", tab_name, end_col)
-        start_time = time.time()
-
-        response = values.get(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{_quote(tab_name)}!A:{end_col}",
-        ).execute()
-        
-        duration = time.time() - start_time
-        existing_rows = response.get("values", [])
-        logger.info(
-            "[SYNC] Finished sheet read for %s. Fetched %s rows in %.2fs",
-            tab_name, len(existing_rows), duration,
-        )
-
-        existing_by_key: dict[str, int] = {}
-        existing_row_by_key: dict[str, list[str]] = {}
-        for row_number, row in enumerate(existing_rows[1:], start=2):
-            if len(row) > key_index:
-                key = row[key_index].strip()
-                if key:
-                    existing_by_key[key] = row_number
-                    existing_row_by_key[key] = row
-
-        rows_to_append = []
-        update_data = []
-        for row in data_rows:
-            if len(row) > key_index:
-                key = row[key_index].strip()
-                existing_row_number = existing_by_key.get(key)
-                if existing_row_number:
-                    if user_columns:
-                        _preserve_user_columns(
-                            row, existing_row_by_key.get(key, []), user_columns
-                        )
-                    row_range = (
-                        f"{_quote(tab_name)}!A{existing_row_number}:Z{existing_row_number}"
-                    )
-                    update_data.append({
-                        "range": row_range,
-                        "values": [row]
-                    })
-                else:
-                    rows_to_append.append(row)
-
-        if update_data:
-            values.batchUpdate(
-                spreadsheetId=self.settings.google_sheet_id,
-                body={
-                    "valueInputOption": "USER_ENTERED",
-                    "data": update_data
-                }
-            ).execute()
-
-        if rows_to_append:
-            values.append(
-                spreadsheetId=self.settings.google_sheet_id,
-                range=f"{_quote(tab_name)}!A:Z",
-                valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
-                body={"values": rows_to_append},
-            ).execute()
-
-        # Keep the tab a faithful mirror of the live drive set: remove rows whose
-        # key (Drive ID) is no longer among the drives we just synced. This drops
-        # rows for drives that became terminal (rejected/expired) instead of
-        # letting stale rows accumulate. Guarded so an empty sync never wipes the
-        # tab (e.g. a transient DB hiccup returning no rows).
-        if not data_rows:
-            return
-
-        current_keys = {
-            row[key_index].strip()
-            for row in data_rows
-            if len(row) > key_index and row[key_index].strip()
-        }
-        rows_to_delete = [
-            row_number
-            for key, row_number in existing_by_key.items()
-            if key not in current_keys
-        ]
-        if not rows_to_delete:
-            return
-
-        service = self._get_service()
-        sheet_metadata = (
-            service.spreadsheets()
-            .get(spreadsheetId=self.settings.google_sheet_id)
-            .execute()
-        )
-        sheet_id = next(
-            (
-                s["properties"]["sheetId"]
-                for s in sheet_metadata.get("sheets", [])
-                if s["properties"]["title"] == tab_name
-            ),
-            None,
-        )
-        if sheet_id is None:
-            return
-
-        # Delete bottom-up (0-based row indices) so earlier indices stay valid.
-        delete_requests = [
-            {
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "startIndex": row_number - 1,
-                        "endIndex": row_number,
-                    }
-                }
-            }
-            for row_number in sorted(rows_to_delete, reverse=True)
-        ]
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=self.settings.google_sheet_id,
-            body={"requests": delete_requests},
-        ).execute()
-        logger.info("[SYNC] Removed %d stale rows from %s", len(delete_requests), tab_name)
+        self._clear_and_write_tab(tab_name, headers, data_rows)
 
     def _sync_dashboard(self, database: DatabaseManager) -> None:
-        """Phase 10: Compute and sync static dashboard metrics."""
         metrics = database.get_dashboard_metrics()
 
         dashboard_data = [
@@ -413,35 +303,22 @@ class GoogleSheetsSync:
             ["OA This Week", str(metrics["oa_this_week"])],
             ["Interviews This Week", str(metrics["interviews_this_week"])],
             ["Offers Received", str(metrics["offers_received"])],
+            ["Selected / Offers", str(metrics.get("selected", 0))],
+            ["Rejected", str(metrics.get("rejected", 0))],
             ["Companies Applied", str(metrics["companies_applied"])],
             ["Selection Rate", metrics["selection_rate"]],
             ["Total Drives", str(metrics["total_drives"])],
         ]
 
-        values = self._values()
-
-        start_time = time.time()
-
-        # We skip the clear() call to avoid temporary blank screens and reduce API calls.
-        # Since the dashboard metrics are fixed in number (8 metrics), updating
-        # the fixed range will cleanly overwrite the old values without leaving ghost rows.
-        values.update(
+        self._values().update(
             spreadsheetId=self.settings.google_sheet_id,
             range=f"{_quote('Dashboard')}!A1:B{len(dashboard_data) + 1}",
             valueInputOption="USER_ENTERED",
             body={"values": [DASHBOARD_HEADERS] + dashboard_data},
         ).execute()
-        
-        duration = time.time() - start_time
-        logger.info("[SYNC] Finished dashboard update in %.2fs", duration)
 
     def _apply_formatting(self) -> None:
-        """Phase 6: Apply freeze header, conditional formatting, auto-sort.
-
-        Idempotent: existing conditional-format rules are deleted before fresh
-        ones are added, so repeated syncs never accumulate duplicate rules
-        (which previously grew unbounded and eventually broke batchUpdate).
-        """
+        """Freeze header row, auto-filter, and colour-code status cells."""
         service = self._get_service()
         spreadsheet = (
             service.spreadsheets()
@@ -452,7 +329,7 @@ class GoogleSheetsSync:
             .execute()
         )
 
-        sheet_ids = {}
+        sheet_ids: dict[str, int] = {}
         existing_cf_counts: dict[int, int] = {}
         for sheet in spreadsheet.get("sheets", []):
             title = sheet.get("properties", {}).get("title")
@@ -463,22 +340,15 @@ class GoogleSheetsSync:
 
         requests: list[dict[str, Any]] = []
 
-        # Clear pre-existing conditional-format rules (delete highest index
-        # first so earlier indices stay valid) before re-adding below.
         for sheet_id, count in existing_cf_counts.items():
             for index in range(count - 1, -1, -1):
                 requests.append({
-                    "deleteConditionalFormatRule": {
-                        "sheetId": sheet_id,
-                        "index": index,
-                    }
+                    "deleteConditionalFormatRule": {"sheetId": sheet_id, "index": index}
                 })
 
-        for _tab_name, sheet_id in sheet_ids.items():
+        for _title, sheet_id in sheet_ids.items():
             if sheet_id is None:
                 continue
-
-            # Phase 6: Freeze header row
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
@@ -488,26 +358,16 @@ class GoogleSheetsSync:
                     "fields": "gridProperties.frozenRowCount",
                 }
             })
-
-            # Phase 6: Auto-filter
             requests.append({
                 "setBasicFilter": {
-                    "filter": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 0,
-                        }
-                    }
+                    "filter": {"range": {"sheetId": sheet_id, "startRowIndex": 0}}
                 }
             })
 
-        # Conditional status colouring. We rely on the basic filter (added above)
-        # for user-driven sorting: an automatic sort by the human-formatted
-        # "Last Updated"/"Deadline" text would sort lexically, not chronologically.
-        active_sheet_id = sheet_ids.get("Active Opportunities")
-        if active_sheet_id is not None:
-            # Match the friendly labels shown in the "Status" column.
-            status_col = ACTIVE_OPP_HEADERS.index("Status")
+        # Status colour-coding on ALL DRIVES (Current Status column)
+        all_drives_id = sheet_ids.get("ALL DRIVES")
+        if all_drives_id is not None:
+            status_col = ALL_DRIVES_HEADERS.index("Current Status")
             colors = {
                 "Open": {"red": 0.85, "green": 0.92, "blue": 1.0},
                 "OA Scheduled": {"red": 1.0, "green": 0.95, "blue": 0.8},
@@ -517,13 +377,12 @@ class GoogleSheetsSync:
                 "Selected": {"red": 0.7, "green": 1.0, "blue": 0.7},
                 "Offer Received": {"red": 0.7, "green": 1.0, "blue": 0.7},
             }
-
             for status, color in colors.items():
                 requests.append({
                     "addConditionalFormatRule": {
                         "rule": {
                             "ranges": [{
-                                "sheetId": active_sheet_id,
+                                "sheetId": all_drives_id,
                                 "startRowIndex": 1,
                                 "startColumnIndex": status_col,
                                 "endColumnIndex": status_col + 1,
@@ -540,32 +399,6 @@ class GoogleSheetsSync:
                     }
                 })
 
-            # Phase 6: Alternating row colors
-            requests.append({
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [{
-                            "sheetId": active_sheet_id,
-                            "startRowIndex": 1,
-                        }],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "CUSTOM_FORMULA",
-                                "values": [{"userEnteredValue": "=ISEVEN(ROW())"}],
-                            },
-                            "format": {
-                                "backgroundColor": {
-                                    "red": 0.96,
-                                    "green": 0.96,
-                                    "blue": 0.96,
-                                }
-                            },
-                        },
-                    },
-                    "index": 0,
-                }
-            })
-
         if requests:
             service.spreadsheets().batchUpdate(
                 spreadsheetId=self.settings.google_sheet_id,
@@ -577,7 +410,6 @@ class GoogleSheetsSync:
     # ------------------------------------------------------------------
 
     def authenticate(self) -> Credentials:
-        """Load, refresh, or create OAuth2 credentials for Google Sheets."""
         credentials = self._load_token()
 
         if credentials and credentials.valid:
@@ -643,37 +475,52 @@ class GoogleSheetsSync:
 
 
 def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
-    """Convert one drive into a clean, human-readable Active Opportunities row.
-
-    Column order matches ``ACTIVE_OPP_HEADERS``. Dates are rendered in local
-    time, enums get friendly labels, the registration and Gmail links become
-    clickable, and the status history is shown as a compact arrow trail.
-    """
-    deadline_raw = opportunity.get("deadline")
-    role = opportunity.get("role") or ""
+    """Convert one drive into an ALL DRIVES row (9 columns)."""
+    eligibility = (
+        format_eligibility_string(opportunity)
+        or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
+    )
     return [
         _cell(opportunity.get("company_name")),
-        "" if role.strip() in ("", "Unknown Role") else _cell(role),
-        _friendly(opportunity.get("internship_or_fulltime"), _TYPE_LABELS),
-        _friendly(opportunity.get("degree_level"), _DEGREE_LABELS),
-        _friendly(opportunity.get("dream_category"), _CATEGORY_LABELS),
-        _friendly(opportunity.get("current_status"), _STATUS_LABELS),
-        _friendly(opportunity.get("priority"), _PRIORITY_LABELS),
-        _cell(opportunity.get("action_required")),
-        _fmt_date(deadline_raw),
-        _days_left(deadline_raw),
-        _fmt_date(opportunity.get("next_event_date")),
+        _cell(opportunity.get("role")),
+        _fmt_date(opportunity.get("email_received_at")),
         _cell(opportunity.get("package_or_stipend")),
+        eligibility,
         _cell(opportunity.get("work_location")),
-        _cell(opportunity.get("cgpa_requirement")),
-        _fmt_branches(opportunity.get("branches_allowed")),
-        _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS),
-        _friendly(opportunity.get("my_status", "NOT_APPLIED"), _MY_STATUS_LABELS),
-        _hyperlink(opportunity.get("registration_link"), "Apply"),
-        _gmail_link(opportunity),
-        _fmt_status_trail(opportunity.get("status_history")),
+        _fmt_date(opportunity.get("deadline")),
+        _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _fmt_datetime(opportunity.get("updated_at") or opportunity.get("last_update_timestamp")),
-        _cell(opportunity.get("drive_id")),
+    ]
+
+
+def action_required_row(opportunity: dict[str, Any]) -> list[str]:
+    """Convert one drive into an ACTION REQUIRED row (6 columns)."""
+    eligibility = (
+        format_eligibility_string(opportunity)
+        or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
+    )
+    return [
+        _cell(opportunity.get("company_name")),
+        _friendly(opportunity.get("current_status"), _STATUS_LABELS),
+        _cell(opportunity.get("package_or_stipend")),
+        eligibility,
+        _fmt_date(opportunity.get("deadline")),
+        _cell(opportunity.get("action_required")),
+    ]
+
+
+def upcoming_event_row(
+    opportunity: dict[str, Any],
+    event_type: str,
+    event_date_raw: str,
+) -> list[str]:
+    """Convert one event into an UPCOMING EVENTS row (4 columns)."""
+    action = opportunity.get("action_required") or f"Prepare for {event_type}"
+    return [
+        _fmt_date(event_date_raw),
+        _cell(opportunity.get("company_name")),
+        event_type,
+        _cell(action),
     ]
 
 
@@ -689,14 +536,30 @@ def company_to_sheet_row(company: dict[str, Any]) -> list[str]:
     ]
 
 
+def _build_upcoming_events(opps: list[dict[str, Any]]) -> list[list[str]]:
+    """Build sorted upcoming-events rows from oa_date and interview_date fields."""
+    now = datetime.now()
+    events: list[tuple[datetime, list[str]]] = []
+
+    for opp in opps:
+        for field_name, label in (
+            ("oa_date", "Online Assessment"), ("interview_date", "Interview")
+        ):
+            raw = opp.get(field_name)
+            if not raw:
+                continue
+            parsed = parse_datetime_flexible(str(raw))
+            if parsed and parsed >= now:
+                events.append((parsed, upcoming_event_row(opp, label, str(raw))))
+
+    events.sort(key=lambda t: t[0])
+    return [row for _, row in events]
+
+
 def _preserve_user_columns(
     new_row: list[str], existing_row: list[str], user_columns: list[int]
 ) -> None:
-    """Carry user-edited cells from the existing sheet row into the new row.
-
-    Mutates ``new_row`` in place so a sync never overwrites a value the user
-    typed (e.g. marking a drive "Applied" in the My Status column).
-    """
+    """No-op in new design (no user-owned columns); kept for import compat."""
     for col in user_columns:
         if col < len(existing_row) and existing_row[col].strip():
             while len(new_row) <= col:
@@ -705,7 +568,6 @@ def _preserve_user_columns(
 
 
 def _quote(sheet_name: str) -> str:
-    """Quote sheet names for A1 notation."""
     escaped = sheet_name.replace("'", "''")
     return f"'{escaped}'"
 
@@ -722,7 +584,6 @@ def _cell(value: Any) -> str:
 # Human-readable value formatting
 # ------------------------------------------------------------------
 
-# Keys are upper-cased to match _friendly()'s case-insensitive lookup.
 _TYPE_LABELS = {
     "INTERNSHIP": "Internship",
     "INTERN": "Internship",
@@ -732,8 +593,6 @@ _TYPE_LABELS = {
     "CONTRACT": "Contract",
 }
 
-# Friendly labels for the canonical status vocabulary used across the system.
-# NEW/PPT are legacy synonyms (now canonicalised to OPEN at extraction time).
 _STATUS_LABELS = {
     "NEW": "Open",
     "PPT": "Open",
@@ -779,7 +638,6 @@ _JUNK_VALUES = {"", "[]", "[ ]", "none", "null", "n/a", "na", "-"}
 
 
 def _friendly(value: Any, labels: dict[str, str]) -> str:
-    """Map an enum value to a readable label, falling back to Title Case."""
     raw = _cell(value)
     if not raw:
         return ""
@@ -787,30 +645,22 @@ def _friendly(value: Any, labels: dict[str, str]) -> str:
 
 
 def _force_text(value: str) -> str:
-    """Prefix a value so Sheets (USER_ENTERED) keeps it as literal text.
-
-    Without this, Sheets re-parses strings like "16 Jun 2026, 4:45 PM" into a
-    date serial and re-renders them in the spreadsheet's locale (e.g. 24-hour),
-    which would undo our human-readable formatting. The leading apostrophe is a
-    Sheets text marker and is NOT displayed in the cell.
-    """
+    """Prefix with apostrophe so Sheets keeps the value as literal text."""
     return f"'{value}" if value else value
 
 
 def _fmt_datetime(value: Any) -> str:
-    """Render a stored timestamp as local 'DD Mon YYYY, H:MM AM/PM' (text)."""
     raw = _cell(value)
     if not raw:
         return ""
     dt = parse_datetime_flexible(raw)
     if dt is None:
-        return raw  # never drop information we can't parse
+        return raw
     hour = dt.strftime("%I").lstrip("0") or "12"
     return _force_text(f"{dt.day} {dt.strftime('%b %Y')}, {hour}:{dt.strftime('%M %p')}")
 
 
 def _fmt_date(value: Any) -> str:
-    """Render a deadline/event date in local time; include time only if set."""
     raw = _cell(value)
     if not raw:
         return ""
@@ -825,7 +675,6 @@ def _fmt_date(value: Any) -> str:
 
 
 def _days_left(value: Any) -> str:
-    """Return a friendly countdown to a deadline: Today / Tomorrow / N days / Passed."""
     raw = _cell(value)
     if not raw:
         return ""
@@ -843,9 +692,7 @@ def _days_left(value: Any) -> str:
 
 
 def _fmt_branches(value: Any) -> str:
-    """Join eligible branches, dropping serialization junk like '[]'."""
     if isinstance(value, str):
-        # May arrive as a JSON-encoded list when the row wasn't deserialized.
         try:
             parsed = json.loads(value)
             value = parsed if isinstance(parsed, list) else value
@@ -861,7 +708,6 @@ def _fmt_branches(value: Any) -> str:
 
 
 def _fmt_status_trail(value: Any) -> str:
-    """Render status history as a compact 'Open → OA Scheduled' trail (last 5)."""
     raw = _cell(value)
     if not raw:
         return ""
@@ -874,13 +720,12 @@ def _fmt_status_trail(value: Any) -> str:
     trail: list[str] = []
     for status in items:
         label = _STATUS_LABELS.get(str(status).upper(), str(status))
-        if not trail or trail[-1] != label:  # collapse consecutive duplicates
+        if not trail or trail[-1] != label:
             trail.append(label)
     return " → ".join(trail[-5:])
 
 
 def _hyperlink(url: Any, label: str) -> str:
-    """Build a Sheets HYPERLINK formula, or '' when there is no valid URL."""
     raw = _cell(url)
     if not raw.lower().startswith(("http://", "https://")):
         return ""
@@ -889,7 +734,6 @@ def _hyperlink(url: Any, label: str) -> str:
 
 
 def _gmail_link(opportunity: dict[str, Any]) -> str:
-    """Build a clickable Gmail deep link to the source thread/message."""
     target = (
         opportunity.get("source_thread_id")
         or opportunity.get("source_email_id")

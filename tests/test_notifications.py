@@ -8,7 +8,7 @@ import pytest
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
-from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
+from placement_mail_tracker.scheduler.digest_generator import _format_digest
 from placement_mail_tracker.utils.scoring import compute_priority
 
 
@@ -87,29 +87,20 @@ def test_alert_generation_logic():
     assert "<3 hours" in call_args["subject"]
     
 def test_digest_format():
-    mock_db = Mock(spec=DatabaseManager)
-    mock_settings = Mock()
-    mock_settings.smtp_email = "test@gmail.com"
-    mock_settings.smtp_app_password = "password"
-    mock_settings.notification_email = "notify@gmail.com"
-    mock_settings.email_receiver = "recv@gmail.com"
-    digest_gen = DailyDigestGenerator(mock_db, mock_settings)
-    
-    new_opps = [{"company_name": "New Co", "role": "Dev", "priority": "HIGH"}]
-    status_changes = [{"company_name": "Status Co", "role": "Dev", "current_status": "SHORTLISTED"}]
-    events = [{"company_name": "Event Co", "role": "Dev", "next_event_date": "Tomorrow"}]
-    deadlines = [{"company_name": "Deadline Co", "role": "Dev", "deadline": "Tonight"}]
-    actions = [{"company_name": "Action Co", "role": "Dev", "action_required": "APPLY"}]
-    
-    output = digest_gen._format_digest(new_opps, status_changes, events, deadlines, actions)
-    
-    assert "<h2>🌟 NEW OPPORTUNITIES</h2>" in output
+    action_required = [
+        {"company_name": "Action Co", "role": "Dev", "current_status": "OPEN", "deadline": None}
+    ]
+    upcoming_events = [
+        {"company_name": "Event Co", "role": "Dev", "next_event_date": "2027-06-10"}
+    ]
+    new_opps = [{"company_name": "New Co", "role": "Dev"}]
+
+    output = _format_digest(action_required, upcoming_events, new_opps, datetime.now())
+
+    assert "PLACEMENT SUMMARY" in output
+    assert "ACTION REQUIRED" in output
+    assert "Action Co" in output
+    assert "UPCOMING INTERVIEWS" in output
+    assert "Event Co" in output
+    assert "NEW OPPORTUNITIES" in output
     assert "New Co" in output
-    assert "<h2>🔄 STATUS CHANGES</h2>" in output
-    assert "SHORTLISTED" in output
-    assert "<h2>📅 UPCOMING EVENTS</h2>" in output
-    assert "Tomorrow" in output
-    assert "<h2>⏰ DEADLINES</h2>" in output
-    assert "Tonight" in output
-    assert "<h2>⚠️ ACTION REQUIRED</h2>" in output
-    assert "APPLY" in output

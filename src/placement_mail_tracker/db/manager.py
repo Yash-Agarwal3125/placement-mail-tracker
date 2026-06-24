@@ -617,6 +617,11 @@ class DatabaseManager:
         active_drives = sum(1 for o in all_opps if o.get("current_status") in active_statuses)
         applications_open = sum(1 for o in all_opps if o.get("current_status") == "OPEN")
         offers = sum(1 for o in all_opps if o.get("current_status") == "OFFER_RECEIVED")
+        selected = sum(
+            1 for o in all_opps
+            if o.get("current_status") in ("SELECTED", "OFFER_RECEIVED")
+        )
+        rejected = sum(1 for o in all_opps if o.get("current_status") == "REJECTED")
 
         total = len(all_opps)
         companies = len(set(o.get("company_name", "") for o in all_opps))
@@ -636,6 +641,8 @@ class DatabaseManager:
                 1 for o in all_opps if (o.get("action_required") or "").strip()
             ),
             "offers_received": offers,
+            "selected": selected,
+            "rejected": rejected,
             "companies_applied": companies,
             "selection_rate": selection_rate,
             "total_drives": total,
