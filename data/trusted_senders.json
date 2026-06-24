@@ -155,5 +155,15 @@
       "domain:institutional"
     ],
     "score": 40
+  },
+  {
+    "display_name": "Unknown Institutional Aliases",
+    "email": "yash.agarwal2023a@vitstudent.ac.in",
+    "first_seen": "2026-06-24T09:51:43.202142+00:00",
+    "last_seen": "2026-06-24T09:51:43.202142+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
   }
 ]
