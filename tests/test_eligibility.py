@@ -62,9 +62,10 @@ def test_cgpa_below_threshold(base_profile):
     }
     assert evaluate_eligibility(opp_data, base_profile) == "NOT_ELIGIBLE_CGPA"
 
-def test_manual_review_when_empty(base_profile):
+def test_eligible_when_empty(base_profile):
+    # No eligibility signals → assume ELIGIBLE (was MANUAL_REVIEW, reduced noise)
     opp_data = {}
-    assert evaluate_eligibility(opp_data, base_profile) == "MANUAL_REVIEW"
+    assert evaluate_eligibility(opp_data, base_profile) == "ELIGIBLE"
 
 
 def test_mtech_text_signal_filtered_for_btech(base_profile):
@@ -89,7 +90,7 @@ def test_mtech_with_btech_both_eligible(base_profile):
 
 def test_format_eligibility_btech_with_branches():
     opp_data = {"degree_level": "BTECH", "branches_allowed": ["CSE", "AI & ML"]}
-    assert format_eligibility_string(opp_data) == "B.Tech - CSE, AI & ML"
+    assert format_eligibility_string(opp_data) == "B.Tech - CSE, AI&ML"
 
 
 def test_format_eligibility_any_no_branches():
@@ -106,3 +107,60 @@ def test_format_eligibility_json_string_branches():
     opp_data = {"degree_level": "BTECH", "branches_allowed": '["CSE", "ECE"]'}
     result = format_eligibility_string(opp_data)
     assert "CSE" in result and "ECE" in result
+
+
+def test_format_eligibility_infers_mtech_from_verbose_branch():
+    # Gemini-extracted M.Tech branches → degree inferred from branch text
+    opp_data = {
+        "degree_level": "UNKNOWN",
+        "branches_allowed": ["All M.Tech 2 yrs (CSE/IT related branches)"],
+    }
+    result = format_eligibility_string(opp_data)
+    assert result.startswith("M.Tech -")
+    assert "CSE" in result
+
+
+def test_format_eligibility_no_inference_for_mixed_disciplines():
+    # Research-center drive with non-CS branches should not get a B.Tech label
+    opp_data = {
+        "degree_level": "UNKNOWN",
+        "branches_allowed": ["Physics", "Chemistry", "Data Science"],
+    }
+    result = format_eligibility_string(opp_data)
+    assert not result.startswith("B.Tech")
+
+
+# --- branch extraction from rule engine ---
+
+from placement_mail_tracker.extraction.rule_engine import extract_from_email
+
+
+def test_branch_extraction_cse_it_aiml():
+    r = extract_from_email("Campus Drive", "Eligible Branches: CSE, IT, AI&ML")
+    assert r.branches_allowed == ["CSE", "IT", "AI&ML"]
+    assert r.degree_level == "BTECH"
+
+
+def test_branch_extraction_all_branches():
+    r = extract_from_email("Internship Drive", "Open to all B.Tech students for this drive.")
+    assert r.branches_allowed == ["All Branches"]
+    assert r.degree_level == "BTECH"
+
+
+def test_branch_extraction_slash_separated():
+    r = extract_from_email("Subject", "Applicable for: CSE/IT/Data Science")
+    assert "CSE" in r.branches_allowed
+    assert "IT" in r.branches_allowed
+    assert "Data Science" in r.branches_allowed
+
+
+def test_branch_extraction_verbose_phrase():
+    r = extract_from_email("Subject", "Departments: Computer Science and Engineering, Information Technology")
+    assert "CSE" in r.branches_allowed
+    assert "IT" in r.branches_allowed
+
+
+def test_branch_extraction_mtech_context():
+    r = extract_from_email("Subject", "Eligible Branches (M.Tech): CSE, IT")
+    assert r.degree_level == "MTECH"
+    assert "CSE" in r.branches_allowed

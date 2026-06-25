@@ -231,6 +231,20 @@ class TestCompanyNormalizationDedup:
     def test_dell_variants(self, variant: str):
         assert normalize_company_name(variant) == "Dell Technologies"
 
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("Cisco: FY27 Pre-Placement Talk", "Cisco"),
+            ("Cisco: Fy27 Pre", "Cisco"),
+            ("Clayfin Regular", "Clayfin"),
+            ("Jw Consultants", "JW Consultants"),
+            ("Drive: Microsoft", "Microsoft"),
+            ("Opportunity: Google", "Google"),
+        ],
+    )
+    def test_noise_stripping(self, raw: str, expected: str):
+        assert normalize_company_name(raw) == expected
+
     def test_normalization_in_db_context(self, db_manager: DatabaseManager):
         """Drives from variant company names should resolve to one canonical name in DB."""
         thread = "thread_dedup_001"

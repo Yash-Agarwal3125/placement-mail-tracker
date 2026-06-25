@@ -94,14 +94,16 @@ def _get_year_from_opportunity(opportunity: dict[str, Any]) -> str:
 def generate_unique_hash(opportunity: dict[str, Any]) -> str:
     """Generate a stable hash for duplicate prevention by drive.
 
-    Phase 5: Uses company + role + package + year as uniqueness key.
+    Uses company + role + type + year. Intentionally excludes package_or_stipend
+    because that field is mutable (follow-up emails often add/correct it), and
+    including it causes follow-ups to mint duplicate drives instead of updating.
     """
     year = _get_year_from_opportunity(opportunity)
 
     parts = [
         _normalize_key(opportunity.get("company_name", "")),
         _normalize_key(opportunity.get("role", "")),
-        _normalize_key(opportunity.get("package_or_stipend", "")),
+        _normalize_key(opportunity.get("internship_or_fulltime", "")),
         year,
     ]
     normalized = "::".join(parts)
@@ -345,6 +347,13 @@ class DatabaseManager:
                 history = json.loads(existing["status_history"])
             except Exception:
                 history = []
+
+            # Protect against hard regression to OPEN: once a drive has advanced
+            # past OPEN (e.g. OA, SHORTLISTED), a mass-announcement keyword like
+            # "congratulations" that resolves to OPEN must not downgrade it.
+            existing_status = (existing["current_status"] or "OPEN").upper()
+            if existing_status != "OPEN" and new_status == "OPEN":
+                new_status = existing_status
 
             if new_status and (not history or history[-1] != new_status):
                 history.append(new_status)
