@@ -26,9 +26,48 @@ _STRIP_SUFFIXES = re.compile(
     r"\b(inc|ltd|llc|llp|pvt|private|limited|"
     r"technologies|technology|tech|solutions|services|systems|"
     r"global|india|corp|corporation|group|holdings|enterprises|"
-    r"co|company)\b\.?",
+    r"co|company|consultants|consulting)\b\.?",
     re.IGNORECASE,
 )
+
+# Placement-drive tier / label noise that contaminates extracted company names.
+# E.g. "Clayfin Regular", "Cisco: FY27 Pre-Placement Talk", "Dream Internship Drive".
+_COMPANY_NOISE = re.compile(
+    r"\b("
+    r"super\s+dream|dream\s+intern(?:ship)?"
+    r"|regular|normal"
+    r"|fy\s*\d{2,4}"
+    r"|pre[\s\-]*placement(?:\s+talk)?|pre(?=\s*$|\s*:)"  # "Pre" as standalone suffix/label
+    r"|placement\s+talk|ppt|talk"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Label-colon prefixes to strip from the front of extracted company names.
+# Handles "Drive: Microsoft", "Opportunity: Google", as well as the common
+# email subject prefixes already present ("Re:", "Updated:", …).
+_LABEL_PREFIX = re.compile(
+    r"^(updated|reminder|re|fwd?|drive|campus|opportunity|recruitment|placement)"
+    r"\s*[:\-]\s*",
+    re.IGNORECASE,
+)
+
+
+def _smart_title(text: str) -> str:
+    """Title-case while preserving all-uppercase acronyms (UBS, WSP, JW)."""
+    tokens = text.split()
+    if not tokens:
+        return text
+    all_upper = all(t.isupper() for t in tokens)
+    out = []
+    for tok in tokens:
+        if not all_upper and tok.isupper() and 2 <= len(tok) <= 4:
+            out.append(tok)
+        elif len(tokens) == 1 and tok.isupper() and 2 <= len(tok) <= 5:
+            out.append(tok)
+        else:
+            out.append(tok.capitalize())
+    return " ".join(out)
 
 # Known canonical company names
 _CANONICAL_NAMES: dict[str, str] = {
@@ -56,6 +95,10 @@ _CANONICAL_NAMES: dict[str, str] = {
     "tata electronics": "Tata Electronics",
     "afford medical": "Afford Medical Technologies",
     "waters": "Waters",
+    "jw": "JW Consultants",
+    "jw consultants": "JW Consultants",
+    "cisco": "Cisco",
+    "clayfin": "Clayfin",
 }
 
 
@@ -72,39 +115,48 @@ def normalize_company_name(raw: str | None) -> str:
     'Dell Technologies'
     >>> normalize_company_name("Microsoft Corporation")
     'Microsoft'
+    >>> normalize_company_name("Cisco: FY27 Pre-Placement Talk")
+    'Cisco'
+    >>> normalize_company_name("Clayfin Regular")
+    'Clayfin'
     """
     if not raw:
         return ""
 
-    # Strip common prefixes like "Updated :", "Reminder :", "Re:"
-    cleaned = re.sub(
-        r"^(updated\s*[:\-]|reminder\s*[:\-]|re\s*[:\-]|fwd?\s*[:\-])\s*",
-        "",
-        raw.strip(),
-        flags=re.IGNORECASE,
-    )
+    cleaned = raw.strip()
 
-    # Strip trailing/leading whitespace and collapse spaces
+    # Strip label-colon prefixes: "Drive: …", "Re: …", "Updated: …", etc.
+    cleaned = _LABEL_PREFIX.sub("", cleaned)
+
+    # Strip placement-tier noise: "FY27", "Pre-Placement Talk", "Regular", etc.
+    cleaned = _COMPANY_NOISE.sub(" ", cleaned)
+
+    # Strip stray leading/trailing punctuation left by noise removal.
+    cleaned = re.sub(r"^[\s:\-–—|]+|[\s:\-–—|]+$", "", cleaned)
+
+    # Collapse internal spaces
     cleaned = " ".join(cleaned.split())
 
-    # Check canonical mapping (case-insensitive)
-    lookup_key = cleaned.casefold().strip()
+    if not cleaned:
+        return ""
+
+    # Canonical lookup before suffix stripping
+    lookup_key = cleaned.casefold()
     if lookup_key in _CANONICAL_NAMES:
         return _CANONICAL_NAMES[lookup_key]
 
     # Strip legal suffixes
     stripped = _STRIP_SUFFIXES.sub("", cleaned).strip()
-    stripped = " ".join(stripped.split())  # collapse spaces after removal
+    stripped = re.sub(r"[\s:\-–—|]+$", "", stripped)
+    stripped = " ".join(stripped.split())
 
-    # Check canonical again after stripping
-    lookup_key = stripped.casefold().strip()
-    if lookup_key in _CANONICAL_NAMES:
-        return _CANONICAL_NAMES[lookup_key]
-
-    # Title-case the result
+    # Canonical lookup after suffix stripping
     if stripped:
-        return stripped.title()
-    return cleaned.title()
+        lookup_key = stripped.casefold()
+        if lookup_key in _CANONICAL_NAMES:
+            return _CANONICAL_NAMES[lookup_key]
+        return _smart_title(stripped)
+    return _smart_title(cleaned)
 
 
 # ---------------------------------------------------------------------------
@@ -300,17 +352,54 @@ _LINK_PATTERNS = [
     re.compile(r"(https?://forms\.(?:gle|google\.com)/\S+)", re.IGNORECASE),
 ]
 
-# Role patterns
+# Role patterns — capped at 60 chars to avoid grabbing full table-header lines.
 _ROLE_PATTERNS = [
     re.compile(
-        r"(?:role|position|designation|job\s*title)\s*[:\-]?\s*(.+?)(?:\n|$)",
+        r"(?:role|position|designation|job\s*title)\s*[:\-]?\s*"
+        r"([A-Za-z][A-Za-z0-9\s&/\-\.]{1,58}?)(?=\s*[\|;,\n]|$)",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?:hiring\s*for|opening\s*for|vacancy\s*for)\s+(.+?)(?:\n|,|$)",
+        r"(?:hiring\s*for|opening\s*for|vacancy\s*for)\s+"
+        r"([A-Za-z][A-Za-z0-9\s&/\-\.]{1,48}?)(?=\s*[,;|\n]|$)",
+        re.IGNORECASE,
+    ),
+    # VIT CDC selection-list subjects: "Philips Super Dream Internship selection list 2027 Batch"
+    re.compile(
+        r"((?:super\s+dream|dream(?:\s+offer)?|core|regular)\s*intern(?:ship)?)"
+        r"\s+selection\s+list",
+        re.IGNORECASE,
+    ),
+    # VIT CDC batch-suffix subjects: "PowerSchool Dream offer Internship - 2027 Batch"
+    re.compile(
+        r"((?:super\s+dream|dream(?:\s+offer)?|core|regular)\s*intern(?:ship)?)"
+        r"\s*[-–]\s*\d{4}\s*batch",
         re.IGNORECASE,
     ),
 ]
+
+# Words that indicate the extracted "role" is actually a table header or tier
+# label rather than a real job title.
+_ROLE_NOISE = re.compile(
+    r"\b(name|qualification|background|passing\s*year|eligibility|"
+    r"category|gender|dob|date\s+of\s+birth|graduation\s+year|"
+    r"b\.?\s*tech|m\.?\s*tech|cgpa|cpi|percentage)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_role(raw: str | None) -> str | None:
+    """Return None when the extracted role looks like a table header or tier label."""
+    if not raw:
+        return None
+    stripped = raw.strip()
+    # Too long to be a real role title
+    if len(stripped) > 80:
+        return None
+    # Contains table-header / tier-label words
+    if _ROLE_NOISE.search(stripped):
+        return None
+    return stripped or None
 
 # Category (internship/fulltime) patterns
 _CATEGORY_PATTERNS = [
@@ -330,6 +419,20 @@ _CATEGORY_PATTERNS = [
 
 # Company name extraction from subjects
 _COMPANY_FROM_SUBJECT = [
+    # "Congratulations!! Philips Super Dream Internship selection list 2027 Batch"
+    re.compile(
+        r"^congratulations[!!*\s]*"
+        r"([A-Za-z][A-Za-z\s]+?)\s+"
+        r"(?:super\s+dream|dream(?:\s+offer)?|core|regular)\s*intern(?:ship)?",
+        re.IGNORECASE,
+    ),
+    # "PowerSchool Dream offer Internship - 2027 Batch" (excludes subjects starting with category words)
+    re.compile(
+        r"^(?!(?:super\s+dream|dream|core|regular)\b)"
+        r"([A-Za-z][A-Za-z\s]+?)\s+"
+        r"(?:super\s+dream|dream(?:\s+offer)?|core|regular)\s*intern(?:ship)?",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?:campus\s*(?:drive|hiring|recruitment|placement)\s*[–—\-:\|]\s*)"
         r"(.+?)(?:\s*[–—\-:\|]|\s*$)",
@@ -372,6 +475,150 @@ _COMPANY_FROM_BODY_PATTERNS = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# Branch Extraction
+# ---------------------------------------------------------------------------
+
+# Canonical branch names mapped from their common aliases (lowercase keys).
+_BRANCH_ALIASES: dict[str, str] = {
+    # CSE
+    "computer science and engineering": "CSE",
+    "computer science & engineering": "CSE",
+    "computer science engineering": "CSE",
+    "computer science": "CSE",
+    "cse": "CSE",
+    "cs": "CSE",
+    # IT
+    "information technology": "IT",
+    "it": "IT",
+    # AI & ML
+    "artificial intelligence and machine learning": "AI&ML",
+    "artificial intelligence & machine learning": "AI&ML",
+    "artificial intelligence": "AI&ML",
+    "ai and ml": "AI&ML",
+    "ai & ml": "AI&ML",
+    "ai&ml": "AI&ML",
+    "ai/ml": "AI&ML",
+    "aiml": "AI&ML",
+    "ai": "AI&ML",  # standalone "AI" branch (VIT CDC pattern)
+    # Data Science
+    "data science": "Data Science",
+    "cse ds": "Data Science",
+    "computer science with data science": "Data Science",
+    "cse - data science": "Data Science",
+    "cse(data science)": "Data Science",
+    # Cyber Security
+    "cyber security": "Cyber Security",
+    "cybersecurity": "Cyber Security",
+    "cse - cyber security": "Cyber Security",
+    "information security": "Cyber Security",
+    # ECE
+    "electronics and communication engineering": "ECE",
+    "electronics and communication": "ECE",
+    "electronics & communication engineering": "ECE",
+    "electronics & communication": "ECE",
+    "ece": "ECE",
+    # EEE
+    "electrical and electronics engineering": "EEE",
+    "electrical and electronics": "EEE",
+    "eee": "EEE",
+    # Mechanical
+    "mechanical engineering": "Mechanical",
+    "mechanical": "Mechanical",
+    "mech": "Mechanical",
+    # Civil
+    "civil engineering": "Civil",
+    "civil": "Civil",
+    # Chemical
+    "chemical engineering": "Chemical",
+    "chemical": "Chemical",
+    # Production
+    "production and industrial engineering": "Production",
+    "production engineering": "Production",
+    "production": "Production",
+}
+
+_ALL_BRANCHES_RE = re.compile(
+    r"\ball\s+(?:b\.?\s*tech|branches?|departments?|streams?|engineering|eligible|programs?|students?)\b"
+    r"|\bopen\s+to\s+all\b"
+    r"|\bany\s+(?:branch|department|engineering)\b",
+    re.IGNORECASE,
+)
+
+# Matches the header of a branch-eligibility section and captures the branch list text.
+_BRANCH_SECTION_RE = re.compile(
+    r"(?:eligible\s+branches?|open\s+to\s*:|applicable\s+(?:for|to)\s*:|"
+    r"branches?\s*(?:eligible|allowed|considered)?\s*:|"
+    r"departments?\s*:|academic\s+programs?\s*:|"
+    r"(?:b\.?\s*tech|m\.?\s*tech)\s+branches?\s*:|"
+    r"students?\s+from\s*:|candidates?\s+from\s*:|open\s+for\s*:|"
+    r"(?:the\s+)?following\s+branches?\s*(?:are\s+eligible)?\s*:)"
+    r"[ \t]*[:–\-]?[ \t]*(.{3,250}?)(?:\n|$)",
+    re.IGNORECASE,
+)
+
+
+_TRAILING_NOISE_RE = re.compile(
+    r"\s+\b(?:only|students?|branches?|related|and|or|etc\.?|departments?|year|yrs?|[&()])\b\s*$",
+    re.IGNORECASE,
+)
+
+
+_DEGREE_PREFIX_RE = re.compile(
+    r"^(?:m\.?\s*tech|m\.?\s*sc|mca|b\.?\s*tech|b\.?\s*e)\s+(?:\d+\s*(?:year|yr|yrs?)\s+)?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_branch(raw: str) -> str | None:
+    """Return canonical branch name or None if unrecognized."""
+    text = re.sub(r"[()[\]]", " ", raw.strip()).lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    # Strip trailing noise words repeatedly (handles "related branches only")
+    while True:
+        cleaned = _TRAILING_NOISE_RE.sub("", text).strip()
+        if cleaned == text:
+            break
+        text = cleaned
+    if not text or len(text) < 2:
+        return None
+    if text in _BRANCH_ALIASES:
+        return _BRANCH_ALIASES[text]
+
+    # Strip degree-program prefix ("M.Tech 2 year CSE" → "CSE")
+    text_no_prefix = _DEGREE_PREFIX_RE.sub("", text, count=1).strip()
+    if text_no_prefix and text_no_prefix != text:
+        if text_no_prefix in _BRANCH_ALIASES:
+            return _BRANCH_ALIASES[text_no_prefix]
+
+    # Longest-alias word-boundary match (≥3 chars to avoid false positives)
+    best: str | None = None
+    best_len = 0
+    for alias, canon in _BRANCH_ALIASES.items():
+        if len(alias) < 3:
+            continue
+        if re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE) and len(alias) > best_len:
+            best = canon
+            best_len = len(alias)
+    return best
+
+
+def _extract_branches_from_section(section_text: str) -> list[str]:
+    """Parse a branch-section fragment into a deduplicated list of canonical names."""
+    if _ALL_BRANCHES_RE.search(section_text):
+        return ["All Branches"]
+    # Split on delimiters AND on " and " (handles "CSE and IT students" style lists)
+    raw_parts = re.split(r"[,/|;]+|\s+and\s+", section_text, flags=re.IGNORECASE)
+    seen: set[str] = set()
+    result: list[str] = []
+    for part in raw_parts:
+        part = part.strip()
+        canon = _normalize_branch(part)
+        if canon and canon not in seen:
+            result.append(canon)
+            seen.add(canon)
+    return result
+
 
 @dataclass
 class RuleExtractionResult:
@@ -389,6 +636,7 @@ class RuleExtractionResult:
     confidence: float = 0.0
     missing_fields: list[str] = field(default_factory=list)
     degree_level: str = "UNKNOWN"
+    branches_allowed: list[str] = field(default_factory=list)
 
     @property
     def needs_gemini(self) -> bool:
@@ -418,6 +666,7 @@ class RuleExtractionResult:
             "registration_link": self.registration_link,
             "current_status": self.current_status,
             "degree_level": self.degree_level,
+            "branches_allowed": self.branches_allowed if self.branches_allowed else None,
         }
 
 
@@ -460,8 +709,8 @@ def extract_from_email(
         result.company_name = normalize_company_name(company)
         logger.info("Extracted company '%s' from %s", result.company_name, ext_source)
 
-    # 4. Extract role
-    result.role = _first_match(_ROLE_PATTERNS, combined)
+    # 4. Extract role (filtered to reject table headers / tier labels)
+    result.role = _clean_role(_first_match(_ROLE_PATTERNS, combined))
 
     # 5. Extract category
     for pattern, category in _CATEGORY_PATTERNS:
@@ -493,6 +742,30 @@ def extract_from_email(
         result.degree_level = "MTECH"
     elif has_btech:
         result.degree_level = "BTECH"
+
+    # 12. Extract eligible branches from structured section headers
+    branch_match = _BRANCH_SECTION_RE.search(combined)
+    if branch_match:
+        extracted = _extract_branches_from_section(branch_match.group(1))
+        if extracted:
+            result.branches_allowed = extracted
+            # Infer degree from branch-section context when still unknown
+            if result.degree_level == "UNKNOWN":
+                ctx_start = max(0, branch_match.start() - 40)
+                ctx = combined[ctx_start : branch_match.end()]
+                if _DEGREE_LEVEL_PATTERNS["MTECH"].search(ctx):
+                    result.degree_level = "MTECH"
+                else:
+                    result.degree_level = "BTECH"
+    elif _ALL_BRANCHES_RE.search(combined[:400]):
+        # "Open to all B.Tech students" near the top of the email — restrict to first 400 chars
+        # to avoid false positives from phrases like "all students are invited" in general prose
+        result.branches_allowed = ["All Branches"]
+        if result.degree_level == "UNKNOWN":
+            if _DEGREE_LEVEL_PATTERNS["BTECH"].search(combined):
+                result.degree_level = "BTECH"
+            elif not _DEGREE_LEVEL_PATTERNS["MTECH"].search(combined):
+                result.degree_level = "BTECH"  # default for "all branches" without degree spec
 
     # Calculate confidence
     filled = sum(1 for v in [

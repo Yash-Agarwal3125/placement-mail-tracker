@@ -513,6 +513,16 @@ class PlacementTrackerRunner:
                 if detected_status != "OPEN":
                     opp_data["current_status"] = detected_status
 
+            # Gate advancement-only statuses behind known-thread follow-ups.
+            # Mass announcements ("congratulations to all selected students") contain
+            # keywords that trigger SHORTLISTED/SELECTED/OFFER_RECEIVED on new drives.
+            # Only trust these statuses when we are already tracking this specific thread.
+            _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", "HR"})
+            if not known_thread_followup and (
+                opp_data.get("current_status") or "OPEN"
+            ).upper() in _ADVANCEMENT_STATUSES:
+                opp_data["current_status"] = "OPEN"
+
             _warn_data_quality(opp_data, msg_id)
 
             with self.connection:
