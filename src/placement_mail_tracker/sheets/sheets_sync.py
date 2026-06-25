@@ -39,6 +39,7 @@ ACTION_REQUIRED_HEADERS = [
     "Eligibility",
     "Deadline",
     "Next Action",
+    "Gmail",
 ]
 
 # ALL DRIVES: one row per drive (eligible + needs-review)
@@ -52,6 +53,19 @@ ALL_DRIVES_HEADERS = [
     "Deadline",
     "Current Status",
     "Last Update",
+    "My Status",  # user-owned; preserved across syncs
+    "Drive ID",   # key column for read-back dedup
+]
+
+# MY APPLICATIONS: drives where the user has taken action (My Status ≠ Not Applied)
+MY_APPLICATIONS_HEADERS = [
+    "Company",
+    "Role",
+    "My Status",
+    "Current Status",
+    "Deadline",
+    "Package/Stipend",
+    "Gmail",
 ]
 
 # UPCOMING EVENTS: OA / interview dates sorted ascending
@@ -80,11 +94,12 @@ DASHBOARD_HEADERS = [
 # Points to ALL DRIVES schema.
 ACTIVE_OPP_HEADERS = ALL_DRIVES_HEADERS
 
-# No user-owned columns in the new design (My Status removed).
-ACTIVE_USER_COLUMNS: list[int] = []
+# User-owned columns in ALL DRIVES: My Status (index 9). Preserved across syncs.
+ACTIVE_USER_COLUMNS: list[int] = [ALL_DRIVES_HEADERS.index("My Status")]
 
-# Not used in clear-and-write; kept so import-time references don't crash.
-ACTIVE_KEY_INDEX = -1
+# Drive ID is the last column in ALL DRIVES, used as the row dedupe key for
+# reading back user-set values before each clear-and-write sync.
+ACTIVE_KEY_INDEX = ALL_DRIVES_HEADERS.index("Drive ID")
 
 # Statuses that need user attention (shown in ACTION REQUIRED tab)
 _ACTIONABLE_STATUSES = frozenset(
@@ -176,6 +191,9 @@ class GoogleSheetsSync:
             if "NOT_ELIGIBLE" not in (opp.get("eligibility_status") or "")
         ]
 
+        # Read back user-owned My Status values before we clear-and-write.
+        my_status_map = self._read_my_status_map()
+
         # ACTION REQUIRED: visible drives needing user action, sorted by deadline
         action_opps = [
             opp for opp in visible_opps
@@ -190,6 +208,21 @@ class GoogleSheetsSync:
             rows=[action_required_row(opp) for opp in action_opps],
         )
 
+        # MY APPLICATIONS: drives where the user has tracked their own status
+        applied_opps = [
+            opp for opp in visible_opps
+            if my_status_map.get(opp.get("drive_id") or "") not in ("", None, "Not Applied")
+        ]
+        applied_opps.sort(key=lambda o: (not bool(o.get("deadline")), o.get("deadline") or ""))
+        self._clear_and_write_tab(
+            tab_name="MY APPLICATIONS",
+            headers=MY_APPLICATIONS_HEADERS,
+            rows=[
+                my_applications_row(opp, my_status_map.get(opp.get("drive_id") or "", ""))
+                for opp in applied_opps
+            ],
+        )
+
         # ALL DRIVES: newest-update first
         all_sorted = sorted(
             visible_opps,
@@ -199,7 +232,13 @@ class GoogleSheetsSync:
         self._clear_and_write_tab(
             tab_name="ALL DRIVES",
             headers=ALL_DRIVES_HEADERS,
-            rows=[opportunity_to_sheet_row(opp) for opp in all_sorted],
+            rows=[
+                opportunity_to_sheet_row(
+                    opp,
+                    my_status=my_status_map.get(opp.get("drive_id") or "", ""),
+                )
+                for opp in all_sorted
+            ],
         )
 
         # UPCOMING EVENTS: sorted by date ascending
@@ -236,6 +275,7 @@ class GoogleSheetsSync:
 
         required_tabs = [
             "ACTION REQUIRED",
+            "MY APPLICATIONS",
             "ALL DRIVES",
             "UPCOMING EVENTS",
             "Company History",
@@ -316,6 +356,36 @@ class GoogleSheetsSync:
             valueInputOption="USER_ENTERED",
             body={"values": [DASHBOARD_HEADERS] + dashboard_data},
         ).execute()
+
+    def _read_my_status_map(self) -> dict[str, str]:
+        """Return {drive_id: my_status} from the current ALL DRIVES sheet.
+
+        Called before each clear-and-write so user-set My Status values survive
+        the sync. Returns empty dict on any error (safe — rows default to blank).
+        """
+        try:
+            response = self._values().get(
+                spreadsheetId=self.settings.google_sheet_id,
+                range=f"{_quote('ALL DRIVES')}!A1:Z",
+            ).execute()
+            rows = response.get("values", [])
+            if len(rows) < 2:
+                return {}
+            headers = rows[0]
+            try:
+                my_status_col = headers.index("My Status")
+                drive_id_col = headers.index("Drive ID")
+            except ValueError:
+                return {}  # old schema without these columns
+            result: dict[str, str] = {}
+            for row in rows[1:]:
+                drive_id = row[drive_id_col] if drive_id_col < len(row) else ""
+                my_status = row[my_status_col] if my_status_col < len(row) else ""
+                if drive_id and my_status and my_status != "Not Applied":
+                    result[drive_id] = my_status
+            return result
+        except Exception:
+            return {}
 
     def _apply_formatting(self) -> None:
         """Freeze header row, auto-filter, and colour-code status cells."""
@@ -474,11 +544,15 @@ class GoogleSheetsSync:
 # ------------------------------------------------------------------
 
 
-def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
-    """Convert one drive into an ALL DRIVES row (9 columns)."""
+def opportunity_to_sheet_row(opportunity: dict[str, Any], my_status: str = "") -> list[str]:
+    """Convert one drive into an ALL DRIVES row (11 columns)."""
     eligibility = (
         format_eligibility_string(opportunity)
         or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
+    )
+    # Prefer sheet-preserved value; fall back to DB field (usually NOT_APPLIED)
+    my_status_cell = my_status or _friendly(
+        opportunity.get("my_status", "NOT_APPLIED"), _MY_STATUS_LABELS
     )
     return [
         _cell(opportunity.get("company_name")),
@@ -490,11 +564,13 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any]) -> list[str]:
         _fmt_date(opportunity.get("deadline")),
         _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _fmt_datetime(opportunity.get("updated_at") or opportunity.get("last_update_timestamp")),
+        my_status_cell,
+        _cell(opportunity.get("drive_id")),
     ]
 
 
 def action_required_row(opportunity: dict[str, Any]) -> list[str]:
-    """Convert one drive into an ACTION REQUIRED row (6 columns)."""
+    """Convert one drive into an ACTION REQUIRED row (7 columns)."""
     eligibility = (
         format_eligibility_string(opportunity)
         or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
@@ -506,6 +582,20 @@ def action_required_row(opportunity: dict[str, Any]) -> list[str]:
         eligibility,
         _fmt_date(opportunity.get("deadline")),
         _cell(opportunity.get("action_required")),
+        _gmail_link(opportunity),
+    ]
+
+
+def my_applications_row(opportunity: dict[str, Any], my_status: str) -> list[str]:
+    """Convert one drive into a MY APPLICATIONS row (7 columns)."""
+    return [
+        _cell(opportunity.get("company_name")),
+        _cell(opportunity.get("role")),
+        my_status,
+        _friendly(opportunity.get("current_status"), _STATUS_LABELS),
+        _fmt_date(opportunity.get("deadline")),
+        _cell(opportunity.get("package_or_stipend")),
+        _gmail_link(opportunity),
     ]
 
 

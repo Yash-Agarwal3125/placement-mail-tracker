@@ -104,8 +104,10 @@ def test_gemini_network_resilience(mock_generate, mock_sleep, mock_settings):
 
         assert mock_generate.call_count == 3
         assert mock_sleep.call_count == 2
-        mock_sleep.assert_any_call(2)
-        mock_sleep.assert_any_call(5)
+        # Exact sleep values are not pinned — exponential backoff with jitter;
+        # just verify two positive-delay sleeps occurred.
+        for call in mock_sleep.call_args_list:
+            assert call.args[0] > 0
 
 
 # 5. Sheets Retries

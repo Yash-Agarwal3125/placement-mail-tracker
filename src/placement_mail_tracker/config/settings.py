@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_fallback_models: list[str] = Field(
-        default_factory=lambda: ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+        default_factory=lambda: [
+            "gemini-2.5-flash-lite-preview-06-17",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+        ],
+        alias="GEMINI_FALLBACK_MODELS",
     )
     gemini_max_retries: int = Field(default=3, alias="GEMINI_MAX_RETRIES")
     gemini_retry_delay_seconds: float = Field(default=2.0, alias="GEMINI_RETRY_DELAY_SECONDS")
