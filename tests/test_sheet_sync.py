@@ -1,8 +1,8 @@
-"""Google Sheets row-builder tests for the redesigned 4-tab layout.
+"""Google Sheets row-builder tests for the redesigned 5-tab layout.
 
 Covers:
-- ``opportunity_to_sheet_row`` (ALL DRIVES, 9 columns)
-- ``action_required_row`` (ACTION REQUIRED, 6 columns)
+- ``opportunity_to_sheet_row`` (ALL DRIVES, 11 columns)
+- ``action_required_row`` (ACTION REQUIRED, 7 columns)
 - ``upcoming_event_row`` (UPCOMING EVENTS, 4 columns)
 - ``company_to_sheet_row``
 - Header counts and order
@@ -16,10 +16,12 @@ from placement_mail_tracker.sheets.sheets_sync import (
     ACTIVE_USER_COLUMNS,
     ALL_DRIVES_HEADERS,
     COMPANY_HISTORY_HEADERS,
+    MY_APPLICATIONS_HEADERS,
     UPCOMING_EVENTS_HEADERS,
     _preserve_user_columns,
     action_required_row,
     company_to_sheet_row,
+    my_applications_row,
     opportunity_to_sheet_row,
     upcoming_event_row,
 )
@@ -59,9 +61,9 @@ def _sample_opp(**overrides) -> dict:
 
 
 class TestAllDrivesRow:
-    def test_column_count_is_9(self):
+    def test_column_count_is_11(self):
         row = opportunity_to_sheet_row(_sample_opp())
-        assert len(row) == 9
+        assert len(row) == 11
         assert len(row) == len(ALL_DRIVES_HEADERS)
 
     def test_company_and_role(self):
@@ -105,9 +107,9 @@ class TestAllDrivesRow:
 
 
 class TestActionRequiredRow:
-    def test_column_count_is_6(self):
+    def test_column_count_is_7(self):
         row = action_required_row(_sample_opp())
-        assert len(row) == 6
+        assert len(row) == 7
         assert len(row) == len(ACTION_REQUIRED_HEADERS)
 
     def test_company_and_status(self):
@@ -163,13 +165,13 @@ class TestCompanyToSheetRow:
 
 class TestHeaders:
     def test_all_drives_header_count(self):
-        assert len(ALL_DRIVES_HEADERS) == 9
+        assert len(ALL_DRIVES_HEADERS) == 11
 
     def test_active_opp_headers_alias(self):
         assert ACTIVE_OPP_HEADERS is ALL_DRIVES_HEADERS
 
     def test_action_required_header_count(self):
-        assert len(ACTION_REQUIRED_HEADERS) == 6
+        assert len(ACTION_REQUIRED_HEADERS) == 7
 
     def test_upcoming_events_header_count(self):
         assert len(UPCOMING_EVENTS_HEADERS) == 4
@@ -177,14 +179,23 @@ class TestHeaders:
     def test_company_headers_count(self):
         assert len(COMPANY_HISTORY_HEADERS) == 6
 
+    def test_my_applications_header_count(self):
+        assert len(MY_APPLICATIONS_HEADERS) == 7
+
     def test_headers_are_strings(self):
         for headers in (ALL_DRIVES_HEADERS, ACTION_REQUIRED_HEADERS, UPCOMING_EVENTS_HEADERS):
             assert all(isinstance(h, str) for h in headers)
 
-    def test_active_user_columns_empty(self):
-        assert ACTIVE_USER_COLUMNS == []
+    def test_active_user_columns_has_my_status(self):
+        assert ACTIVE_USER_COLUMNS == [ALL_DRIVES_HEADERS.index("My Status")]
 
     def test_preserve_user_columns_noop(self):
         new_row = ["a", "b", "c"]
         _preserve_user_columns(new_row, ["x", "y", "z"], [])
         assert new_row == ["a", "b", "c"]
+
+    def test_my_applications_row_structure(self):
+        row = my_applications_row(_sample_opp(), "Applied")
+        assert len(row) == 7
+        assert row[0] == "Microsoft"
+        assert row[2] == "Applied"

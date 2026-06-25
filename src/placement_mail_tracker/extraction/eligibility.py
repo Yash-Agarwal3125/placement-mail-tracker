@@ -61,7 +61,11 @@ def evaluate_eligibility(opp_data: dict, profile: UserProfile) -> str:
     cgpa_req_str = str(opp_data.get("cgpa_requirement") or "").lower()
 
     if not eligibility_text and not branches_allowed and not cgpa_req_str:
-        return "MANUAL_REVIEW"
+        # No eligibility signals extracted → assume eligible rather than returning
+        # MANUAL_REVIEW, which produced 56% noise in live data. The user will see
+        # the drive in the sheet and can verify. Hard disqualifiers (MTECH-only,
+        # wrong CGPA) are caught above even when the general text is absent.
+        return "ELIGIBLE"
 
     combined_text = f"{eligibility_text} {branches_allowed}"
 
@@ -111,6 +115,39 @@ def evaluate_eligibility(opp_data: dict, profile: UserProfile) -> str:
     return "ELIGIBLE"
 
 
+_MTECH_BRANCH_RE = re.compile(
+    r"\bm\.?\s*tech\b|\bmaster\b|\bm\.?\s*sc\b|\bmca\b|\bintegrated\s+m\.?\s*tech\b",
+    re.IGNORECASE,
+)
+
+_BTECH_BRANCH_RE = re.compile(
+    r"\bb\.?\s*tech\b|\bb\.?\s*e\b|\bbachelor\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_branch_display(raw: str) -> list[str]:
+    """Expand and normalize a (possibly verbose) branch string into canonical names.
+
+    Returns a list because one raw string may encode multiple branches
+    (e.g. "CSE/IT related branches" → ["CSE", "IT"]).
+    """
+    from placement_mail_tracker.extraction.rule_engine import (  # local import avoids circularity
+        _extract_branches_from_section,
+        _normalize_branch,
+    )
+    # Try multi-branch parsing first (handles "CSE/IT", "All M.Tech (CSE/IT related)")
+    extracted = _extract_branches_from_section(raw)
+    if extracted:
+        return extracted
+    # Single-string normalization as fallback
+    single = _normalize_branch(raw)
+    if single:
+        return [single]
+    stripped = raw.strip()
+    return [stripped if len(stripped) <= 35 else stripped[:32] + "…"]
+
+
 def format_eligibility_string(opp_data: dict) -> str:
     """Return a human-readable eligibility string like 'B.Tech - CSE, AI&ML'.
 
@@ -118,7 +155,6 @@ def format_eligibility_string(opp_data: dict) -> str:
     Returns '' when no degree or branch information is available.
     """
     degree_level = (opp_data.get("degree_level") or "UNKNOWN").upper()
-    degree_label = {"BTECH": "B.Tech", "MTECH": "M.Tech", "ANY": "Any"}.get(degree_level, "")
 
     branches_raw = opp_data.get("branches_allowed") or []
     if isinstance(branches_raw, str):
@@ -133,13 +169,32 @@ def format_eligibility_string(opp_data: dict) -> str:
         if b.strip() and b.strip().lower() not in ("", "[]", "null")
     ]
 
+    # Infer degree from branch text when degree_level was not explicitly extracted.
+    # Only infer MTECH (M.Tech drives reliably have "M.Tech" in their branch strings).
+    # BTECH is inferred by the rule engine at extraction time (degree_level already set);
+    # doing it here on raw Gemini strings causes false positives on mixed-discipline drives.
+    if degree_level == "UNKNOWN" and clean_branches:
+        combined_branch_text = " ".join(clean_branches)
+        if _MTECH_BRANCH_RE.search(combined_branch_text) and not _BTECH_BRANCH_RE.search(combined_branch_text):
+            degree_level = "MTECH"
+
+    degree_label = {"BTECH": "B.Tech", "MTECH": "M.Tech", "ANY": "Any"}.get(degree_level, "")
+
     if not degree_label and not clean_branches:
         return ""
 
     if not clean_branches:
         return degree_label
 
-    branch_str = ", ".join(clean_branches)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for b in clean_branches:
+        for canon in _normalize_branch_display(b):
+            if canon not in seen:
+                deduped.append(canon)
+                seen.add(canon)
+
+    branch_str = ", ".join(deduped)
     if degree_label:
         return f"{degree_label} - {branch_str}"
     return branch_str
