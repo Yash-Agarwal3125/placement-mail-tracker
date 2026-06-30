@@ -7,7 +7,6 @@ Uses clear-then-write per sync (no key-based dedup needed).
 from __future__ import annotations
 
 import http.client
-import json
 import logging
 import os
 import socket
@@ -320,17 +319,6 @@ class GoogleSheetsSync:
             body={"values": all_data},
         ).execute()
         logger.info("[SYNC] Wrote %d rows to %s", len(rows), tab_name)
-
-    # Kept for backwards compatibility with existing callers.
-    def _sync_tab_data(
-        self,
-        tab_name: str,
-        headers: list[str],
-        data_rows: list[list[str]],
-        key_index: int,
-        user_columns: list[int] | None = None,
-    ) -> None:
-        self._clear_and_write_tab(tab_name, headers, data_rows)
 
     def _sync_dashboard(self, database: DatabaseManager) -> None:
         metrics = database.get_dashboard_metrics()
@@ -762,65 +750,6 @@ def _fmt_date(value: Any) -> str:
         hour = dt.strftime("%I").lstrip("0") or "12"
         out += f", {hour}:{dt.strftime('%M %p')}"
     return _force_text(out)
-
-
-def _days_left(value: Any) -> str:
-    raw = _cell(value)
-    if not raw:
-        return ""
-    dt = parse_datetime_flexible(raw)
-    if dt is None:
-        return ""
-    days = (dt.date() - datetime.now().date()).days
-    if days < 0:
-        return "Passed"
-    if days == 0:
-        return "Today"
-    if days == 1:
-        return "Tomorrow"
-    return f"{days} days"
-
-
-def _fmt_branches(value: Any) -> str:
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            value = parsed if isinstance(parsed, list) else value
-        except (json.JSONDecodeError, TypeError):
-            pass
-    items = value if isinstance(value, list) else [value]
-    clean = [
-        str(item).strip()
-        for item in items
-        if str(item).strip().lower() not in _JUNK_VALUES
-    ]
-    return ", ".join(clean)
-
-
-def _fmt_status_trail(value: Any) -> str:
-    raw = _cell(value)
-    if not raw:
-        return ""
-    try:
-        items = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
-    if not isinstance(items, list):
-        return str(items)
-    trail: list[str] = []
-    for status in items:
-        label = _STATUS_LABELS.get(str(status).upper(), str(status))
-        if not trail or trail[-1] != label:
-            trail.append(label)
-    return " → ".join(trail[-5:])
-
-
-def _hyperlink(url: Any, label: str) -> str:
-    raw = _cell(url)
-    if not raw.lower().startswith(("http://", "https://")):
-        return ""
-    safe = raw.replace('"', "%22")
-    return f'=HYPERLINK("{safe}", "{label}")'
 
 
 def _gmail_link(opportunity: dict[str, Any]) -> str:

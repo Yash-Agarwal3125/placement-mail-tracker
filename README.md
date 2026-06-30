@@ -106,15 +106,16 @@ You can control the application's strictness by setting `APP_ENV` in your `.env`
 
 ## 📊 Your Spreadsheet
 
-The tracker maintains four tabs, designed to be read at a glance (most
+The tracker maintains six tabs, designed to be read at a glance (most
 actionable columns first, human-readable dates in your local time):
 
-- **Active Opportunities** — drives you are eligible for. Columns:
+- **ACTION REQUIRED** — eligible drives with imminent deadlines or events.
+- **ALL DRIVES** — every tracked drive. Columns:
   `Company · Role · Type · Status · Priority · Action Required · Deadline ·
-  Days Left · Next Event · Package · Location · CGPA Cutoff · Branches ·
+  Next Event · Package · Location · CGPA Cutoff · Branches ·
   Eligibility · My Status · Apply Link · Email · History · Last Updated · Drive ID`.
-- **Filtered Opportunities** — same columns, for drives you are *not* eligible
-  for (wrong branch/degree/CGPA).
+- **MY APPLICATIONS** — drives where `My Status` is non-default (Applied, Shortlisted, etc).
+- **UPCOMING EVENTS** — drives with OA or interview dates in the near future.
 - **Company History** — per-company totals (drives, selected, rejected, active).
 - **Dashboard** — at-a-glance counts: Action Required, Deadlines This Week,
   OA/Interviews This Week, Offers, Selection Rate, etc.

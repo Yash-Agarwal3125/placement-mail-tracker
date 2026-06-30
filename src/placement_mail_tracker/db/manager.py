@@ -1,15 +1,7 @@
 """Reusable SQLite database manager for Placement Mail Tracker.
 
-This module implements the drive-centric architecture (Phase 1):
-- Each placement drive is a tracked entity
-- Follow-up emails update existing drives
-- No duplicate drives are created
-- Company stats are maintained automatically
-
-Phase 5: Drive ID generation using company + role + category + season.
-Phase 7: Gmail message_id and thread_id storage for deep linking.
-Phase 11: Action Required engine.
-Phase 12: Personal status tracking (My Status).
+Drive-centric architecture: each placement drive is a tracked entity.
+Follow-up emails update the existing drive instead of inserting duplicates.
 """
 
 from __future__ import annotations
@@ -47,7 +39,6 @@ OPPORTUNITY_FIELDS = (
 
 JSON_FIELDS = {"branches_allowed", "hiring_process", "important_notes"}
 
-# Phase 2: Valid status progression order
 VALID_STATUSES = (
     "OPEN",
     "REGISTERED",
@@ -65,17 +56,6 @@ VALID_STATUSES = (
 
 # Cap on stored status-history entries per drive (prevents unbounded growth).
 MAX_STATUS_HISTORY = 20
-
-# Phase 12: Personal status values
-PERSONAL_STATUSES = (
-    "NOT_APPLIED",
-    "APPLIED",
-    "SHORTLISTED",
-    "OA_CLEARED",
-    "INTERVIEWED",
-    "SELECTED",
-    "REJECTED",
-)
 
 
 def _get_year_from_opportunity(opportunity: dict[str, Any]) -> str:
@@ -118,10 +98,7 @@ def generate_drive_id(
 ) -> str:
     """Generate a human-readable drive ID.
 
-    Phase 5: Examples:
-        MICROSOFT_2027_DS_INTERN
-        DELL_2027_SUMMER_INTERN
-        STANDARDCHARTERED_2027_SUMMER
+    Examples: MICROSOFT_2027_DS_INTERN, DELL_2027_SUMMER_INTERN
     """
     year = year or str(datetime.now().year)
 
@@ -154,14 +131,7 @@ def generate_drive_id(
     return "_".join(parts)
 
 class DatabaseManager:
-    """High-level SQLite manager for the drive-centric placement tracker.
-
-    Phase 1: Each placement drive is a tracked entity.
-    Phase 5: Drive IDs encode company + role + season.
-    Phase 7: Stores gmail_message_id and gmail_thread_id for deep linking.
-    Phase 11: Computes action_required based on upcoming deadlines.
-    Phase 12: Tracks personal status per drive.
-    """
+    """High-level SQLite manager for the drive-centric placement tracker."""
 
     def __init__(
         self,
@@ -310,7 +280,7 @@ class DatabaseManager:
         self.connection.commit()
 
     # ------------------------------------------------------------------
-    # Phase 1: Drive-Centric Insert/Update
+    # Drive-Centric Insert/Update
     # ------------------------------------------------------------------
 
     def insert_or_update_opportunity(
@@ -369,7 +339,6 @@ class DatabaseManager:
         if email_classification:
             normalized["email_classification"] = email_classification
 
-        # Phase 11: Compute action required
         normalized["action_required"] = self._compute_action_required(normalized)
 
         if existing is None:
@@ -449,7 +418,7 @@ class DatabaseManager:
             )
 
     # ------------------------------------------------------------------
-    # Phase 11: Action Required Engine
+    # Action Required Engine
     # ------------------------------------------------------------------
 
     def _compute_action_required(self, opportunity: dict[str, Any]) -> str | None:
@@ -573,7 +542,7 @@ class DatabaseManager:
         return self.fetch_active_opportunities()
 
     def fetch_active_drives_only(self) -> list[dict[str, Any]]:
-        """Phase 9: Return only drives with active statuses."""
+        """Return only drives with active statuses."""
         active_statuses = (
             "OPEN",
             "REGISTERED",
@@ -610,7 +579,7 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Phase 10: Dashboard Metrics
+    # Dashboard Metrics
     # ------------------------------------------------------------------
 
     def get_dashboard_metrics(self) -> dict[str, Any]:
@@ -780,16 +749,6 @@ class DatabaseManager:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    # Backward compatibility aliases
-    def get_opportunity_events(self, opportunity_id: int) -> list[dict[str, Any]]:
-        return self.fetch_updates_for_opportunity(opportunity_id)
-
-    def add_event(self, opportunity_id: int, event_type: str, **kwargs: Any) -> int:
-        return self.create_update_event(opportunity_id, event_type, **kwargs)
-
-    def log_email(self, **kwargs: Any) -> int:
-        return self.log_processed_email(**kwargs)
-
     # ------------------------------------------------------------------
     # Internal Helpers
     # ------------------------------------------------------------------
@@ -804,7 +763,6 @@ class DatabaseManager:
         now = utc_now_iso()
         company_name = opportunity["company_name"]
 
-        # Phase 5: Generate Drive ID
         drive_id = generate_drive_id(
             company_name,
             role=opportunity.get("role"),
@@ -1023,7 +981,6 @@ class DatabaseManager:
         self.connection.commit()
 
     def _normalize_opportunity(self, opportunity: dict[str, Any]) -> dict[str, Any]:
-        # Phase 4: Normalize company name
         company_val = opportunity.get("company_name")
         if _normalize_scalar(company_val) is None:
             company_val = "Unknown Company"

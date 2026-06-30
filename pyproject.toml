@@ -1,7 +1,7 @@
 [project]
 name = "placement-mail-tracker"
-version = "0.1.0"
-description = "Starter project for tracking placement and internship emails."
+version = "1.0.0"
+description = "Personal automation for tracking placement and internship emails."
 requires-python = ">=3.10"
 
 [build-system]

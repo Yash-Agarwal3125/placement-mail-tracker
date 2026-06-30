@@ -175,7 +175,10 @@ def format_eligibility_string(opp_data: dict) -> str:
     # doing it here on raw Gemini strings causes false positives on mixed-discipline drives.
     if degree_level == "UNKNOWN" and clean_branches:
         combined_branch_text = " ".join(clean_branches)
-        if _MTECH_BRANCH_RE.search(combined_branch_text) and not _BTECH_BRANCH_RE.search(combined_branch_text):
+        if (
+            _MTECH_BRANCH_RE.search(combined_branch_text)
+            and not _BTECH_BRANCH_RE.search(combined_branch_text)
+        ):
             degree_level = "MTECH"
 
     degree_label = {"BTECH": "B.Tech", "MTECH": "M.Tech", "ANY": "Any"}.get(degree_level, "")

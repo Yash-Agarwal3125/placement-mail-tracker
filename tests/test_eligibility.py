@@ -1,4 +1,4 @@
-"""Tests for Phase 2, 3, 6, 7: Eligibility Engine."""
+"""Tests for the eligibility engine and branch extraction."""
 
 import pytest
 
@@ -7,6 +7,7 @@ from placement_mail_tracker.extraction.eligibility import (
     evaluate_eligibility,
     format_eligibility_string,
 )
+from placement_mail_tracker.extraction.rule_engine import extract_from_email
 
 
 @pytest.fixture
@@ -132,8 +133,6 @@ def test_format_eligibility_no_inference_for_mixed_disciplines():
 
 # --- branch extraction from rule engine ---
 
-from placement_mail_tracker.extraction.rule_engine import extract_from_email
-
 
 def test_branch_extraction_cse_it_aiml():
     r = extract_from_email("Campus Drive", "Eligible Branches: CSE, IT, AI&ML")
@@ -155,7 +154,8 @@ def test_branch_extraction_slash_separated():
 
 
 def test_branch_extraction_verbose_phrase():
-    r = extract_from_email("Subject", "Departments: Computer Science and Engineering, Information Technology")
+    body = "Departments: Computer Science and Engineering, Information Technology"
+    r = extract_from_email("Subject", body)
     assert "CSE" in r.branches_allowed
     assert "IT" in r.branches_allowed
 

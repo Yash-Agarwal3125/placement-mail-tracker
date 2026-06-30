@@ -1,10 +1,4 @@
-"""Orchestration for Placement Mail Tracker sync cycles with drive-centric architecture.
-
-Phase 1: Drive-centric architecture (follow-up updates, not new rows).
-Phase 2: Follow-up detection engine integrated into pipeline.
-Phase 3: Rule-based extraction runs BEFORE Gemini to reduce API calls.
-Phase 13: Email classification stored with each processed email.
-"""
+"""Orchestration for Placement Mail Tracker sync cycles with drive-centric architecture."""
 
 from __future__ import annotations
 
@@ -75,6 +69,10 @@ _FOLLOWUP_CLASSIFICATIONS = frozenset(
     {"OA_UPDATE", "INTERVIEW_UPDATE", "SHORTLIST_UPDATE", "OFFER_UPDATE", "DRIVE_UPDATE"}
 )
 
+# Advancement-only statuses that should only be trusted for known-thread follow-ups.
+# Mass announcements can trigger these keywords on brand-new drives; gate them here.
+_ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", "HR"})
+
 # Placeholder company values that mean "extraction failed", not a real drive.
 _UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
 
@@ -99,7 +97,6 @@ def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
         logger.warning("[DQ] %s (%s): missing eligibility info", company, msg_id)
     deadline = opp_data.get("deadline")
     if deadline:
-        from placement_mail_tracker.utils.time import parse_datetime_flexible
         if parse_datetime_flexible(str(deadline)) is None:
             logger.warning("[DQ] %s (%s): unparseable deadline %r", company, msg_id, deadline)
 
@@ -168,33 +165,6 @@ def _derive_next_event_date(opportunity: dict[str, Any]) -> str | None:
         return upcoming[0][1]
     # All events are in the past – keep the most recent one for reference.
     return sorted(candidates, key=lambda c: c[0], reverse=True)[0][1]
-
-
-# ---------------------------------------------------------------------------
-# Safeguard 2: Notification deduplication
-# ---------------------------------------------------------------------------
-def is_duplicate_notification(
-    connection: sqlite3.Connection,
-    opportunity_id: int,
-    message: str,
-) -> bool:
-    """Check if an identical notification was recently sent (within last 24h)."""
-    try:
-        row = connection.execute(
-            """
-            SELECT id FROM notifications
-            WHERE opportunity_id = ?
-              AND message = ?
-              AND status = 'sent'
-              AND created_at >= datetime('now', '-1 day')
-            LIMIT 1;
-            """,
-            (opportunity_id, message),
-        ).fetchone()
-        return row is not None
-    except sqlite3.Error as db_error:
-        logger.warning("Could not query notification history: %s", db_error)
-        return False
 
 
 @dataclass(slots=True)
@@ -517,7 +487,6 @@ class PlacementTrackerRunner:
             # Mass announcements ("congratulations to all selected students") contain
             # keywords that trigger SHORTLISTED/SELECTED/OFFER_RECEIVED on new drives.
             # Only trust these statuses when we are already tracking this specific thread.
-            _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", "HR"})
             if not known_thread_followup and (
                 opp_data.get("current_status") or "OPEN"
             ).upper() in _ADVANCEMENT_STATUSES:
