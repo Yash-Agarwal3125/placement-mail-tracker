@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
+import time
 from email.message import EmailMessage
 
 from placement_mail_tracker.config.settings import Settings
-from placement_mail_tracker.models.placement_record import PlacementRecord
 
 logger = logging.getLogger(__name__)
 
@@ -51,59 +52,7 @@ class EmailNotifier:
 
         return self._send_smtp_message_with_retry(message, "email")
 
-    def send_opportunity_alert(
-        self,
-        record: PlacementRecord,
-        *,
-        update_type: str = "new_opportunity",
-    ) -> bool:
-        """Send a concise, beautifully formatted notification email for a placement update."""
-        if not self.is_configured:
-            logger.warning("SMTP email notifications are not configured; skipping alert")
-            return False
-
-        # Format update labels
-        subject_label = "New Opportunity"
-        if update_type == "deadline_update":
-            subject_label = "Urgent: Deadline Extended"
-        elif update_type == "shortlist":
-            subject_label = "Result: Shortlist Released"
-        elif update_type == "interview_update":
-            subject_label = "Schedule: Interview Announced"
-        elif update_type == "oa_update":
-            subject_label = "Schedule: Online Assessment Announced"
-
-        subject = f"[{subject_label}] {record.company_name} - {record.role_title}"
-
-        body = f"""
-Hello,
-
-A placement update has been logged on your tracker:
-
-🏢 Company Name: {record.company_name}
-💼 Role Title:  {record.role_title}
-📅 Application Deadline: {record.application_deadline or "N/A"}
-📧 Sender: {record.sender or "Unknown"}
-🔗 Source: {record.source_url or "Gmail"}
-
-To check the complete details or sync to Google Sheets, check your tracker dashboard.
-
-Regards,
-Placement Mail Tracker (Personal Automation)
-""".strip()
-
-        message = EmailMessage()
-        message["From"] = self.smtp_email
-        message["To"] = self.email_receiver
-        message["Subject"] = subject
-        message.set_content(body)
-
-        return self._send_smtp_message_with_retry(message, "alert")
-
     def _send_smtp_message_with_retry(self, message: EmailMessage, subject_log: str) -> bool:
-        import ssl
-        import time
-        
         backoffs = [2, 5, 10]
         for attempt, backoff in enumerate(backoffs + [0], 1):
             try:

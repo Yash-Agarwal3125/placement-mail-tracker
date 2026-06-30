@@ -7,7 +7,7 @@ from typing import Any
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
-from placement_mail_tracker.utils.time import parse_datetime_flexible
+from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,6 @@ class AlertGenerator:
         
     def _mark_alert_sent(self, opp_id: int, alert_type: str) -> None:
         """Record that an alert was sent to prevent duplicate spam."""
-        from placement_mail_tracker.utils.time import utc_now_iso
         self.database.connection.execute(
             "INSERT INTO sent_alerts (opportunity_id, alert_type, created_at) VALUES (?, ?, ?)",
             (opp_id, alert_type, utc_now_iso())

@@ -45,8 +45,6 @@ class Settings(BaseSettings):
     gemini_retry_delay_seconds: float = Field(default=2.0, alias="GEMINI_RETRY_DELAY_SECONDS")
 
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
-    google_sheet_range: str = Field(default="Sheet1!A1", alias="GOOGLE_SHEET_RANGE")
-    google_sheet_name: str = Field(default="Opportunities", alias="GOOGLE_SHEET_NAME")
     google_sheets_credentials_file: str = Field(
         default="config/credentials.json",
         alias="GOOGLE_SHEETS_CREDENTIALS_FILE",

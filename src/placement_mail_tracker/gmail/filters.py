@@ -313,16 +313,6 @@ def _contains_term(text: str, term: str) -> bool:
     return normalized_term in text
 
 
-def _confidence_label(score: int) -> str:
-    if score >= 75:
-        return "high"
-    if score >= PLACEMENT_THRESHOLD:
-        return "medium"
-    if score >= 25:
-        return "low"
-    return "none"
-
-
 def _is_strong_ignore(ignored_reasons: list[str], score: int) -> bool:
     """Avoid letting generic job-newsletter content pass as placement mail."""
     if score >= 75:

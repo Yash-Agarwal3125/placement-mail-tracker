@@ -1,11 +1,6 @@
 """Migration script for upgrading Placement Mail Tracker to drive-centric architecture.
 
-This script migrates an existing database to the new schema with:
-- Phase 5: drive_id column
-- Phase 11: action_required column
-- Phase 12: my_status column
-- Phase 13: email_classification column
-- New: next_event_date column
+Adds columns: drive_id, action_required, my_status, email_classification, next_event_date.
 
 Run this script from the project root:
     python -m placement_mail_tracker.db.migrate

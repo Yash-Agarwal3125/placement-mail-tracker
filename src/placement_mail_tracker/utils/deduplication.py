@@ -1,34 +1,8 @@
 """Intelligent duplicate detection for placement opportunities.
 
-This module provides exact and fuzzy matching to identify duplicate or near-duplicate
-placement/internship opportunities.  It compares ``company_name``, ``role``, and
-``internship_or_fulltime`` (opportunity type) fields and produces a structured
-:class:`DuplicateResult` with per-field similarity scores and an aggregate confidence score.
-
-Typical usage
--------------
-::
-
-    from placement_mail_tracker.utils.deduplication import (
-        DuplicateResult,
-        DeduplicationConfig,
-        find_best_match,
-        is_duplicate,
-        detect_updates,
-    )
-
-    config = DeduplicationConfig()
-
-    incoming = {
-        "company_name": "Google",
-        "role": "SWE Intern",
-        "internship_or_fulltime": "internship",
-    }
-    candidates = [...]  # list[dict] from DatabaseManager.fetch_active_opportunities()
-
-    result = find_best_match(incoming, candidates, config=config)
-    if result and result.is_duplicate:
-        updates = detect_updates(incoming, result.candidate, config=config)
+Provides exact and fuzzy matching to identify duplicate or near-duplicate
+placement/internship opportunities. Compares ``company_name``, ``role``, and
+``internship_or_fulltime`` and produces a structured :class:`DuplicateResult`.
 """
 
 from __future__ import annotations
@@ -41,7 +15,6 @@ from typing import Any
 
 try:
     from rapidfuzz import fuzz as _fuzz
-    from rapidfuzz import process as _process
 
     _RAPIDFUZZ_AVAILABLE = True
 except ImportError:  # pragma: no cover – optional dependency
@@ -56,21 +29,6 @@ logger = logging.getLogger(__name__)
 FIELD_COMPANY = "company_name"
 FIELD_ROLE = "role"
 FIELD_TYPE = "internship_or_fulltime"
-
-# Fields considered when detecting *updates* to an already-matched opportunity
-UPDATE_FIELDS = (
-    "package_or_stipend",
-    "eligibility",
-    "cgpa_requirement",
-    "branches_allowed",
-    "deadline",
-    "interview_date",
-    "oa_date",
-    "registration_link",
-    "work_location",
-    "hiring_process",
-    "important_notes",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -647,188 +605,3 @@ def find_best_match(
     return best
 
 
-def is_duplicate(
-    incoming: dict[str, Any],
-    candidates: list[dict[str, Any]],
-    config: DeduplicationConfig | None = None,
-) -> bool:
-    """Convenience predicate: ``True`` when *incoming* duplicates any candidate.
-
-    Parameters
-    ----------
-    incoming:
-        The new opportunity to check.
-    candidates:
-        All stored opportunities to compare against.
-    config:
-        Optional :class:`DeduplicationConfig`.
-    """
-    return find_best_match(incoming, candidates, config=config) is not None
-
-
-# ---------------------------------------------------------------------------
-# Update detection
-# ---------------------------------------------------------------------------
-
-
-def detect_updates(
-    incoming: dict[str, Any],
-    candidate: dict[str, Any],
-    config: DeduplicationConfig | None = None,  # noqa: ARG001 – reserved for future use
-) -> list[UpdatedField]:
-    """Detect which non-key fields changed between an incoming record and its duplicate.
-
-    Compares the fields listed in :data:`UPDATE_FIELDS`.  Both sides are
-    normalised to empty strings before comparison so that ``None`` and ``""``
-    are treated as equivalent.
-
-    Parameters
-    ----------
-    incoming:
-        The new opportunity data.
-    candidate:
-        The stored opportunity (from the DB) that was matched as a duplicate.
-    config:
-        Reserved for future threshold-based update rules; currently unused.
-
-    Returns
-    -------
-    list[UpdatedField]
-        Each entry represents a field that has a different value in *incoming*
-        versus *candidate*.
-    """
-    changed: list[UpdatedField] = []
-
-    for field_name in UPDATE_FIELDS:
-        old_raw = candidate.get(field_name)
-        new_raw = incoming.get(field_name)
-
-        old_norm = _scalar_to_str(old_raw)
-        new_norm = _scalar_to_str(new_raw)
-
-        if old_norm != new_norm:
-            changed.append(
-                UpdatedField(
-                    field_name=field_name,
-                    old_value=old_raw,
-                    new_value=new_raw,
-                )
-            )
-            logger.debug(
-                "Field '%s' changed: %r → %r",
-                field_name,
-                old_raw,
-                new_raw,
-            )
-
-    return changed
-
-
-# ---------------------------------------------------------------------------
-# Bulk deduplication across a candidate list (useful for DB pre-scan)
-# ---------------------------------------------------------------------------
-
-
-def find_duplicates_in_list(
-    opportunities: list[dict[str, Any]],
-    config: DeduplicationConfig | None = None,
-) -> list[tuple[int, int, DuplicateResult]]:
-    """Scan a flat list and return all pairwise duplicate pairs.
-
-    Useful for auditing an existing database for near-duplicates that slipped
-    through the hash-based guard.
-
-    Parameters
-    ----------
-    opportunities:
-        List of opportunity dicts to cross-compare.
-    config:
-        Optional :class:`DeduplicationConfig`.
-
-    Returns
-    -------
-    list[tuple[int, int, DuplicateResult]]
-        Each entry is ``(i, j, result)`` where ``i < j`` are indices into
-        *opportunities* and *result* is the comparison outcome.  Only pairs
-        flagged as ``is_duplicate`` are included.
-    """
-    if config is None:
-        config = DeduplicationConfig()
-
-    found: list[tuple[int, int, DuplicateResult]] = []
-    n = len(opportunities)
-    for i in range(n):
-        for j in range(i + 1, n):
-            result = compare_opportunities(opportunities[i], opportunities[j], config=config)
-            if result.is_duplicate:
-                found.append((i, j, result))
-
-    return found
-
-
-# ---------------------------------------------------------------------------
-# RapidFuzz-powered candidate pre-filter (fast path for large corpora)
-# ---------------------------------------------------------------------------
-
-
-def rapidfuzz_prefilter(
-    incoming_company: str | None,
-    candidates: list[dict[str, Any]],
-    *,
-    limit: int = 10,
-    score_cutoff: float = 70.0,
-) -> list[dict[str, Any]]:
-    """Use RapidFuzz ``process.extract`` to shortlist plausible candidates quickly.
-
-    When the DB is large, comparing every record with full fuzzy logic can be
-    expensive.  This function uses RapidFuzz's vectorised C extension to quickly
-    shortlist the top *N* candidates by company-name similarity.
-
-    Parameters
-    ----------
-    incoming_company:
-        The company name from the incoming opportunity.
-    candidates:
-        All stored opportunity dicts.
-    limit:
-        Maximum number of shortlisted candidates to return.
-    score_cutoff:
-        Minimum token-set ratio to include a candidate.
-
-    Returns
-    -------
-    list[dict]
-        Shortlisted candidates (subset of *candidates*), ordered by similarity.
-        Returns all *candidates* unchanged when RapidFuzz is not installed.
-    """
-    if not _RAPIDFUZZ_AVAILABLE or not candidates:
-        return candidates
-
-    query = normalize_company(incoming_company)
-    choices = [normalize_company(c.get(FIELD_COMPANY)) for c in candidates]
-
-    hits = _process.extract(
-        query,
-        choices,
-        scorer=_fuzz.token_set_ratio,
-        limit=limit,
-        score_cutoff=score_cutoff,
-    )
-
-    # hits → list of (match_str, score, index)
-    indices = {hit[2] for hit in hits}
-    return [candidates[i] for i in sorted(indices)]
-
-
-# ---------------------------------------------------------------------------
-# Private helpers
-# ---------------------------------------------------------------------------
-
-
-def _scalar_to_str(value: Any) -> str:
-    """Coerce a scalar DB value to a normalised string for comparison."""
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        return normalize_text(", ".join(str(v) for v in value))
-    return normalize_text(str(value))

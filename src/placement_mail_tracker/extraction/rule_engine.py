@@ -1,11 +1,8 @@
-"""Phase 3: Rule-based extraction engine for placement emails.
+"""Rule-based extraction engine for placement emails.
 
 Extracts company names, CTC, stipend, deadlines, locations, roles,
 and status updates from email text using regex and keyword matching.
 Only falls back to Gemini when critical fields are missing.
-
-Phase 4: Company name normalization.
-Phase 13: Email classification.
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Phase 4: Company Normalization
+# Company Normalization
 # ---------------------------------------------------------------------------
 
 # Common legal-entity suffixes and filler words to strip
@@ -160,7 +157,7 @@ def normalize_company_name(raw: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 13: Email Classification
+# Email Classification
 # ---------------------------------------------------------------------------
 
 EMAIL_CLASSIFICATIONS = (
@@ -228,7 +225,7 @@ def classify_email(subject: str, body: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Follow-up Detection / Status Mapping
+# Follow-up Detection / Status Mapping
 # ---------------------------------------------------------------------------
 
 _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -288,7 +285,7 @@ def detect_status_from_text(subject: str, body: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Rule-Based Field Extraction
+# Rule-Based Field Extraction
 # ---------------------------------------------------------------------------
 
 # CTC patterns like "12 LPA", "12.5 Lakhs Per Annum", "Rs. 3,60,000"
@@ -426,7 +423,8 @@ _COMPANY_FROM_SUBJECT = [
         r"(?:super\s+dream|dream(?:\s+offer)?|core|regular)\s*intern(?:ship)?",
         re.IGNORECASE,
     ),
-    # "PowerSchool Dream offer Internship - 2027 Batch" (excludes subjects starting with category words)
+    # "PowerSchool Dream offer Internship - 2027 Batch"
+    # (excludes subjects starting with category words)
     re.compile(
         r"^(?!(?:super\s+dream|dream|core|regular)\b)"
         r"([A-Za-z][A-Za-z\s]+?)\s+"
@@ -597,7 +595,9 @@ def _normalize_branch(raw: str) -> str | None:
     for alias, canon in _BRANCH_ALIASES.items():
         if len(alias) < 3:
             continue
-        if re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE) and len(alias) > best_len:
+        if re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE) and (
+            len(alias) > best_len
+        ):
             best = canon
             best_len = len(alias)
     return best
@@ -686,16 +686,15 @@ def extract_from_email(
 ) -> RuleExtractionResult:
     """Extract placement information from email text using rules only.
 
-    This is Phase 3: the rule-based extraction engine that runs
-    BEFORE Gemini to reduce API calls by ~70%.
+    Runs before Gemini to reduce API calls by ~70%.
     """
     combined = f"{subject}\n{body}"
     result = RuleExtractionResult()
 
-    # 1. Classify the email (Phase 13)
+    # 1. Classify the email
     result.email_classification = classify_email(subject, body)
 
-    # 2. Detect status (Phase 2)
+    # 2. Detect status
     result.current_status = detect_status_from_text(subject, body)
 
     # 3. Extract company name
