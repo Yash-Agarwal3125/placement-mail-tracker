@@ -65,14 +65,19 @@ class DailyDigestGenerator:
                     upcoming_events.append(opp)
                     break
 
-        if not (action_required or upcoming_events or new_opps):
+        dead_letter_count = self.database.get_dead_letter_count()
+
+        if not (action_required or upcoming_events or new_opps or dead_letter_count):
             logger.info("No significant updates for the daily digest.")
             self._record_digest_sent()
             return False
 
-        digest_body = _format_digest(action_required, upcoming_events, new_opps, now)
+        digest_body = _format_digest(
+            action_required, upcoming_events, new_opps, now, dead_letter_count
+        )
 
-        subject = f"Placement Summary - {now.strftime('%d %b %Y')}"
+        # Build a descriptive subject line
+        subject = _build_subject(action_required, new_opps, upcoming_events, now)
         logger.info("Sending Daily Digest via email.")
         success = self.notifier.send_email(subject=subject, body=digest_body, is_html=False)
 
@@ -102,11 +107,39 @@ class DailyDigestGenerator:
         )
 
 
+def _build_subject(
+    action_required: list[dict[str, Any]],
+    new_opps: list[dict[str, Any]],
+    upcoming_events: list[dict[str, Any]],
+    now: datetime,
+) -> str:
+    parts = []
+    deadlines_today = sum(
+        1 for o in action_required
+        if _deadline_delta(o.get("deadline"), now) == 0
+    )
+    oa_tomorrow = sum(
+        1 for o in upcoming_events
+        if _event_delta(o, now) == 1
+    )
+    if deadlines_today:
+        n = deadlines_today
+        parts.append(f"🚨 {n} Deadline{'s' if n > 1 else ''} Today")
+    if new_opps:
+        n = len(new_opps)
+        parts.append(f"{n} New Drive{'s' if n > 1 else ''}")
+    if oa_tomorrow:
+        n = oa_tomorrow
+        parts.append(f"{n} OA Tomorrow")
+    return " | ".join(parts) if parts else f"Placement Summary - {now.strftime('%d %b %Y')}"
+
+
 def _format_digest(
     action_required: list[dict[str, Any]],
     upcoming_events: list[dict[str, Any]],
     new_opps: list[dict[str, Any]],
     now: datetime,
+    dead_letter_count: int = 0,
 ) -> str:
     lines = ["PLACEMENT SUMMARY", ""]
 
@@ -140,7 +173,32 @@ def _format_digest(
             lines.append(f"* {opp.get('company_name') or '?'}")
         lines.append("")
 
+    if dead_letter_count:
+        lines.append("SYSTEM HEALTH")
+        lines.append(f"* {dead_letter_count} email(s) failed processing permanently (dead letters)")
+        lines.append("  Check logs or the RECENT UPDATES sheet for details.")
+        lines.append("")
+
     return "\n".join(lines)
+
+
+def _deadline_delta(deadline_raw: str | None, now: datetime) -> int | None:
+    if not deadline_raw:
+        return None
+    parsed = parse_datetime_flexible(str(deadline_raw))
+    if not parsed:
+        return None
+    return (parsed.date() - now.date()).days
+
+
+def _event_delta(opp: dict[str, Any], now: datetime) -> int | None:
+    for field in ("interview_date", "oa_date", "next_event_date"):
+        raw = opp.get(field)
+        if raw:
+            parsed = parse_datetime_flexible(str(raw))
+            if parsed:
+                return (parsed.date() - now.date()).days
+    return None
 
 
 def _deadline_hint(deadline_raw: str | None, now: datetime) -> str:

@@ -24,7 +24,7 @@ from googleapiclient.errors import HttpError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.eligibility import format_eligibility_string
-from placement_mail_tracker.utils.time import parse_datetime_flexible
+from placement_mail_tracker.utils.time import human_relative_time, parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,20 @@ ACTION_REQUIRED_HEADERS = [
     "Package/Stipend",
     "Eligibility",
     "Deadline",
+    "Countdown",
     "Next Action",
     "Gmail",
+]
+
+# RECENT UPDATES: field-level change history joined with drive info
+RECENT_UPDATES_HEADERS = [
+    "Company",
+    "Change",
+    "Field",
+    "Old Value",
+    "New Value",
+    "When",
+    "Email Time",
 ]
 
 # ALL DRIVES: one row per drive (eligible + needs-review)
@@ -133,11 +145,13 @@ class GoogleSheetsSync:
         self._service = service
         self.last_error: str | None = None
 
-    def sync_active_opportunities(self, database: DatabaseManager) -> dict[str, int]:
+    def sync_active_opportunities(
+        self, database: DatabaseManager, run_start: datetime | None = None
+    ) -> dict[str, int]:
         """Sync all drives and dashboard to Google Sheets with resilience."""
         for attempt in range(1, 4):
             try:
-                return self._sync_active_opportunities_internal(database)
+                return self._sync_active_opportunities_internal(database, run_start)
             except Exception as e:
                 is_retryable = False
                 if isinstance(e, HttpError) and e.resp.status in {429, 500, 502, 503, 504}:
@@ -172,7 +186,9 @@ class GoogleSheetsSync:
                     else:
                         raise
 
-    def _sync_active_opportunities_internal(self, database: DatabaseManager) -> dict[str, int]:
+    def _sync_active_opportunities_internal(
+        self, database: DatabaseManager, run_start: datetime | None = None
+    ) -> dict[str, int]:
         if not self.settings.google_sheet_id:
             self.last_error = "GOOGLE_SHEET_ID is missing"
             if self.settings.is_production:
@@ -256,7 +272,8 @@ class GoogleSheetsSync:
             rows=[company_to_sheet_row(comp) for comp in companies],
         )
 
-        self._sync_dashboard(database)
+        self._sync_recent_updates(database)
+        self._sync_dashboard(database, run_start)
         self._apply_formatting()
 
         return {"created": len(active_opps), "updated": 0, "skipped": 0}
@@ -279,6 +296,7 @@ class GoogleSheetsSync:
             "ALL DRIVES",
             "UPCOMING EVENTS",
             "Company History",
+            "RECENT UPDATES",
             "Dashboard",
         ]
         stale_tabs = {"Active Opportunities", "Filtered Opportunities"}
@@ -334,30 +352,80 @@ class GoogleSheetsSync:
         ).execute()
         logger.info("[SYNC] Wrote %d rows to %s", len(rows), tab_name)
 
-    def _sync_dashboard(self, database: DatabaseManager) -> None:
+    def _sync_dashboard(
+        self, database: DatabaseManager, run_start: datetime | None = None
+    ) -> None:
         metrics = database.get_dashboard_metrics()
+        now = datetime.now()
 
-        dashboard_data = [
+        if run_start is not None:
+            elapsed = (now - run_start).total_seconds()
+            runtime_str = f"{elapsed:.1f}s"
+        else:
+            runtime_str = "—"
+
+        dead_letters = database.get_dead_letter_emails(limit=3)
+        dead_letter_count = metrics.get("dead_letter_count", 0)
+        dead_letter_detail = "; ".join(
+            (e.get("subject") or "")[:40] for e in dead_letters
+        ) if dead_letters else "None"
+
+        dead_cell = (
+            f"{dead_letter_count} — {dead_letter_detail}" if dead_letter_count else "0"
+        )
+        dashboard_data: list[list[str]] = [
+            # ── SYSTEM HEALTH ─────────────────────────────────────────
+            ["── SYSTEM HEALTH ──", ""],
+            ["Last Sync", human_relative_time(now)],
+            ["Runtime", runtime_str],
+            ["Emails Today", str(metrics.get("emails_today", 0))],
+            ["Dead Letters", dead_cell],
+            # ── PLACEMENT SEASON ──────────────────────────────────────
+            ["── PLACEMENT SEASON ──", ""],
             ["Active Drives", str(metrics["active_drives"])],
             ["Applications Open", str(metrics["applications_open"])],
             ["Action Required", str(metrics.get("action_required", 0))],
             ["Deadlines This Week", str(metrics.get("deadlines_this_week", 0))],
             ["OA This Week", str(metrics["oa_this_week"])],
             ["Interviews This Week", str(metrics["interviews_this_week"])],
+            # ── RESULTS ───────────────────────────────────────────────
+            ["── RESULTS ──", ""],
             ["Offers Received", str(metrics["offers_received"])],
             ["Selected / Offers", str(metrics.get("selected", 0))],
             ["Rejected", str(metrics.get("rejected", 0))],
-            ["Companies Applied", str(metrics["companies_applied"])],
             ["Selection Rate", metrics["selection_rate"]],
             ["Total Drives", str(metrics["total_drives"])],
+            ["Companies Applied", str(metrics["companies_applied"])],
         ]
 
-        self._values().update(
-            spreadsheetId=self.settings.google_sheet_id,
-            range=f"{_quote('Dashboard')}!A1:B{len(dashboard_data) + 1}",
-            valueInputOption="USER_ENTERED",
-            body={"values": [DASHBOARD_HEADERS] + dashboard_data},
-        ).execute()
+        self._clear_and_write_tab(
+            tab_name="Dashboard",
+            headers=DASHBOARD_HEADERS,
+            rows=dashboard_data,
+        )
+
+    def _sync_recent_updates(self, database: DatabaseManager) -> None:
+        updates = database.get_recent_updates(limit=20)
+        rows = []
+        for u in updates:
+            field = u.get("field_name") or ""
+            change = field.replace("_", " ").title() + " changed" if field else "Updated"
+            when_dt = parse_datetime_flexible(u.get("created_at") or "")
+            email_dt = parse_datetime_flexible(u.get("email_received_at") or "")
+            rows.append([
+                _cell(u.get("company_name")),
+                change,
+                field,
+                _cell(u.get("old_value")),
+                _cell(u.get("new_value")),
+                human_relative_time(when_dt),
+                human_relative_time(email_dt),
+            ])
+        self._clear_and_write_tab(
+            tab_name="RECENT UPDATES",
+            headers=RECENT_UPDATES_HEADERS,
+            rows=rows,
+        )
 
     def _read_my_status_map(self) -> dict[str, str]:
         """Return {drive_id: my_status} from the current ALL DRIVES sheet.
@@ -471,6 +539,35 @@ class GoogleSheetsSync:
                     }
                 })
 
+        # Countdown column on ACTION REQUIRED: overdue=red, today=orange
+        ar_id = sheet_ids.get("ACTION REQUIRED")
+        if ar_id is not None:
+            countdown_col = ACTION_REQUIRED_HEADERS.index("Countdown")
+            for text, color in (
+                ("OVERDUE", {"red": 1.0, "green": 0.8, "blue": 0.8}),
+                ("TODAY", {"red": 1.0, "green": 0.95, "blue": 0.8}),
+            ):
+                requests.append({
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [{
+                                "sheetId": ar_id,
+                                "startRowIndex": 1,
+                                "startColumnIndex": countdown_col,
+                                "endColumnIndex": countdown_col + 1,
+                            }],
+                            "booleanRule": {
+                                "condition": {
+                                    "type": "TEXT_CONTAINS",
+                                    "values": [{"userEnteredValue": text}],
+                                },
+                                "format": {"backgroundColor": color},
+                            },
+                        },
+                        "index": 0,
+                    }
+                })
+
         if requests:
             service.spreadsheets().batchUpdate(
                 spreadsheetId=self.settings.google_sheet_id,
@@ -571,19 +668,49 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any], my_status: str = "") -
     ]
 
 
+def _deadline_countdown(deadline_raw: str | None) -> str:
+    """Return a human countdown string for a raw deadline value."""
+    if not deadline_raw:
+        return ""
+    dt = parse_datetime_flexible(str(deadline_raw))
+    if dt is None:
+        return ""
+    delta = (dt.date() - datetime.now().date()).days
+    if delta < 0:
+        return f"OVERDUE ({-delta}d)"
+    if delta == 0:
+        return "TODAY"
+    if delta == 1:
+        return "Tomorrow"
+    return f"in {delta} days"
+
+
+def _fmt_received(value: Any) -> str:
+    """Format email received timestamp as a human-readable relative string."""
+    raw = _cell(value)
+    if not raw:
+        return ""
+    dt = parse_datetime_flexible(raw)
+    if dt is None:
+        return raw
+    return human_relative_time(dt)
+
+
 def action_required_row(opportunity: dict[str, Any]) -> list[str]:
-    """Convert one drive into an ACTION REQUIRED row (8 columns)."""
+    """Convert one drive into an ACTION REQUIRED row (9 columns)."""
     eligibility = (
         format_eligibility_string(opportunity)
         or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
     )
+    deadline_raw = opportunity.get("deadline")
     return [
         _cell(opportunity.get("company_name")),
-        _fmt_datetime(opportunity.get("email_received_at")),
+        _fmt_received(opportunity.get("email_received_at")),
         _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _cell(opportunity.get("package_or_stipend")),
         eligibility,
-        _fmt_date(opportunity.get("deadline")),
+        _fmt_date(deadline_raw),
+        _deadline_countdown(deadline_raw),
         _cell(opportunity.get("action_required")),
         _gmail_link(opportunity),
     ]

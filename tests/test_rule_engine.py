@@ -141,6 +141,12 @@ class TestDetectStatus:
                 "REJECTED",
                 id="rejected",
             ),
+            pytest.param(
+                "Drive Cancelled – TCS",
+                "We regret to inform you that the drive has been cancelled due to hiring freeze.",
+                "WITHDRAWN",
+                id="withdrawn",
+            ),
         ],
     )
     def test_detect_status(self, subject: str, body: str, expected: str):

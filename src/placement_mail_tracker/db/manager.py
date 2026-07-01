@@ -624,7 +624,56 @@ class DatabaseManager:
             "companies_applied": companies,
             "selection_rate": selection_rate,
             "total_drives": total,
+            "dead_letter_count": self.get_dead_letter_count(),
+            "emails_today": self._count_emails_today(),
         }
+
+    def get_dead_letter_count(self) -> int:
+        """Count emails that permanently failed processing."""
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM processed_emails WHERE processed_status = 'PERMANENT_FAILURE'"
+        ).fetchone()
+        return row[0] if row else 0
+
+    def get_dead_letter_emails(self, limit: int = 3) -> list[dict]:
+        """Return the most recent dead-letter emails."""
+        rows = self.connection.execute(
+            """
+            SELECT gmail_message_id, subject, sender, received_at, error_message, created_at
+            FROM processed_emails
+            WHERE processed_status = 'PERMANENT_FAILURE'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_updates(self, limit: int = 20) -> list[dict]:
+        """Return recent drive field changes joined with opportunity info."""
+        rows = self.connection.execute(
+            """
+            SELECT u.field_name, u.old_value, u.new_value, u.created_at,
+                   o.company_name, o.role,
+                   pe.received_at AS email_received_at
+            FROM updates u
+            JOIN opportunities o ON o.id = u.opportunity_id
+            LEFT JOIN processed_emails pe ON pe.opportunity_id = o.id
+            ORDER BY u.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _count_emails_today(self) -> int:
+        """Count processed emails whose created_at is today (local date)."""
+        today = datetime.now().date().isoformat()
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM processed_emails WHERE created_at LIKE ?",
+            (f"{today}%",),
+        ).fetchone()
+        return row[0] if row else 0
 
     # ------------------------------------------------------------------
     # Processed Emails, Notifications

@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from placement_mail_tracker.sheets.sheets_sync import (
     ACTION_REQUIRED_HEADERS,
     ACTIVE_OPP_HEADERS,
@@ -17,7 +19,9 @@ from placement_mail_tracker.sheets.sheets_sync import (
     ALL_DRIVES_HEADERS,
     COMPANY_HISTORY_HEADERS,
     MY_APPLICATIONS_HEADERS,
+    RECENT_UPDATES_HEADERS,
     UPCOMING_EVENTS_HEADERS,
+    _deadline_countdown,
     _preserve_user_columns,
     action_required_row,
     company_to_sheet_row,
@@ -107,9 +111,9 @@ class TestAllDrivesRow:
 
 
 class TestActionRequiredRow:
-    def test_column_count_is_8(self):
+    def test_column_count_is_9(self):
         row = action_required_row(_sample_opp())
-        assert len(row) == 8
+        assert len(row) == 9
         assert len(row) == len(ACTION_REQUIRED_HEADERS)
 
     def test_company_and_status(self):
@@ -175,7 +179,7 @@ class TestHeaders:
         assert ACTIVE_OPP_HEADERS is ALL_DRIVES_HEADERS
 
     def test_action_required_header_count(self):
-        assert len(ACTION_REQUIRED_HEADERS) == 8
+        assert len(ACTION_REQUIRED_HEADERS) == 9
 
     def test_upcoming_events_header_count(self):
         assert len(UPCOMING_EVENTS_HEADERS) == 4
@@ -185,6 +189,9 @@ class TestHeaders:
 
     def test_my_applications_header_count(self):
         assert len(MY_APPLICATIONS_HEADERS) == 7
+
+    def test_recent_updates_header_count(self):
+        assert len(RECENT_UPDATES_HEADERS) == 7
 
     def test_headers_are_strings(self):
         for headers in (ALL_DRIVES_HEADERS, ACTION_REQUIRED_HEADERS, UPCOMING_EVENTS_HEADERS):
@@ -203,6 +210,35 @@ class TestHeaders:
         assert len(row) == 7
         assert row[0] == "Microsoft"
         assert row[2] == "Applied"
+
+
+class TestDeadlineCountdown:
+    def test_no_deadline_returns_empty(self):
+        assert _deadline_countdown(None) == ""
+
+    def test_today_deadline(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        assert _deadline_countdown(today) == "TODAY"
+
+    def test_tomorrow_deadline(self):
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        assert _deadline_countdown(tomorrow) == "Tomorrow"
+
+    def test_future_deadline(self):
+        future = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
+        assert _deadline_countdown(future) == "in 5 days"
+
+    def test_overdue_deadline(self):
+        past = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        result = _deadline_countdown(past)
+        assert "OVERDUE" in result
+        assert "3d" in result
+
+    def test_countdown_appears_in_action_required_row(self):
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        opp = _sample_opp(deadline=tomorrow)
+        row = action_required_row(opp)
+        assert row[ACOL["Countdown"]] == "Tomorrow"
 
 
 class _FakeValues:
