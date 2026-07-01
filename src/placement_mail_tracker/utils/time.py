@@ -59,6 +59,30 @@ def _parse_without_dateutil(date_str: str) -> datetime | None:
     return None
 
 
+def human_relative_time(dt: datetime | None) -> str:
+    """Return a human-readable relative time string.
+
+    Examples: "Today, 7:43 AM" | "Yesterday, 6:18 PM" | "3 days ago" | "02 Jul 2026"
+    """
+    if dt is None:
+        return ""
+    now = datetime.now()
+    days_ago = (now.date() - dt.date()).days
+    hour = dt.strftime("%I").lstrip("0") or "12"
+    time_str = f"{hour}:{dt.strftime('%M %p')}"
+    if days_ago == 0:
+        return f"Today, {time_str}"
+    if days_ago == 1:
+        return f"Yesterday, {time_str}"
+    if 1 < days_ago < 7:
+        return f"{days_ago} days ago"
+    if 7 <= days_ago < 14:
+        return "1 week ago"
+    if 14 <= days_ago < 30:
+        return f"{days_ago // 7} weeks ago"
+    return f"{dt.day} {dt.strftime('%b %Y')}"
+
+
 def parse_datetime_flexible(date_str: str) -> datetime | None:
     """Parse a flexible date string into a datetime object.
 

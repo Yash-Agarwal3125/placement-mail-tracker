@@ -180,6 +180,7 @@ class PlacementTrackerRunner:
 
     def run_once(self) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
+        run_start = datetime.now()
         report = RunReport(environment=self.settings.environment)
 
         database = self._init_database(report)
@@ -210,7 +211,7 @@ class PlacementTrackerRunner:
                 messages, database, gmail_client, extractor, user_profile
             )
 
-        self._execute_sync_pipelines(database, sheets_client, report)
+        self._execute_sync_pipelines(database, sheets_client, report, run_start)
 
         self._finalize_report(report, stats, fetch_started_at)
         return report
@@ -624,12 +625,16 @@ class PlacementTrackerRunner:
             stats["errors"] += 1
 
     def _execute_sync_pipelines(
-        self, database: DatabaseManager, sheets_client: SheetsClient, report: RunReport
+        self,
+        database: DatabaseManager,
+        sheets_client: SheetsClient,
+        report: RunReport,
+        run_start: datetime | None = None,
     ) -> None:
         sheets_sync_successful = False
         logger.info("[SYNC] Starting Sheet Sync")
         try:
-            sheets_client.sync.sync_active_opportunities(database)
+            sheets_client.sync.sync_active_opportunities(database, run_start=run_start)
             sheets_sync_successful = True
             logger.info("[SYNC] Google Sheets Write Success")
         except Exception as e:

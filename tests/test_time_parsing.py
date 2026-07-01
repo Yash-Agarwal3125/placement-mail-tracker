@@ -1,10 +1,15 @@
-"""Tests for parse_datetime_flexible date-hardening (FS T1.5)."""
+"""Tests for parse_datetime_flexible date-hardening (FS T1.5) and human_relative_time."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from placement_mail_tracker.utils.time import _MAX_YEAR_DELTA, _MIN_YEAR, parse_datetime_flexible
+from placement_mail_tracker.utils.time import (
+    _MAX_YEAR_DELTA,
+    _MIN_YEAR,
+    human_relative_time,
+    parse_datetime_flexible,
+)
 
 
 class TestYearOnlyRejection:
@@ -82,3 +87,31 @@ class TestNormalBehaviourPreserved:
         result = parse_datetime_flexible("2026-06-15T10:00:00+05:30")
         assert result is not None
         assert result.tzinfo is None
+
+
+class TestHumanRelativeTime:
+    def test_none_returns_empty(self):
+        assert human_relative_time(None) == ""
+
+    def test_today(self):
+        dt = datetime.now().replace(hour=9, minute=5)
+        result = human_relative_time(dt)
+        assert result.startswith("Today,")
+
+    def test_yesterday(self):
+        dt = datetime.now() - timedelta(days=1)
+        result = human_relative_time(dt)
+        assert result.startswith("Yesterday,")
+
+    def test_days_ago(self):
+        dt = datetime.now() - timedelta(days=3)
+        assert human_relative_time(dt) == "3 days ago"
+
+    def test_one_week_ago(self):
+        dt = datetime.now() - timedelta(days=8)
+        assert human_relative_time(dt) == "1 week ago"
+
+    def test_old_date_returns_formatted(self):
+        dt = datetime(2024, 3, 15)
+        result = human_relative_time(dt)
+        assert "Mar 2024" in result

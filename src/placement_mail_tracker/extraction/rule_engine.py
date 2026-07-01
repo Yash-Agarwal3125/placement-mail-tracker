@@ -229,6 +229,12 @@ def classify_email(subject: str, body: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("WITHDRAWN", re.compile(
+        r"(cancel(?:led|lation)|withdrawn|withdraw|hiring\s*freeze|"
+        r"drive\s*(?:closed|cancelled|withdrawn)|process\s*suspended|"
+        r"registration\s*cancel(?:led)?|not\s*proceeding)",
+        re.IGNORECASE,
+    )),
     ("REJECTED", re.compile(
         r"(not\s*shortlisted|not\s*selected|regret\s*to|"
         r"unfortunately|rejected|could\s*not\s*make)",
