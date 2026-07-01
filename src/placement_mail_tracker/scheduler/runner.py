@@ -76,6 +76,10 @@ _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", 
 # Placeholder company values that mean "extraction failed", not a real drive.
 _UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
 
+# Extraction failures are retried at most this many times total (FS INV-26 / BR-16).
+# On the RETRY_MAX-th failure the email moves to PERMANENT_FAILURE (dead-letter).
+_RETRY_MAX = 3
+
 # Gemini occasionally emits a status vocabulary that differs from the rest of
 # the system (which keys everything off OPEN/REGISTERED/...). Map the strays to
 # the canonical values so such drives still appear in the Active sheet and get
@@ -297,6 +301,27 @@ class PlacementTrackerRunner:
             logger.error("Could not fetch messages from Gmail API: %s", fetch_error)
             report.mark_component(
                 "gmail", False, str(fetch_error), critical=self.settings.is_production
+            )
+            return []
+
+        # In non-production env, GmailClient._search swallows HttpError/auth
+        # failures and returns [] (so a personal run never crashes). That empty
+        # list must NOT be mistaken for a successful zero-mail fetch: if it were,
+        # _finalize_report would advance the fetch window past mail we never read
+        # (FS INV-7/INV-8). last_error is typed str | None, so a genuine suppressed
+        # failure is always a non-empty string; a healthy fetch resets it to None.
+        if isinstance(gmail_client.last_error, str) and gmail_client.last_error.strip():
+            logger.error(
+                "Gmail fetch reported a suppressed error (%s env); not advancing "
+                "fetch window: %s",
+                self.settings.environment,
+                gmail_client.last_error,
+            )
+            report.mark_component(
+                "gmail",
+                False,
+                gmail_client.last_error,
+                critical=self.settings.is_production,
             )
             return []
 
@@ -569,6 +594,20 @@ class PlacementTrackerRunner:
 
         except Exception as error:
             logger.exception("Failed to process email %s: %s", msg_id, error)
+            row = self.connection.execute(
+                "SELECT retry_count FROM processed_emails WHERE gmail_message_id = ?",
+                (msg_id,),
+            ).fetchone()
+            new_count = (row["retry_count"] if row else 0) + 1
+            if new_count >= _RETRY_MAX:
+                next_status = "PERMANENT_FAILURE"
+                logger.error(
+                    "Email %s exhausted %d retries; moving to PERMANENT_FAILURE (dead-letter)",
+                    msg_id,
+                    _RETRY_MAX,
+                )
+            else:
+                next_status = "PENDING_EXTRACTION"
             database.log_processed_email(
                 gmail_message_id=msg_id,
                 subject=subject,
@@ -576,9 +615,11 @@ class PlacementTrackerRunner:
                 received_at=timestamp,
                 filter_score=decision.score,
                 filter_decision=asdict(decision),
-                processed_status="PENDING_EXTRACTION",
+                processed_status=next_status,
                 error_message=str(error),
                 email_classification=classification,
+                retry_count=new_count,
+                last_retry_at=utc_now_iso(),
             )
             stats["errors"] += 1
 
