@@ -20,6 +20,7 @@ from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 from placement_mail_tracker.scheduler.runner import (
+    _RETRY_MAX,
     PlacementTrackerRunner,
     _derive_next_event_date,
     _is_identifiable_company,
@@ -279,5 +280,69 @@ def test_fetch_window_not_advanced_on_gmail_failure(
     runner.run_once()
 
     # The window must be left exactly where it was so no mail is skipped.
+    new_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert new_state["last_successful_fetch"] == original
+
+
+@patch("placement_mail_tracker.scheduler.runner.rule_extract")
+def test_extraction_failure_reaches_permanent_failure_at_retry_max(
+    mock_rule, db_manager, mock_settings
+):
+    """After _RETRY_MAX consecutive failures, email moves to PERMANENT_FAILURE (FS INV-26)."""
+    from placement_mail_tracker.config.user_profile import UserProfile
+
+    mock_rule.side_effect = RuntimeError("extraction always fails")
+    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
+    extractor = MagicMock()
+    stats = {
+        "processed": 0, "skipped": 0, "errors": 0,
+        "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+    }
+    msg = {
+        "message_id": "dead_letter_test",
+        "thread_id": "dead_letter_thread",
+        "subject": "Internship registration is now open",
+        "sender": "cdc@college.edu",
+        "body_text": "Apply via the portal.",
+        "timestamp": datetime.now().isoformat(),
+    }
+    for _ in range(_RETRY_MAX):
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+
+    row = db_manager.connection.execute(
+        "SELECT processed_status, retry_count FROM processed_emails WHERE gmail_message_id = ?",
+        (msg["message_id"],),
+    ).fetchone()
+    assert row["processed_status"] == "PERMANENT_FAILURE"
+    assert row["retry_count"] == _RETRY_MAX
+    assert stats["errors"] == _RETRY_MAX
+
+
+@patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
+@patch("placement_mail_tracker.scheduler.runner.GmailClient")
+@patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
+@patch("placement_mail_tracker.scheduler.runner.SheetsClient")
+def test_fetch_window_not_advanced_on_suppressed_gmail_error(
+    mock_sheets, mock_gemini, mock_gmail, mock_db, runner_settings
+):
+    # In non-production env the Gmail client swallows HttpError/auth failures
+    # and returns [] while recording last_error. That empty list must NOT look
+    # like a successful zero-mail fetch, or the window would advance past unread
+    # mail (FS INV-7/INV-8).
+    original = "2026-06-01T12:00:00Z"
+    state_file = Path(runner_settings.fetch_state_file)
+    state_file.write_text(
+        json.dumps({"last_successful_fetch": original}), encoding="utf-8"
+    )
+
+    mock_db.return_value.get_active_opportunities.return_value = []
+    gmail_instance = mock_gmail.return_value
+    gmail_instance.fetch_recent_messages_since.return_value = []
+    # Simulate a suppressed failure: empty result but a real error string.
+    gmail_instance.last_error = "HttpError 503: backend error"
+
+    runner = PlacementTrackerRunner(connection=MagicMock(), settings=runner_settings)
+    runner.run_once()
+
     new_state = json.loads(state_file.read_text(encoding="utf-8"))
     assert new_state["last_successful_fetch"] == original

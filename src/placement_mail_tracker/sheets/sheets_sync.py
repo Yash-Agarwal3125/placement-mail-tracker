@@ -33,6 +33,7 @@ SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # ACTION REQUIRED: actionable drives needing user attention
 ACTION_REQUIRED_HEADERS = [
     "Company",
+    "Received",
     "Status",
     "Package/Stipend",
     "Eligibility",
@@ -302,14 +303,17 @@ class GoogleSheetsSync:
         headers: list[str],
         rows: list[list[str]],
     ) -> None:
-        """Clear the tab then write headers + rows in one call."""
+        """Atomically refresh a tab: write headers + rows, then trim stale rows.
+
+        Write-before-clear so a mid-sync failure can never blank the tab
+        (FS SS-12 / INV-30): the ``update`` lands the new data first, then the
+        trailing ``clear`` removes leftover rows from a previously longer sync.
+        If the update fails, nothing was cleared and the previous data is intact;
+        if the trailing clear fails, at worst a few stale rows linger below the
+        new data and the next successful sync self-heals.
+        """
         values = self._values()
         sheet_id = self.settings.google_sheet_id
-
-        values.clear(
-            spreadsheetId=sheet_id,
-            range=f"{_quote(tab_name)}!A:Z",
-        ).execute()
 
         all_data: list[list[str]] = [headers] + rows
         values.update(
@@ -317,6 +321,16 @@ class GoogleSheetsSync:
             range=f"{_quote(tab_name)}!A1",
             valueInputOption="USER_ENTERED",
             body={"values": all_data},
+        ).execute()
+
+        # Trim rows left over from a previous, longer sync, starting one row
+        # below the data just written. ponytail: assumes a tab's column count is
+        # stable across syncs (headers are fixed module constants); a column
+        # *shrink* between versions would need a one-off full-width clear.
+        first_stale_row = len(all_data) + 1
+        values.clear(
+            spreadsheetId=sheet_id,
+            range=f"{_quote(tab_name)}!A{first_stale_row}:Z",
         ).execute()
         logger.info("[SYNC] Wrote %d rows to %s", len(rows), tab_name)
 
@@ -558,13 +572,14 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any], my_status: str = "") -
 
 
 def action_required_row(opportunity: dict[str, Any]) -> list[str]:
-    """Convert one drive into an ACTION REQUIRED row (7 columns)."""
+    """Convert one drive into an ACTION REQUIRED row (8 columns)."""
     eligibility = (
         format_eligibility_string(opportunity)
         or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
     )
     return [
         _cell(opportunity.get("company_name")),
+        _fmt_datetime(opportunity.get("email_received_at")),
         _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _cell(opportunity.get("package_or_stipend")),
         eligibility,

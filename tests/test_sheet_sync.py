@@ -107,9 +107,9 @@ class TestAllDrivesRow:
 
 
 class TestActionRequiredRow:
-    def test_column_count_is_7(self):
+    def test_column_count_is_8(self):
         row = action_required_row(_sample_opp())
-        assert len(row) == 7
+        assert len(row) == 8
         assert len(row) == len(ACTION_REQUIRED_HEADERS)
 
     def test_company_and_status(self):
@@ -124,6 +124,10 @@ class TestActionRequiredRow:
     def test_deadline_cell(self):
         row = action_required_row(_sample_opp())
         assert "2027" in row[ACOL["Deadline"]]
+
+    def test_received_cell(self):
+        row = action_required_row(_sample_opp())
+        assert "2027" in row[ACOL["Received"]]
 
 
 class TestUpcomingEventRow:
@@ -171,7 +175,7 @@ class TestHeaders:
         assert ACTIVE_OPP_HEADERS is ALL_DRIVES_HEADERS
 
     def test_action_required_header_count(self):
-        assert len(ACTION_REQUIRED_HEADERS) == 7
+        assert len(ACTION_REQUIRED_HEADERS) == 8
 
     def test_upcoming_events_header_count(self):
         assert len(UPCOMING_EVENTS_HEADERS) == 4
@@ -199,3 +203,67 @@ class TestHeaders:
         assert len(row) == 7
         assert row[0] == "Microsoft"
         assert row[2] == "Applied"
+
+
+class _FakeValues:
+    """Records update/clear call order and can fail a chosen operation."""
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail_on = fail_on
+
+    def update(self, **kwargs):
+        return self._op("update", kwargs)
+
+    def clear(self, **kwargs):
+        return self._op("clear", kwargs)
+
+    def _op(self, name: str, kwargs: dict):
+        self.calls.append((name, kwargs.get("range", "")))
+        outer = self
+
+        class _Exec:
+            def execute(self_inner):
+                if outer.fail_on == name:
+                    raise RuntimeError(f"{name} failed")
+                return {}
+
+        return _Exec()
+
+
+class TestAtomicTabWrite:
+    """T1.3: write-before-clear so a mid-sync failure never blanks a tab."""
+
+    def _sync(self):
+        import pytest
+
+        from placement_mail_tracker.config.settings import Settings
+        from placement_mail_tracker.sheets.sheets_sync import GoogleSheetsSync
+
+        settings = Settings(app_env="testing", google_sheet_id="SHEET")
+        return GoogleSheetsSync(settings, service=object()), pytest
+
+    def test_update_happens_before_clear(self):
+        sync, _ = self._sync()
+        fake = _FakeValues()
+        sync._values = lambda: fake
+        sync._clear_and_write_tab("ALL DRIVES", ["A", "B"], [["1", "2"]])
+        assert [c[0] for c in fake.calls] == ["update", "clear"]
+
+    def test_update_failure_never_clears(self):
+        sync, pytest = self._sync()
+        fake = _FakeValues(fail_on="update")
+        sync._values = lambda: fake
+        with pytest.raises(RuntimeError):
+            sync._clear_and_write_tab("ALL DRIVES", ["A"], [])
+        # Nothing was cleared, so the previous tab contents remain intact.
+        assert "clear" not in [c[0] for c in fake.calls]
+
+    def test_trim_clears_only_rows_below_written_data(self):
+        sync, _ = self._sync()
+        fake = _FakeValues()
+        sync._values = lambda: fake
+        # 1 header + 2 rows = 3 rows written; trim must start at row 4.
+        sync._clear_and_write_tab("ALL DRIVES", ["H1", "H2"], [["a", "b"], ["c", "d"]])
+        clear_range = next(rng for op, rng in fake.calls if op == "clear")
+        assert clear_range == "'ALL DRIVES'!A4:Z"
