@@ -29,7 +29,7 @@
     "display_name": "'No Reply CDC Info' via VITIANS CDC Group, Vellore and Chennai Campus",
     "email": "vitianscdc2027@vitstudent.ac.in",
     "first_seen": "2026-05-27T09:58:21.682060+00:00",
-    "last_seen": "2026-06-24T18:02:28.535256+00:00",
+    "last_seen": "2026-07-09T05:19:16.073093+00:00",
     "matched_keywords": [
       "display:cdc",
       "display:helpdesk",
@@ -181,6 +181,36 @@
     "email": "noreply.sdc@vit.ac.in",
     "first_seen": "2026-06-28T12:07:52.894825+00:00",
     "last_seen": "2026-06-28T12:07:52.894825+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "'Chief Warden Mens Hostel' via allstudents.mh",
+    "email": "allstudents.mh@vitstudent.ac.in",
+    "first_seen": "2026-07-02T06:07:36.363424+00:00",
+    "last_seen": "2026-07-02T06:07:36.363424+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "V SWETHA",
+    "email": "swetha.vasudevan@vit.ac.in",
+    "first_seen": "2026-07-02T09:07:50.636863+00:00",
+    "last_seen": "2026-07-02T09:07:50.636863+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "Saravanakumar K",
+    "email": "ksaravanakumar@vit.ac.in",
+    "first_seen": "2026-07-09T05:19:21.150088+00:00",
+    "last_seen": "2026-07-09T05:19:21.150088+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],

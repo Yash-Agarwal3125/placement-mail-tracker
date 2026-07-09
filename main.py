@@ -10,6 +10,7 @@ This script executes a single synchronization cycle:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 
@@ -27,8 +28,25 @@ from placement_mail_tracker.utils.logging_config import setup_logging
 logger = logging.getLogger("placement_mail_tracker.main")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Placement Mail Tracker sync cycle")
+    parser.add_argument(
+        "--calendar-dry-run",
+        action="store_true",
+        help="Plan the Calendar sync and log it without calling Google or writing state.",
+    )
+    parser.add_argument(
+        "--calendar-rebuild",
+        action="store_true",
+        help="Reconcile calendar_events state against live Google Calendar events.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     """Execute a single sync cycle sequentially and safely."""
+    args = _parse_args()
+
     # 1. Load settings and setup clean readable logs
     settings = get_settings()
     setup_logging(
@@ -80,7 +98,10 @@ def main() -> int:
                 
                 # 3. Execute the full E2E orchestration pipeline
                 runner = PlacementTrackerRunner(connection, settings)
-                cycle_report = runner.run_once()
+                cycle_report = runner.run_once(
+                    calendar_dry_run=args.calendar_dry_run,
+                    calendar_rebuild=args.calendar_rebuild,
+                )
                 _merge_report(report, cycle_report)
 
         return _finalize_run(report, settings, health_manager, heartbeat_manager)
@@ -96,7 +117,7 @@ def main() -> int:
 
 def _apply_validation_results(report: RunReport, validator: ConfigValidator) -> None:
     """Apply startup validation errors and warnings to a run report."""
-    tracked_components = {"database", "gmail", "sheets", "notifications"}
+    tracked_components = {"database", "gmail", "sheets", "notifications", "calendar"}
     for result in validator.results:
         if result.status == "PASS":
             continue
@@ -121,6 +142,7 @@ def _merge_report(target: RunReport, source: RunReport) -> None:
     target.gmail_ok = target.gmail_ok and source.gmail_ok
     target.sheets_ok = target.sheets_ok and source.sheets_ok
     target.notifications_ok = target.notifications_ok and source.notifications_ok
+    target.calendar_ok = target.calendar_ok and source.calendar_ok
     target.critical_failure = target.critical_failure or source.critical_failure
     target.failures.extend(source.failures)
     target.warnings.extend(source.warnings)
@@ -136,7 +158,7 @@ def _finalize_run(
     """Write final state, alert when needed, and return the process exit code."""
     report.finish()
 
-    if report.status == RunStatus.SUCCESS:
+    if report.status != RunStatus.FAILED:
         heartbeat_manager.update_success(report)
 
     FailureAlertManager(settings, health_manager).handle_report(report)

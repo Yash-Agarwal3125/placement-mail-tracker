@@ -44,7 +44,8 @@ _COMPANY_NOISE = re.compile(
 # Handles "Drive: Microsoft", "Opportunity: Google", as well as the common
 # email subject prefixes already present ("Re:", "Updated:", …).
 _LABEL_PREFIX = re.compile(
-    r"^(updated|reminder|re|fwd?|drive|campus|opportunity|recruitment|placement)"
+    r"^(updated?|reminder|re|fwd?|drive|campus|opportunity|recruitment|placement|"
+    r"join(?:\s+immediately)?)"
     r"\s*[:\-]\s*",
     re.IGNORECASE,
 )
@@ -658,6 +659,13 @@ class RuleExtractionResult:
                 critical_missing.append("role")
         if self.current_status == "OPEN" and self.email_classification == "IRRELEVANT":
             critical_missing.append("status")
+        # oa_date/interview_date have no rule-based extraction path at all (no
+        # field even exists on this dataclass) — Gemini is the only way to get
+        # them, so a mail whose entire purpose is announcing one must always
+        # be sent to Gemini, regardless of how confident the rest of the
+        # extraction looks.
+        if self.email_classification in ("OA_UPDATE", "INTERVIEW_UPDATE"):
+            critical_missing.append(self.email_classification)
         return len(critical_missing) > 0
 
     def to_dict(self) -> dict[str, Any]:

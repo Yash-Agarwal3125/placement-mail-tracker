@@ -16,7 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
+from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 from placement_mail_tracker.scheduler.runner import (
@@ -121,7 +123,8 @@ def runner_settings(tmp_path):
 
 
 class TestGeminiCostGuard:
-    """A follow-up on a known thread must update via rules without calling Gemini."""
+    """A status-only follow-up on a known thread updates via rules without
+    calling Gemini — except OA_UPDATE/INTERVIEW_UPDATE, which always need it."""
 
     def test_known_thread_followup_skips_gemini(
         self, db_manager: DatabaseManager, mock_settings, sample_opportunity
@@ -150,9 +153,9 @@ class TestGeminiCostGuard:
         followup = {
             "message_id": "followup_msg",
             "thread_id": "thread_known",
-            "subject": "Online Assessment scheduled - shortlisted candidates",
+            "subject": "Shortlisted for next round",
             "sender": "cdc@college.edu",
-            "body_text": "Your online assessment has been scheduled.",
+            "body_text": "You have been shortlisted for the next round.",
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -169,6 +172,149 @@ class TestGeminiCostGuard:
         drive = db_manager.fetch_opportunity_by_thread_id("thread_known")
         assert drive["company_name"] == "Microsoft"
         assert drive["current_status"] in {"OA", "SHORTLISTED"}
+
+    def test_known_thread_oa_update_still_calls_gemini(
+        self, db_manager: DatabaseManager, mock_settings, sample_opportunity
+    ):
+        """oa_date/interview_date have no rule-based extraction path, so the
+        cost guard must not suppress Gemini for OA_UPDATE/INTERVIEW_UPDATE
+        follow-ups even on an already-tracked thread."""
+        db_manager.insert_or_update_opportunity(
+            sample_opportunity("Microsoft", "Software Engineer Intern"),
+            source_email_id="orig_msg2",
+            source_thread_id="thread_known_oa",
+        )
+
+        runner = PlacementTrackerRunner(
+            connection=db_manager.connection, settings=mock_settings
+        )
+
+        extractor = MagicMock()
+        extractor.extract_from_email.return_value = {}
+
+        from placement_mail_tracker.config.user_profile import UserProfile
+
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0,
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+        }
+        followup = {
+            "message_id": "followup_oa_msg",
+            "thread_id": "thread_known_oa",
+            "subject": "Online Assessment scheduled - shortlisted candidates",
+            "sender": "cdc@college.edu",
+            "body_text": "Your online assessment has been scheduled.",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        runner._process_single_message(
+            followup, db_manager, extractor, UserProfile.load(), stats
+        )
+
+        extractor.extract_from_email.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# (c) Quota-aware deferral: a genuine daily-quota exhaustion must not be
+# silently swallowed into a rule-only "processed" row — it should defer the
+# email (PENDING_EXTRACTION) for a later run, without touching retry_count.
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaAwareDeferral:
+    def test_quota_exhaustion_defers_instead_of_processing(
+        self, db_manager: DatabaseManager, mock_settings
+    ):
+        runner = PlacementTrackerRunner(
+            connection=db_manager.connection, settings=mock_settings
+        )
+
+        extractor = MagicMock()
+        extractor.extract_from_email.side_effect = GeminiQuotaExhaustedError(
+            "429 RESOURCE_EXHAUSTED PerDay"
+        )
+
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0,
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+        }
+        msg = {
+            "message_id": "quota_deferred_msg",
+            "thread_id": "thread_quota_new",
+            "subject": "OA Scheduled for TestCo Internship 2027",
+            "sender": "cdc@college.edu",
+            "body_text": (
+                "The Online Assessment (OA) for TestCo Internship has been "
+                "scheduled on HackerRank."
+            ),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+
+        # Deferred, not processed: no opportunity created from a silent
+        # rule-only fallback, and errors (not "processed") is bumped.
+        assert stats["processed"] == 0
+        assert stats["created"] == 0
+        assert stats["errors"] == 1
+
+        row = db_manager.connection.execute(
+            "SELECT processed_status, retry_count FROM processed_emails "
+            "WHERE gmail_message_id = ?",
+            ("quota_deferred_msg",),
+        ).fetchone()
+        assert row["processed_status"] == "PENDING_EXTRACTION"
+        # retry_count must NOT be bumped toward PERMANENT_FAILURE: quota
+        # resets on its own schedule and this is not a defect in the email.
+        assert row["retry_count"] == 0
+
+        # The retry queue in _fetch_messages re-fetches PENDING_EXTRACTION
+        # messages by id — confirm the already_processed guard (which
+        # excludes only 'processed'/'skipped'/'PERMANENT_FAILURE') does not
+        # treat this row as done, so a later run will pick it back up.
+        already_processed = db_manager.connection.execute(
+            """
+            SELECT id FROM processed_emails
+            WHERE gmail_message_id = ?
+              AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE')
+            """,
+            ("quota_deferred_msg",),
+        ).fetchone()
+        assert already_processed is None
+
+    def test_quota_exhaustion_does_not_dead_letter_across_repeated_runs(
+        self, db_manager: DatabaseManager, mock_settings
+    ):
+        """Unlike a generic extraction error, repeated quota exhaustion never
+        trips _RETRY_MAX / PERMANENT_FAILURE — it just keeps deferring."""
+        runner = PlacementTrackerRunner(
+            connection=db_manager.connection, settings=mock_settings
+        )
+        extractor = MagicMock()
+        extractor.extract_from_email.side_effect = GeminiQuotaExhaustedError("429 PerDay")
+
+        msg = {
+            "message_id": "quota_deferred_repeat",
+            "thread_id": "thread_quota_repeat",
+            "subject": "Interview scheduled for TestCo",
+            "sender": "cdc@college.edu",
+            "body_text": "Your technical interview round has been scheduled.",
+            "timestamp": datetime.now().isoformat(),
+        }
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0,
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+        }
+
+        for _ in range(_RETRY_MAX + 2):
+            runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+
+        row = db_manager.connection.execute(
+            "SELECT processed_status, retry_count FROM processed_emails WHERE gmail_message_id = ?",
+            ("quota_deferred_repeat",),
+        ).fetchone()
+        assert row["processed_status"] == "PENDING_EXTRACTION"
+        assert row["retry_count"] == 0
 
 
 # ---------------------------------------------------------------------------

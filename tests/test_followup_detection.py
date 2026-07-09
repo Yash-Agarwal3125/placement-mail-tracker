@@ -112,6 +112,77 @@ class TestThreadFollowupDetection:
         # OPEN should appear only once since it's the same consecutive status
         assert history.count("OPEN") == 1
 
+    def test_followup_update_does_not_double_encode_branches(self, db_manager: DatabaseManager):
+        """update_opportunity re-normalizes an already-normalized dict
+        (insert_or_update_opportunity normalizes once, then passes the
+        normalized dict into update_opportunity, which normalizes again).
+        branches_allowed must survive that second pass unchanged, not turn
+        into a JSON-encoded-string-inside-a-list."""
+        thread_id = "thread_branches_001"
+
+        opp1 = {
+            "company_name": "Zetwerk",
+            "role": "Intern",
+            "internship_or_fulltime": "internship",
+            "package_or_stipend": "40000",
+            "current_status": "OPEN",
+            "branches_allowed": ["CSE", "IT", "AI", "ML"],
+        }
+        id1, created1 = db_manager.insert_or_update_opportunity(
+            opp1, source_email_id="msg_branches_1", source_thread_id=thread_id,
+        )
+        assert created1 is True
+
+        # Follow-up in the same thread changes status only.
+        opp2 = {**opp1, "current_status": "SHORTLISTED"}
+        id2, created2 = db_manager.insert_or_update_opportunity(
+            opp2, source_email_id="msg_branches_2", source_thread_id=thread_id,
+        )
+        assert created2 is False
+        assert id2 == id1
+
+        record = db_manager.fetch_opportunity_by_id(id1)
+        assert record["branches_allowed"] == ["CSE", "IT", "AI", "ML"]
+
+    def test_followup_without_date_preserves_stored_dates(self, db_manager: DatabaseManager):
+        """B1 regression: a follow-up mail omitting deadline/oa_date/interview_date
+        must not NULL out the previously stored values."""
+        thread_id = "thread_b1_001"
+
+        opp1 = {
+            "company_name": "Infosys",
+            "role": "SDE Intern",
+            "internship_or_fulltime": "internship",
+            "package_or_stipend": "50000",
+            "current_status": "OPEN",
+            "deadline": "20 June 2026",
+            "oa_date": "25 June 2026",
+            "interview_date": "1 July 2026",
+        }
+        id1, created1 = db_manager.insert_or_update_opportunity(
+            opp1, source_email_id="msg_b1_1", source_thread_id=thread_id,
+        )
+        assert created1 is True
+
+        # Follow-up: shortlist mail, no date fields mentioned at all.
+        opp2 = {
+            "company_name": "Infosys",
+            "role": "SDE Intern",
+            "internship_or_fulltime": "internship",
+            "package_or_stipend": "50000",
+            "current_status": "SHORTLISTED",
+        }
+        id2, created2 = db_manager.insert_or_update_opportunity(
+            opp2, source_email_id="msg_b1_2", source_thread_id=thread_id,
+        )
+        assert created2 is False
+        assert id2 == id1
+
+        record = db_manager.fetch_opportunity_by_id(id1)
+        assert record["deadline"] == "20 June 2026"
+        assert record["oa_date"] == "25 June 2026"
+        assert record["interview_date"] == "1 July 2026"
+
 
 # ===================================================================
 # Separate drives for different roles

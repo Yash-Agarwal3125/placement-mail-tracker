@@ -15,7 +15,9 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
+from placement_mail_tracker.ai.attachments import extract_attachment_text, is_image_attachment
 from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
+from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
@@ -28,6 +30,7 @@ from placement_mail_tracker.extraction.rule_engine import (
 from placement_mail_tracker.extraction.rule_engine import (
     extract_from_email as rule_extract,
 )
+from placement_mail_tracker.extraction.validation import validate_opportunity_data
 from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
@@ -139,6 +142,11 @@ def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
         "important_notes": extraction.get("important_notes"),
         "current_status": canonicalize_status(extraction.get("current_status")),
         "degree_level": extraction.get("degree_level") or "UNKNOWN",
+        # Transient: the Gemini model's self-reported confidence, consumed only
+        # by validate_opportunity_data() below. Not an opportunities column —
+        # DatabaseManager._normalize_opportunity only reads known field names,
+        # so an extra "confidence" key here is dropped harmlessly at storage.
+        "confidence": extraction.get("confidence"),
     }
 
 
@@ -178,7 +186,9 @@ class PlacementTrackerRunner:
     connection: sqlite3.Connection
     settings: Settings
 
-    def run_once(self) -> RunReport:
+    def run_once(
+        self, *, calendar_dry_run: bool = False, calendar_rebuild: bool = False
+    ) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
         run_start = datetime.now()
         report = RunReport(environment=self.settings.environment)
@@ -211,7 +221,14 @@ class PlacementTrackerRunner:
                 messages, database, gmail_client, extractor, user_profile
             )
 
-        self._execute_sync_pipelines(database, sheets_client, report, run_start)
+        self._execute_sync_pipelines(
+            database,
+            sheets_client,
+            report,
+            run_start,
+            calendar_dry_run=calendar_dry_run,
+            calendar_rebuild=calendar_rebuild,
+        )
 
         self._finalize_report(report, stats, fetch_started_at)
         return report
@@ -348,7 +365,9 @@ class PlacementTrackerRunner:
         }
 
         for msg in messages:
-            self._process_single_message(msg, database, extractor, user_profile, stats)
+            self._process_single_message(
+                msg, database, extractor, user_profile, stats, gmail_client=gmail_client
+            )
 
         return stats
 
@@ -359,6 +378,7 @@ class PlacementTrackerRunner:
         extractor: GeminiExtractor,
         user_profile: UserProfile,
         stats: dict[str, int],
+        gmail_client: GmailClient | None = None,
     ) -> None:
         msg_id = msg.get("message_id") or msg.get("id")
         if not msg_id:
@@ -430,11 +450,22 @@ class PlacementTrackerRunner:
                     or rule_result.email_classification in _FOLLOWUP_CLASSIFICATIONS
                 )
             )
+            # oa_date/interview_date have no rule-based extraction path at all,
+            # so the cost guard's premise ("rule-based date detection is
+            # enough") does not hold for the two classifications whose entire
+            # purpose is announcing one of those dates — never skip Gemini
+            # for those, even on a known thread.
+            date_announcement = rule_result.email_classification in (
+                "OA_UPDATE", "INTERVIEW_UPDATE"
+            )
 
-            if rule_result.needs_gemini and not known_thread_followup:
+            if rule_result.needs_gemini and (not known_thread_followup or date_announcement):
                 logger.info("Rule extraction incomplete; calling Gemini")
+                attachment_text, image_parts = self._prepare_attachments(gmail_client, msg)
                 try:
-                    extracted = extractor.extract_from_email(msg)
+                    extracted = extractor.extract_from_email(
+                        msg, attachment_text=attachment_text, image_parts=image_parts
+                    )
                     if not extracted:
                         raise ValueError("Gemini extraction returned empty results")
                     extracted_dict = (
@@ -447,6 +478,13 @@ class PlacementTrackerRunner:
                         opp_data["current_status"] = rule_result.current_status
                     if not opp_data.get("current_status"):
                         opp_data["current_status"] = rule_result.current_status
+                except GeminiQuotaExhaustedError:
+                    # Daily quota is genuinely exhausted for every model we
+                    # were allowed to try. Don't silently degrade to the
+                    # rule-only extraction and mark this mail "processed" —
+                    # propagate so the outer handler defers it (PENDING_
+                    # EXTRACTION) for a later run once quota resets.
+                    raise
                 except Exception as gemini_err:
                     logger.warning(
                         "Gemini failed completely, falling back to rule engine: %s", gemini_err
@@ -560,6 +598,32 @@ class PlacementTrackerRunner:
 
                 opp_data["priority"] = compute_priority(opp_data, user_profile)
 
+                # Validate against the *effective* dates, not just what this
+                # round's extraction restated. Follow-ups on a known drive
+                # frequently omit deadline/oa_date/interview_date entirely
+                # (COALESCE at the DB layer then preserves the previously
+                # stored value — see _update_opportunity_row) while opp_data
+                # itself only has what this round found. Validating on
+                # opp_data alone would reset validation_flags to "looks fine"
+                # every time a follow-up doesn't restate an already-flagged
+                # date, even though the implausible value is still sitting in
+                # the row untouched. Fall back to the tracked/matched drive's
+                # stored values for this check only (never for storage).
+                existing_for_validation = existing_thread_drive or (
+                    best_match.candidate if best_match and best_match.is_duplicate else None
+                )
+                effective_dates = dict(opp_data)
+                if existing_for_validation is not None:
+                    # existing_thread_drive is a sqlite3.Row (no .get()); dict()
+                    # normalizes both possible sources to a plain mapping.
+                    existing_for_validation = dict(existing_for_validation)
+                    for date_field in ("deadline", "oa_date", "interview_date"):
+                        if not effective_dates.get(date_field):
+                            effective_dates[date_field] = existing_for_validation.get(date_field)
+                opp_data["validation_flags"] = validate_opportunity_data(
+                    effective_dates, email_received_at=timestamp
+                )
+
                 opp_id, created = database.insert_or_update_opportunity(
                     opp_data,
                     source_email_id=msg_id,
@@ -593,6 +657,37 @@ class PlacementTrackerRunner:
             )
             stats["processed"] += 1
 
+        except GeminiQuotaExhaustedError as quota_error:
+            # Quota exhaustion is a today-only operational condition, not a
+            # defect in this email — don't burn down the PERMANENT_FAILURE
+            # retry budget (_RETRY_MAX) meant for genuinely broken emails.
+            # Leave retry_count untouched so the email waits in the
+            # PENDING_EXTRACTION retry queue (picked back up by
+            # _fetch_messages) until quota frees up, bounded only by the
+            # existing 30-day purge_old_processed_emails TTL.
+            logger.warning(
+                "Deferring email %s: Gemini quota exhausted for all attempted "
+                "models: %s", msg_id, quota_error,
+            )
+            row = self.connection.execute(
+                "SELECT retry_count FROM processed_emails WHERE gmail_message_id = ?",
+                (msg_id,),
+            ).fetchone()
+            database.log_processed_email(
+                gmail_message_id=msg_id,
+                subject=subject,
+                sender=sender,
+                received_at=timestamp,
+                filter_score=decision.score,
+                filter_decision=asdict(decision),
+                processed_status="PENDING_EXTRACTION",
+                error_message=str(quota_error),
+                email_classification=classification,
+                retry_count=row["retry_count"] if row else 0,
+                last_retry_at=utc_now_iso(),
+            )
+            stats["errors"] += 1
+
         except Exception as error:
             logger.exception("Failed to process email %s: %s", msg_id, error)
             row = self.connection.execute(
@@ -624,12 +719,61 @@ class PlacementTrackerRunner:
             )
             stats["errors"] += 1
 
+    def _prepare_attachments(
+        self, gmail_client: GmailClient | None, msg: dict[str, Any]
+    ) -> tuple[str, list[tuple[bytes, str]]]:
+        """Fetch and classify this mail's attachments for the Gemini call.
+
+        Only invoked right before a Gemini call that is already happening
+        (see the call site in ``_process_single_message``) — never adds a
+        Gmail or Gemini call for mails Gemini would not otherwise touch.
+        Returns (attachment_text, image_parts): pre-extracted .xlsx/.pdf text
+        to append to the prompt, and raw (bytes, mime_type) pairs for
+        image attachments to route to Gemini multimodal separately.
+        """
+        attachments = msg.get("attachments") or []
+        if not attachments or gmail_client is None:
+            return "", []
+
+        msg_id = msg.get("message_id") or msg.get("id") or ""
+        text_chunks: list[str] = []
+        image_parts: list[tuple[bytes, str]] = []
+
+        for attachment in attachments:
+            filename = attachment.get("filename", "")
+            mime_type = attachment.get("mimeType", "")
+            attachment_id = attachment.get("attachmentId")
+            if not attachment_id:
+                continue
+            try:
+                data = gmail_client.fetch_attachment_bytes(msg_id, attachment_id)
+            except Exception as error:
+                logger.warning(
+                    "Could not fetch attachment %r for %s: %s", filename, msg_id, error
+                )
+                continue
+            if not data:
+                continue
+
+            if is_image_attachment(filename, mime_type):
+                image_parts.append((data, mime_type or "image/jpeg"))
+                continue
+
+            text = extract_attachment_text(filename, mime_type, data)
+            if text:
+                text_chunks.append(f"--- Attachment: {filename} ---\n{text}")
+
+        return "\n\n".join(text_chunks), image_parts
+
     def _execute_sync_pipelines(
         self,
         database: DatabaseManager,
         sheets_client: SheetsClient,
         report: RunReport,
         run_start: datetime | None = None,
+        *,
+        calendar_dry_run: bool = False,
+        calendar_rebuild: bool = False,
     ) -> None:
         sheets_sync_successful = False
         logger.info("[SYNC] Starting Sheet Sync")
@@ -648,6 +792,10 @@ class PlacementTrackerRunner:
                 critical=self.settings.is_production,
             )
 
+        self._execute_calendar_sync(
+            database, report, calendar_dry_run=calendar_dry_run, calendar_rebuild=calendar_rebuild
+        )
+
         logger.info("Checking for upcoming deadlines and events")
         try:
             from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
@@ -657,6 +805,55 @@ class PlacementTrackerRunner:
         except Exception as e:
             logger.exception("Alert generation failed: %s", e)
             report.mark_component("notifications", False, str(e), critical=False)
+
+    def _execute_calendar_sync(
+        self,
+        database: DatabaseManager,
+        report: RunReport,
+        *,
+        calendar_dry_run: bool = False,
+        calendar_rebuild: bool = False,
+    ) -> None:
+        """Sync the "VIT Placements" Google Calendar (ADR docs/design/03-adr-calendar-sync.md).
+
+        Gated on ``settings.calendar_sync_enabled`` OR an explicit CLI flag
+        (spec §4 point 3) so ``--calendar-dry-run``/``--calendar-rebuild`` work
+        for manual verification even before the feature is flipped on. Always
+        non-critical on failure — the calendar is enrichment; mail ingestion
+        and the sheet must survive its death (ADR Decision 5).
+        """
+        if not (self.settings.calendar_sync_enabled or calendar_dry_run or calendar_rebuild):
+            return
+
+        logger.info("[SYNC] Starting Calendar Sync")
+        try:
+            from placement_mail_tracker.calendar_sync.client import GoogleCalendarClient
+            from placement_mail_tracker.calendar_sync.sync import CalendarSyncEngine
+            from placement_mail_tracker.scheduler.calendar_flags_store import (
+                append_calendar_flags,
+            )
+
+            calendar_client = GoogleCalendarClient(self.settings)
+            calendar_engine = CalendarSyncEngine(database, calendar_client, self.settings)
+
+            if calendar_rebuild:
+                result = calendar_engine.rebuild()
+            else:
+                result = calendar_engine.sync(dry_run=calendar_dry_run)
+
+            logger.info(
+                "[SYNC] Calendar sync: inserted=%s patched=%s unchanged=%s "
+                "marked_done=%s retitled_stale=%s dry_run=%s",
+                result.inserted, result.patched, result.unchanged,
+                result.marked_done, result.retitled_stale, result.dry_run,
+            )
+            for line in result.flagged:
+                logger.info("[CALENDAR] %s", line)
+            if result.flagged and not calendar_dry_run:
+                append_calendar_flags(result.flagged)
+        except Exception as e:
+            logger.exception("[SYNC] Calendar Sync Failed: %s", e)
+            report.mark_component("calendar", False, str(e), critical=False)
 
     def _finalize_report(
         self, report: RunReport, stats: dict[str, int], fetch_started_at: str

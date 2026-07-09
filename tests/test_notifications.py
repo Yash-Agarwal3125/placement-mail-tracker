@@ -104,3 +104,19 @@ def test_digest_format():
     assert "Event Co" in output
     assert "NEW OPPORTUNITIES" in output
     assert "New Co" in output
+
+
+def test_digest_format_includes_calendar_flags():
+    output = _format_digest(
+        [], [], [], datetime.now(),
+        calendar_flags=["Acme: OA date became empty — calendar event kept as-is"],
+    )
+
+    assert "CALENDAR FLAGS" in output
+    assert "Acme: OA date became empty" in output
+
+
+def test_digest_format_omits_calendar_flags_section_when_empty():
+    output = _format_digest([], [], [], datetime.now(), calendar_flags=[])
+
+    assert "CALENDAR FLAGS" not in output

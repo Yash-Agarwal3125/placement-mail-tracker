@@ -10,11 +10,13 @@ import http.client
 import logging
 import os
 import socket
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -24,6 +26,7 @@ from googleapiclient.errors import HttpError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.eligibility import format_eligibility_string
+from placement_mail_tracker.reliability.auth_alerts import alert_oauth_dead_once, clear_oauth_alert
 from placement_mail_tracker.utils.time import human_relative_time, parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
@@ -65,8 +68,9 @@ ALL_DRIVES_HEADERS = [
     "Deadline",
     "Current Status",
     "Last Update",
-    "My Status",  # user-owned; preserved across syncs
-    "Drive ID",   # key column for read-back dedup
+    "My Status",       # user-owned; preserved across syncs
+    "Review Flags",    # post-extraction validation flags; never blocks a row, just surfaces it
+    "Drive ID",        # key column for read-back dedup
 ]
 
 # MY APPLICATIONS: drives where the user has taken action (My Status ≠ Not Applied)
@@ -209,6 +213,20 @@ class GoogleSheetsSync:
 
         # Read back user-owned My Status values before we clear-and-write.
         my_status_map = self._read_my_status_map()
+
+        # A1/B2: persist the read-back into the DB so it survives even if a
+        # later sheet read fails, and so other consumers (e.g. calendar
+        # filtering) can query my_status from the DB directly.
+        enum_updates: dict[str, str] = {}
+        for opp in active_opps:
+            drive_id = opp.get("drive_id")
+            if not drive_id:
+                continue
+            enum_value = _my_status_to_enum(my_status_map.get(drive_id, ""))
+            if enum_value:
+                enum_updates[drive_id] = enum_value
+        if enum_updates:
+            database.bulk_update_my_status(enum_updates)
 
         # ACTION REQUIRED: visible drives needing user action, sorted by deadline
         action_opps = [
@@ -431,31 +449,32 @@ class GoogleSheetsSync:
         """Return {drive_id: my_status} from the current ALL DRIVES sheet.
 
         Called before each clear-and-write so user-set My Status values survive
-        the sync. Returns empty dict on any error (safe — rows default to blank).
+        the sync. A read failure (API/network error) is NOT swallowed here —
+        it propagates into ``sync_active_opportunities``'s existing retry
+        wrapper, so a transient error retries the whole sync instead of being
+        silently treated as "the sheet is empty" and wiping every user-set
+        status (B2). A genuinely empty/old-schema sheet still returns {}.
         """
-        try:
-            response = self._values().get(
-                spreadsheetId=self.settings.google_sheet_id,
-                range=f"{_quote('ALL DRIVES')}!A1:Z",
-            ).execute()
-            rows = response.get("values", [])
-            if len(rows) < 2:
-                return {}
-            headers = rows[0]
-            try:
-                my_status_col = headers.index("My Status")
-                drive_id_col = headers.index("Drive ID")
-            except ValueError:
-                return {}  # old schema without these columns
-            result: dict[str, str] = {}
-            for row in rows[1:]:
-                drive_id = row[drive_id_col] if drive_id_col < len(row) else ""
-                my_status = row[my_status_col] if my_status_col < len(row) else ""
-                if drive_id and my_status and my_status != "Not Applied":
-                    result[drive_id] = my_status
-            return result
-        except Exception:
+        response = self._values().get(
+            spreadsheetId=self.settings.google_sheet_id,
+            range=f"{_quote('ALL DRIVES')}!A1:Z",
+        ).execute()
+        rows = response.get("values", [])
+        if len(rows) < 2:
             return {}
+        headers = rows[0]
+        try:
+            my_status_col = headers.index("My Status")
+            drive_id_col = headers.index("Drive ID")
+        except ValueError:
+            return {}  # old schema without these columns
+        result: dict[str, str] = {}
+        for row in rows[1:]:
+            drive_id = row[drive_id_col] if drive_id_col < len(row) else ""
+            my_status = row[my_status_col] if my_status_col < len(row) else ""
+            if drive_id and my_status and my_status != "Not Applied":
+                result[drive_id] = my_status
+        return result
 
     def _apply_formatting(self) -> None:
         """Freeze header row, auto-filter, and colour-code status cells."""
@@ -582,12 +601,19 @@ class GoogleSheetsSync:
         credentials = self._load_token()
 
         if credentials and credentials.valid:
+            clear_oauth_alert("Sheets")
             return credentials
 
         if credentials and credentials.expired and credentials.refresh_token:
             logger.info("Refreshing expired Google Sheets OAuth token")
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except RefreshError as error:
+                msg = f"OAuth dead — re-consent needed for Sheets: {error}"
+                alert_oauth_dead_once("Sheets", msg, self.settings)
+                raise SheetsAuthenticationError(msg) from error
             self._save_token(credentials)
+            clear_oauth_alert("Sheets")
             return credentials
 
         if not self.credentials_path.exists():
@@ -597,12 +623,24 @@ class GoogleSheetsSync:
             )
             raise SheetsAuthenticationError(msg)
 
+        if not sys.stdin.isatty():
+            # A scheduled run has no interactive terminal to complete a fresh
+            # consent flow — run_local_server would otherwise hang up to 120s
+            # and fail anyway. Fail fast with a clear alert instead.
+            msg = (
+                "OAuth dead — re-consent needed for Sheets: no valid/refreshable "
+                "token and this run is not interactive"
+            )
+            alert_oauth_dead_once("Sheets", msg, self.settings)
+            raise SheetsAuthenticationError(msg)
+
         logger.info("Starting Google Sheets OAuth flow")
         flow = InstalledAppFlow.from_client_secrets_file(
             str(self.credentials_path), SHEETS_SCOPES
         )
         credentials = flow.run_local_server(port=0, timeout_seconds=120)
         self._save_token(credentials)
+        clear_oauth_alert("Sheets")
         return credentials
 
     def _values(self) -> SheetsValuesResource:
@@ -644,7 +682,7 @@ class GoogleSheetsSync:
 
 
 def opportunity_to_sheet_row(opportunity: dict[str, Any], my_status: str = "") -> list[str]:
-    """Convert one drive into an ALL DRIVES row (11 columns)."""
+    """Convert one drive into an ALL DRIVES row (12 columns)."""
     eligibility = (
         format_eligibility_string(opportunity)
         or _friendly(opportunity.get("eligibility_status", "MANUAL_REVIEW"), _ELIGIBILITY_LABELS)
@@ -664,6 +702,7 @@ def opportunity_to_sheet_row(opportunity: dict[str, Any], my_status: str = "") -
         _friendly(opportunity.get("current_status"), _STATUS_LABELS),
         _fmt_datetime(opportunity.get("updated_at") or opportunity.get("last_update_timestamp")),
         my_status_cell,
+        _cell(opportunity.get("validation_flags")),
         _cell(opportunity.get("drive_id")),
     ]
 
@@ -853,6 +892,23 @@ _MY_STATUS_LABELS = {
     "SELECTED": "Selected",
     "REJECTED": "Rejected",
 }
+
+_MY_STATUS_REVERSE = {label.upper(): raw for raw, label in _MY_STATUS_LABELS.items()}
+
+
+def _my_status_to_enum(display_value: str) -> str | None:
+    """Reverse-map a sheet cell's My Status text back to its DB enum value.
+
+    Accepts either the friendly label ("Applied") or the raw enum itself
+    ("APPLIED", any case), so a user typing over the dropdown still works.
+    Returns None for unrecognized text rather than guessing.
+    """
+    value = (display_value or "").strip().upper()
+    if not value:
+        return None
+    if value in _MY_STATUS_LABELS:
+        return value
+    return _MY_STATUS_REVERSE.get(value)
 
 _JUNK_VALUES = {"", "[]", "[ ]", "none", "null", "n/a", "na", "-"}
 

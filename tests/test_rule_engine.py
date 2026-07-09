@@ -174,6 +174,11 @@ class TestNormalizeCompanyName:
             pytest.param("Microsoft Corporation", "Microsoft", id="microsoft_corp"),
             pytest.param("Microsoft", "Microsoft", id="microsoft_exact"),
             pytest.param("Updated : Dell Technologies", "Dell Technologies", id="updated_prefix"),
+            pytest.param("Update: Dell Technologies", "Dell Technologies", id="update_no_d_prefix"),
+            pytest.param(
+                "Join Immediately: Dell Technologies", "Dell Technologies",
+                id="join_immediately_prefix",
+            ),
             pytest.param("Reminder : Dell", "Dell Technologies", id="reminder_prefix"),
             pytest.param("Tata Motors Ltd.", "Tata Motors", id="tata_motors_ltd"),
             pytest.param("tata motors", "Tata Motors", id="tata_motors_lower"),
@@ -248,6 +253,19 @@ class TestExtractFromEmail:
         # Complete company/role/status extraction should avoid Gemini.
         if result.email_classification != "IRRELEVANT" or result.current_status != "OPEN":
             assert result.needs_gemini is False
+
+    def test_needs_gemini_true_for_oa_and_interview_update_even_with_company_role(self):
+        """oa_date/interview_date have no rule-based extraction path at all, so
+        an OA_UPDATE/INTERVIEW_UPDATE mail must always go to Gemini regardless
+        of how confidently company/role were extracted."""
+        for classification in ("OA_UPDATE", "INTERVIEW_UPDATE"):
+            result = RuleExtractionResult(
+                company_name="Microsoft",
+                role="SDE Intern",
+                current_status="SHORTLISTED",
+                email_classification=classification,
+            )
+            assert result.needs_gemini is True
 
     def test_to_dict(self):
         """``to_dict`` should produce an opportunity-compatible dictionary."""
