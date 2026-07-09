@@ -24,3 +24,7 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-m 'not eval'"
+markers = [
+    "eval: opt-in extraction-reliability eval suite (scripts/eval) — scores the already-generated scripts/eval/out/score_report.json against known-good floors; skipped by default (python -m pytest -m eval to run). Regenerate score_report.json first with scripts/eval/run_eval.py --extract/--score.",
+]

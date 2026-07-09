@@ -29,6 +29,33 @@ _STRPTIME_FORMATS = (
     "%B %Y",                # "June 2026"  — defaults to day 1
 )
 
+# Explicit whitelist of complete-string date formats for parse_datetime_strict.
+# Unlike _STRPTIME_FORMATS (a fallback used only when dateutil is missing),
+# this list is consulted unconditionally by the strict parser and is the
+# entire acceptance surface — no dateutil call, fuzzy or otherwise, backs it.
+# Indian-context DD/MM numeric dates ("04/07/2026", "04-07-2026") are included
+# explicitly (day-month-year); MM/DD is deliberately not accepted here since
+# this project's mail source is Indian placement-cell correspondence (see
+# CLAUDE.md / the Gemini prompt's DMY convention note) and accepting both
+# would silently reintroduce the DD/MM vs MM/DD ambiguity this parser exists
+# to avoid.
+_STRICT_DATE_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%d",
+    "%d %B %Y %I:%M %p",   # "17 June 2026 05:30 PM"
+    "%d %B %Y",             # "17 June 2026"
+    "%B %d, %Y",            # "June 17, 2026"
+    "%d-%b-%Y %I:%M %p",   # "17-Jun-2026 05:30 PM"
+    "%d-%b-%Y",             # "17-Jun-2026"
+    "%d %b %Y",             # "17 Jun 2026"
+    "%d/%m/%Y %I:%M %p",   # "04/07/2026 03:00 PM" (DD/MM/YYYY)
+    "%d/%m/%Y",             # "04/07/2026" (DD/MM/YYYY)
+    "%d-%m-%Y %I:%M %p",   # "04-07-2026 03:00 PM" (DD-MM-YYYY)
+    "%d-%m-%Y",             # "04-07-2026" (DD-MM-YYYY)
+    "%B %Y",                # "June 2026"  — defaults to day 1
+)
+
 
 def utc_now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string.
@@ -123,3 +150,67 @@ def parse_datetime_flexible(date_str: str) -> datetime | None:
         return None
 
     return dt
+
+
+def parse_datetime_strict(date_str: str) -> datetime | None:
+    """Strictly parse a date string against an explicit format whitelist.
+
+    This is a **new, additional** parser — it does not replace
+    ``parse_datetime_flexible`` anywhere, per CLAUDE.md's convention that all
+    stored dates (sheets, alerts, digest, action_required) are parsed with the
+    flexible parser. It exists solely for the post-extraction validation layer
+    (``extraction/validation.py``) to catch "plausible-looking garbage" that
+    fuzzy parsing accepts as a real date — e.g. ``parse_datetime_flexible``
+    resolves "Contact HR at extension 2026 in June" to a real date (fuzzy
+    mode extracts "2026" and "June" and fills in the rest from today's date),
+    while this function correctly rejects it because the full string never
+    matches any whitelisted format.
+
+    Deliberately does not call ``dateutil.parser.parse`` at all (not even with
+    ``fuzzy=False``): matching the *entire* string against a fixed set of
+    ``strptime`` formats is fully deterministic and does not depend on
+    dateutil's own non-fuzzy leniency (which still tolerates some partial/
+    reordered input and could drift across dateutil versions). See
+    ``docs/design/03-adr-calendar-sync.md`` Decision 3 for the precedent this
+    mirrors (a dedicated strict parser for one boundary, not a change to the
+    shared flexible parser).
+
+    Returns ``None`` for anything that isn't an exact, complete match to one
+    of the whitelisted formats, including bare years and out-of-range years
+    (same range guard as ``parse_datetime_flexible``).
+    """
+    if not date_str or not isinstance(date_str, str):
+        return None
+
+    stripped = date_str.strip()
+    if re.fullmatch(r"\d{4}", stripped):
+        return None
+
+    dt: datetime | None = None
+    try:
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+        if dt.tzinfo:
+            dt = dt.astimezone().replace(tzinfo=None)
+    except ValueError:
+        for fmt in _STRICT_DATE_FORMATS:
+            try:
+                dt = datetime.strptime(stripped, fmt)
+                break
+            except ValueError:
+                continue
+
+    if dt is None:
+        return None
+
+    max_year = datetime.now().year + _MAX_YEAR_DELTA
+    if dt.year < _MIN_YEAR or dt.year > max_year:
+        return None
+
+    return dt
+
+
+def parse_event_datetime(date_str: str) -> datetime | None:
+    """Strict variant for the calendar boundary (ADR D3): thin alias of
+    parse_datetime_strict, which was built in a prior session specifically as
+    the precedent for this boundary (see its own docstring)."""
+    return parse_datetime_strict(date_str)

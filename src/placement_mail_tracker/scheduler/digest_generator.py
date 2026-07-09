@@ -9,6 +9,7 @@ from typing import Any
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
+from placement_mail_tracker.scheduler.calendar_flags_store import pop_pending_calendar_flags
 from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
@@ -66,14 +67,17 @@ class DailyDigestGenerator:
                     break
 
         dead_letter_count = self.database.get_dead_letter_count()
+        calendar_flags = pop_pending_calendar_flags()
 
-        if not (action_required or upcoming_events or new_opps or dead_letter_count):
+        if not (
+            action_required or upcoming_events or new_opps or dead_letter_count or calendar_flags
+        ):
             logger.info("No significant updates for the daily digest.")
             self._record_digest_sent()
             return False
 
         digest_body = _format_digest(
-            action_required, upcoming_events, new_opps, now, dead_letter_count
+            action_required, upcoming_events, new_opps, now, dead_letter_count, calendar_flags
         )
 
         # Build a descriptive subject line
@@ -140,6 +144,7 @@ def _format_digest(
     new_opps: list[dict[str, Any]],
     now: datetime,
     dead_letter_count: int = 0,
+    calendar_flags: list[str] | None = None,
 ) -> str:
     lines = ["PLACEMENT SUMMARY", ""]
 
@@ -177,6 +182,12 @@ def _format_digest(
         lines.append("SYSTEM HEALTH")
         lines.append(f"* {dead_letter_count} email(s) failed processing permanently (dead letters)")
         lines.append("  Check logs or the RECENT UPDATES sheet for details.")
+        lines.append("")
+
+    if calendar_flags:
+        lines.append("CALENDAR FLAGS")
+        for flag in calendar_flags:
+            lines.append(f"* {flag}")
         lines.append("")
 
     return "\n".join(lines)

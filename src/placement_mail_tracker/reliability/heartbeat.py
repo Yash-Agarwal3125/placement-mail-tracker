@@ -42,13 +42,21 @@ class HeartbeatManager:
             return {}
 
     def update_success(self, report: RunReport) -> None:
-        """Write heartbeat after a fully successful run."""
+        """Write heartbeat after a run that isn't FAILED.
+
+        A single warning (PARTIAL_SUCCESS) still means the pipeline actually
+        ran and processed mail — starving the heartbeat on any warning caused
+        misleading "Tracker inactive for N hours" alerts during a chronic but
+        harmless warning streak (ADR-D8 / B5). Only a FAILED run should stop
+        this from advancing; callers gate on that, this just records which
+        status produced the update.
+        """
         payload = {
             "last_successful_run": utc_now_iso(),
             "processed_messages": report.metrics.processed_messages,
             "drives_created": report.metrics.drives_created,
             "drives_updated": report.metrics.drives_updated,
-            "status": "success",
+            "status": report.status.value.lower(),
         }
         _atomic_write_json(self.heartbeat_path, payload)
 

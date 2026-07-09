@@ -32,6 +32,14 @@ class PlacementExtraction(BaseModel):
         description="Action required by the user, if any.",
     )
     degree_level: str | None = None
+    confidence: float | None = Field(
+        default=None,
+        description=(
+            "The model's own self-assessed confidence (0.0-1.0) that this "
+            "extraction as a whole is fully correct and nothing was guessed. "
+            "Self-reported, not computed from a second call."
+        ),
+    )
 
     model_config = ConfigDict(extra="ignore")
 
@@ -91,6 +99,25 @@ class PlacementExtraction(BaseModel):
         if not normalized or normalized.lower() in {"null", "none", "n/a", "na", "-"}:
             return None
         return normalized
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, value: Any) -> float | None:
+        """Coerce and clamp the model's self-reported confidence.
+
+        Fail-soft by design (matches the rest of this model): an
+        out-of-range or unparseable confidence value is clamped/dropped
+        rather than raising, since ``confidence`` only ever feeds an
+        informational review flag (extraction/validation.py) and must
+        never itself cause a whole extraction to be rejected.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(1.0, numeric))
 
 
 def empty_extraction_payload() -> dict[str, Any]:

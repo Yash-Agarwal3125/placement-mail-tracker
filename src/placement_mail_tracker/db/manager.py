@@ -12,11 +12,14 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from placement_mail_tracker.db.connection import get_connection
 from placement_mail_tracker.extraction.rule_engine import normalize_company_name
 from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
+
+if TYPE_CHECKING:
+    from placement_mail_tracker.calendar_sync.derive import CalendarEvent
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ OPPORTUNITY_FIELDS = (
     "important_notes",
 )
 
-JSON_FIELDS = {"branches_allowed", "hiring_process", "important_notes"}
+JSON_FIELDS = {"branches_allowed", "hiring_process", "important_notes", "validation_flags"}
 
 VALID_STATUSES = (
     "OPEN",
@@ -195,7 +198,8 @@ class DatabaseManager:
                 applied_date TEXT,
                 priority TEXT NOT NULL DEFAULT 'MEDIUM',
                 degree_level TEXT NOT NULL DEFAULT 'UNKNOWN',
-                dream_category TEXT NOT NULL DEFAULT 'NORMAL'
+                dream_category TEXT NOT NULL DEFAULT 'NORMAL',
+                validation_flags TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -252,6 +256,27 @@ class DatabaseManager:
                 UNIQUE(opportunity_id, alert_type),
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS calendar_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER NOT NULL,
+                drive_id TEXT,
+                event_type TEXT NOT NULL,
+                gcal_calendar_id TEXT,
+                gcal_event_id TEXT,
+                start_iso TEXT NOT NULL,
+                end_iso TEXT NOT NULL,
+                all_day INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                location TEXT,
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_seen_active_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(opportunity_id, event_type),
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+            );
             """
         )
         self._migrate_existing_opportunities_table()
@@ -275,6 +300,10 @@ class DatabaseManager:
                 ON processed_emails(processed_status);
             CREATE INDEX IF NOT EXISTS idx_notifications_opportunity_id
                 ON notifications(opportunity_id);
+            CREATE INDEX IF NOT EXISTS idx_calendar_events_status
+                ON calendar_events(status);
+            CREATE INDEX IF NOT EXISTS idx_calendar_events_opportunity_id
+                ON calendar_events(opportunity_id);
             """
         )
         self.connection.commit()
@@ -501,6 +530,112 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     # Query Methods
     # ------------------------------------------------------------------
+
+    def bulk_update_my_status(self, my_status_by_drive_id: dict[str, str]) -> int:
+        """Write the sheet's user-owned My Status column back into the DB.
+
+        Called by the sheets sync right after it reads the current My Status
+        values back from the sheet (ADR-D8 / Decision 6): the DB becomes the
+        durable copy of user intent instead of a dead column that always
+        reads NOT_APPLIED. Skips no-op writes; returns the changed-row count.
+        """
+        changed = 0
+        for drive_id, my_status in my_status_by_drive_id.items():
+            if not drive_id or not my_status:
+                continue
+            cursor = self.connection.execute(
+                "UPDATE opportunities SET my_status = ? WHERE drive_id = ? AND my_status != ?;",
+                (my_status, drive_id, my_status),
+            )
+            changed += cursor.rowcount
+        if changed:
+            self.connection.commit()
+        return changed
+
+    # ------------------------------------------------------------------
+    # Calendar Sync state (docs/design/04-integration-spec.md §3.3)
+    # ------------------------------------------------------------------
+
+    def upsert_calendar_event_state(
+        self,
+        event: CalendarEvent,
+        *,
+        gcal_calendar_id: str,
+        gcal_event_id: str | None,
+        status: str = "active",
+    ) -> int:
+        """Insert or update the state row for one (opportunity_id, event_type).
+
+        Pattern mirrors ``log_processed_email``'s ON CONFLICT DO UPDATE. Returns
+        the row id; fetched via a follow-up SELECT rather than
+        ``cursor.lastrowid`` because SQLite does not reliably report the
+        rowid of a row touched only by the DO UPDATE branch of an upsert.
+        """
+        now = utc_now_iso()
+        self.connection.execute(
+            """
+            INSERT INTO calendar_events (
+                opportunity_id, drive_id, event_type, gcal_calendar_id, gcal_event_id,
+                start_iso, end_iso, all_day, title, location, content_hash, status,
+                last_seen_active_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(opportunity_id, event_type) DO UPDATE SET
+                drive_id = excluded.drive_id,
+                gcal_calendar_id = excluded.gcal_calendar_id,
+                gcal_event_id = excluded.gcal_event_id,
+                start_iso = excluded.start_iso,
+                end_iso = excluded.end_iso,
+                all_day = excluded.all_day,
+                title = excluded.title,
+                location = excluded.location,
+                content_hash = excluded.content_hash,
+                status = excluded.status,
+                last_seen_active_at = excluded.last_seen_active_at,
+                updated_at = excluded.updated_at;
+            """,
+            (
+                event.opportunity_id,
+                event.drive_id,
+                event.event_type,
+                gcal_calendar_id,
+                gcal_event_id,
+                event.start_iso,
+                event.end_iso,
+                int(event.all_day),
+                event.title,
+                event.location,
+                event.content_hash(),
+                status,
+                now,
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT id FROM calendar_events WHERE opportunity_id = ? AND event_type = ?;",
+            (event.opportunity_id, event.event_type),
+        ).fetchone()
+        return int(row["id"])
+
+    def fetch_calendar_event_states(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        """Return calendar_events rows, optionally filtered by status."""
+        if status is None:
+            rows = self.connection.execute("SELECT * FROM calendar_events;").fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM calendar_events WHERE status = ?;", (status,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_calendar_event_status(self, row_id: int, status: str) -> None:
+        """Update one calendar_events row's status (done/stale/cancelled/active)."""
+        self.connection.execute(
+            "UPDATE calendar_events SET status = ?, updated_at = ? WHERE id = ?;",
+            (status, utc_now_iso(), row_id),
+        )
+        self.connection.commit()
 
     def find_duplicate_opportunity(self, opportunity: dict[str, Any]) -> sqlite3.Row | None:
         """Fetch a drive by the generated hash."""
@@ -860,7 +995,7 @@ class DatabaseManager:
                 email_received_at, drive_id, source_thread_id,
                 action_required, email_classification, my_status,
                 next_event_date, eligibility_status, applied_date, priority,
-                degree_level, dream_category
+                degree_level, dream_category, validation_flags
             )
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
@@ -872,7 +1007,8 @@ class DatabaseManager:
                 :email_received_at, :drive_id, :source_thread_id,
                 :action_required, :email_classification, :my_status,
                 :next_event_date, :eligibility_status, :applied_date, :priority,
-                COALESCE(:degree_level, 'UNKNOWN'), COALESCE(:dream_category, 'NORMAL')
+                COALESCE(:degree_level, 'UNKNOWN'), COALESCE(:dream_category, 'NORMAL'),
+                :validation_flags
             );
             """,
             values,
@@ -921,9 +1057,9 @@ class DatabaseManager:
                 eligibility = :eligibility,
                 cgpa_requirement = :cgpa_requirement,
                 branches_allowed = :branches_allowed,
-                deadline = :deadline,
-                interview_date = :interview_date,
-                oa_date = :oa_date,
+                deadline = COALESCE(:deadline, deadline),
+                interview_date = COALESCE(:interview_date, interview_date),
+                oa_date = COALESCE(:oa_date, oa_date),
                 registration_link = :registration_link,
                 work_location = :work_location,
                 hiring_process = :hiring_process,
@@ -942,7 +1078,8 @@ class DatabaseManager:
                 applied_date = COALESCE(:applied_date, applied_date),
                 priority = COALESCE(:priority, priority),
                 degree_level = COALESCE(:degree_level, degree_level),
-                dream_category = COALESCE(:dream_category, dream_category)
+                dream_category = COALESCE(:dream_category, dream_category),
+                validation_flags = :validation_flags
             WHERE id = :id;
             """,
             values,
@@ -972,6 +1109,7 @@ class DatabaseManager:
             "priority": "TEXT NOT NULL DEFAULT 'MEDIUM'",
             "degree_level": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
             "dream_category": "TEXT NOT NULL DEFAULT 'NORMAL'",
+            "validation_flags": "TEXT NOT NULL DEFAULT '[]'",
         }
 
         for col_name, col_def in new_columns.items():
@@ -1047,6 +1185,7 @@ class DatabaseManager:
             "email_received_at", "action_required", "email_classification",
             "my_status", "next_event_date", "eligibility_status",
             "applied_date", "priority", "degree_level", "dream_category",
+            "validation_flags",
         ):
             if fld in {"company_name", "role"}:
                 continue
@@ -1217,6 +1356,14 @@ def _normalize_scalar(value: Any) -> str | None:
 def _normalize_list(value: Any) -> list[str]:
     if value is None:
         return []
+    if isinstance(value, str) and value.strip().startswith("["):
+        # Already-JSON-serialized input (e.g. update_opportunity re-normalizing
+        # a dict insert_or_update_opportunity already normalized) — parse it
+        # back into a list instead of comma-splitting the JSON syntax itself.
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     normalized = str(value).strip()

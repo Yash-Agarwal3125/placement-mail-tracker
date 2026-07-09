@@ -42,6 +42,7 @@ class RunReport:
     gmail_ok: bool = True
     sheets_ok: bool = True
     notifications_ok: bool = True
+    calendar_ok: bool = True
     critical_failure: bool = False
     warnings: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -93,6 +94,7 @@ class RunReport:
                 self.gmail_ok,
                 self.sheets_ok,
                 self.notifications_ok,
+                self.calendar_ok,
             ]
         ):
             return RunStatus.PARTIAL_SUCCESS
@@ -138,6 +140,7 @@ class RunReport:
             f"Gmail OK: {self.gmail_ok}",
             f"Sheets OK: {self.sheets_ok}",
             f"Notifications OK: {self.notifications_ok}",
+            f"Calendar OK: {self.calendar_ok}",
         ]
 
         if self.failures:

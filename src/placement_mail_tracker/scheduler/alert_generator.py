@@ -70,7 +70,13 @@ class AlertGenerator:
             alert_type = "DEADLINE_4H"
         elif hours_left <= 24:
             alert_type = "DEADLINE_24H"
-            
+
+        # Date-suffix the key so a reschedule (deadline moves to a new date)
+        # re-arms the alert instead of staying permanently burned against the
+        # UNIQUE(opportunity_id, alert_type) constraint (ADR-D8 / B3).
+        if alert_type:
+            alert_type = f"{alert_type}:{deadline_dt.date().isoformat()}"
+
         if alert_type and self._should_send_alert(opp["id"], alert_type):
             logger.info("Sending %s alert for %s", alert_type, opp["company_name"])
             self._send_alert_email(
@@ -104,7 +110,13 @@ class AlertGenerator:
             alert_type = "EVENT_24H"
         elif hours_left <= 48:
             alert_type = "EVENT_48H"
-            
+
+        # Date-suffix the key so a reschedule (event moves to a new date)
+        # re-arms the alert instead of staying permanently burned against the
+        # UNIQUE(opportunity_id, alert_type) constraint (ADR-D8 / B3).
+        if alert_type:
+            alert_type = f"{alert_type}:{event_dt.date().isoformat()}"
+
         if alert_type and self._should_send_alert(opp["id"], alert_type):
             logger.info("Sending %s alert for %s", alert_type, opp["company_name"])
             self._send_alert_email(

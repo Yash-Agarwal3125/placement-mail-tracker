@@ -20,6 +20,20 @@ def test_heartbeat_updates_after_success(tmp_path) -> None:
     assert data["drives_updated"] == 5
 
 
+def test_heartbeat_updates_after_partial_success(tmp_path) -> None:
+    """ADR-D8 / B5: a single warning (PARTIAL_SUCCESS) still means the
+    pipeline ran — starving the heartbeat here caused misleading 'Tracker
+    inactive' alerts during a chronic but harmless warning streak."""
+    heartbeat = HeartbeatManager(tmp_path / "heartbeat.json")
+    report = RunReport(environment="testing")
+    report.mark_component("gmail", False, "transient API hiccup", critical=False)
+
+    heartbeat.update_success(report)
+
+    data = heartbeat.read()
+    assert data["status"] == "partial_success"
+
+
 def test_inactivity_detection_warns_after_threshold(tmp_path) -> None:
     heartbeat = HeartbeatManager(tmp_path / "heartbeat.json")
     previous = datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc)

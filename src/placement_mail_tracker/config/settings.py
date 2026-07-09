@@ -41,7 +41,14 @@ class Settings(BaseSettings):
         ],
         alias="GEMINI_FALLBACK_MODELS",
     )
-    gemini_max_retries: int = Field(default=3, alias="GEMINI_MAX_RETRIES")
+    # Quota-aware retry budget: at most gemini_max_models_to_try distinct
+    # models (primary + fallbacks, in order), each retried gemini_max_retries
+    # time(s). Default 2 models x 1 retry = 2 live calls/email ceiling, down
+    # from the previous 6 models x 3 retries = 18 calls/email ceiling, which
+    # could burn a full day's free-tier quota (20 requests/day/model) on a
+    # single stubborn email.
+    gemini_max_retries: int = Field(default=1, alias="GEMINI_MAX_RETRIES")
+    gemini_max_models_to_try: int = Field(default=2, alias="GEMINI_MAX_MODELS_TO_TRY")
     gemini_retry_delay_seconds: float = Field(default=2.0, alias="GEMINI_RETRY_DELAY_SECONDS")
 
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
@@ -52,6 +59,30 @@ class Settings(BaseSettings):
     google_sheets_token_file: str = Field(
         default="config/sheets_token.json",
         alias="GOOGLE_SHEETS_TOKEN_FILE",
+    )
+
+    # Calendar sync (ADR docs/design/03-adr-calendar-sync.md, D4/D6): a third,
+    # Calendar-scope-only OAuth stack. Credentials file is intentionally NOT a
+    # new setting — it reuses gmail_credentials_file/google_sheets_credentials_file
+    # (same client secret, config/credentials.json by default).
+    calendar_sync_enabled: bool = Field(default=False, alias="CALENDAR_SYNC_ENABLED")
+    calendar_sync_mode: str = Field(default="applied_only", alias="CALENDAR_SYNC_MODE")
+    calendar_name: str = Field(default="VIT Placements", alias="CALENDAR_NAME")
+    calendar_token_file: str = Field(
+        default="config/calendar_token.json",
+        alias="CALENDAR_TOKEN_FILE",
+    )
+    calendar_timezone: str = Field(default="Asia/Kolkata", alias="CALENDAR_TIMEZONE")
+    calendar_deadline_reminder_minutes: list[int] = Field(
+        default_factory=lambda: [1440],
+        alias="CALENDAR_DEADLINE_REMINDER_MINUTES",
+    )
+    calendar_event_reminder_minutes: list[int] = Field(
+        default_factory=lambda: [1440, 60],
+        alias="CALENDAR_EVENT_REMINDER_MINUTES",
+    )
+    calendar_stale_after_hours: float = Field(
+        default=48.0, alias="CALENDAR_STALE_AFTER_HOURS"
     )
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")

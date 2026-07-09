@@ -80,12 +80,16 @@ def test_smtp_resilience_retries(mock_sleep, mock_smtp, mock_settings):
 @patch("placement_mail_tracker.ai.gemini_extractor.GeminiPlacementExtractor._generate_content")
 def test_gemini_network_resilience(mock_generate, mock_sleep, mock_settings):
     extractor = GeminiPlacementExtractor(mock_settings)
-    
-    # ConnectionError twice, then success
+
+    # Quota-aware cap: default max_retries=1 means a transient error is not
+    # retried on the same model — it falls through to the (at most 2nd)
+    # fallback model immediately. A network error on the primary followed by
+    # success on the first fallback exercises that path within the 2-live-call
+    # ceiling (previously this test relied on 3 same-model retries, which the
+    # quota-fix intentionally eliminates).
     mock_generate.side_effect = [
         ConnectionError("WinError 10053"),
-        TimeoutError("Timeout"),
-        MagicMock(text='{"company_name": "Google", "role_title": "SDE"}'),
+        MagicMock(parsed=None, text='{"company_name": "Google", "role_title": "SDE"}'),
     ]
 
     # We need to patch _response_text and parse_json_response to not fail
@@ -102,12 +106,9 @@ def test_gemini_network_resilience(mock_generate, mock_sleep, mock_settings):
 
         extractor.extract_from_text("Test content")
 
-        assert mock_generate.call_count == 3
-        assert mock_sleep.call_count == 2
-        # Exact sleep values are not pinned — exponential backoff with jitter;
-        # just verify two positive-delay sleeps occurred.
-        for call in mock_sleep.call_args_list:
-            assert call.args[0] > 0
+        assert mock_generate.call_count == 2
+        # max_retries=1 means no same-model retry, so no backoff sleep at all.
+        mock_sleep.assert_not_called()
 
 
 # 5. Sheets Retries

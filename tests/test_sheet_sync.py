@@ -1,7 +1,7 @@
 """Google Sheets row-builder tests for the redesigned 5-tab layout.
 
 Covers:
-- ``opportunity_to_sheet_row`` (ALL DRIVES, 11 columns)
+- ``opportunity_to_sheet_row`` (ALL DRIVES, 12 columns)
 - ``action_required_row`` (ACTION REQUIRED, 7 columns)
 - ``upcoming_event_row`` (UPCOMING EVENTS, 4 columns)
 - ``company_to_sheet_row``
@@ -65,9 +65,9 @@ def _sample_opp(**overrides) -> dict:
 
 
 class TestAllDrivesRow:
-    def test_column_count_is_11(self):
+    def test_column_count_is_12(self):
         row = opportunity_to_sheet_row(_sample_opp())
-        assert len(row) == 11
+        assert len(row) == 12
         assert len(row) == len(ALL_DRIVES_HEADERS)
 
     def test_company_and_role(self):
@@ -108,6 +108,22 @@ class TestAllDrivesRow:
         row = opportunity_to_sheet_row(_sample_opp())
         cell = row[COL["Received Date"]]
         assert "2027" in cell
+
+    def test_review_flags_empty_by_default(self):
+        row = opportunity_to_sheet_row(_sample_opp())
+        assert row[COL["Review Flags"]] == ""
+
+    def test_review_flags_joins_list(self):
+        row = opportunity_to_sheet_row(
+            _sample_opp(validation_flags=["low-confidence extraction (0.30)", "cgpa out of range"])
+        )
+        cell = row[COL["Review Flags"]]
+        assert "low-confidence extraction (0.30)" in cell
+        assert "cgpa out of range" in cell
+
+    def test_review_flags_is_last_before_drive_id(self):
+        assert ALL_DRIVES_HEADERS[-2] == "Review Flags"
+        assert ALL_DRIVES_HEADERS[-1] == "Drive ID"
 
 
 class TestActionRequiredRow:
@@ -173,7 +189,7 @@ class TestCompanyToSheetRow:
 
 class TestHeaders:
     def test_all_drives_header_count(self):
-        assert len(ALL_DRIVES_HEADERS) == 11
+        assert len(ALL_DRIVES_HEADERS) == 12
 
     def test_active_opp_headers_alias(self):
         assert ACTIVE_OPP_HEADERS is ALL_DRIVES_HEADERS

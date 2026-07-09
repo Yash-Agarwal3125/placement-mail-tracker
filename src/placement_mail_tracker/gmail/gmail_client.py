@@ -6,12 +6,14 @@ import base64
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass
+import sys
+from dataclasses import asdict, dataclass, field
 from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 from typing import Any
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -19,6 +21,7 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.config.settings import Settings
+from placement_mail_tracker.reliability.auth_alerts import alert_oauth_dead_once, clear_oauth_alert
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -44,6 +47,7 @@ class GmailEmail:
     timestamp: str
     body_text: str
     snippet: str
+    attachments: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _strip_html(html_text: str) -> str:
@@ -68,6 +72,24 @@ def decode_base64url(data: str | None) -> str:
         return ""
 
     return decoded.decode("utf-8", errors="replace")
+
+
+def decode_base64url_bytes(data: str | None) -> bytes:
+    """Decode Gmail's URL-safe base64 data to raw bytes, binary-safe.
+
+    Unlike ``decode_base64url`` (which assumes text and decodes to ``str``
+    via UTF-8), attachment payloads (PDF/xlsx/image bytes) are binary and
+    must never be run through text decoding or they will be corrupted.
+    """
+    if not data:
+        return b""
+
+    padding = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(f"{data}{padding}")
+    except (ValueError, TypeError) as error:
+        logger.warning("Unable to decode Gmail attachment data: %s", error)
+        return b""
 
 
 def get_header(headers: list[dict[str, str]], name: str, default: str = "") -> str:
@@ -124,6 +146,38 @@ def extract_body_text(payload: dict[str, Any]) -> str:
     return "\n".join(part.strip() for part in html_parts if part.strip())
 
 
+def extract_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect real attachment inventory (not inline text/html) from a payload.
+
+    Any part with a ``body.attachmentId`` is a fetchable attachment whose
+    bytes live outside the message payload (Gmail returns them separately);
+    ``extract_body_text`` never sees or decodes them. This only records
+    lightweight metadata — filename, MIME type, and the ID needed to fetch
+    the bytes later via ``GmailClient.fetch_attachment_bytes`` — so building
+    this inventory costs nothing extra; the bytes are fetched lazily, only
+    for the mails where Gemini ends up being called.
+    """
+    attachments: list[dict[str, Any]] = []
+
+    def walk(part: dict[str, Any]) -> None:
+        body = part.get("body", {})
+        attachment_id = body.get("attachmentId")
+        if attachment_id:
+            attachments.append(
+                {
+                    "filename": part.get("filename", ""),
+                    "mimeType": part.get("mimeType", ""),
+                    "attachmentId": attachment_id,
+                    "size": body.get("size", 0),
+                }
+            )
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload)
+    return attachments
+
+
 def parse_gmail_message(message: dict[str, Any]) -> GmailEmail:
     """Convert a raw Gmail API message into a small application model."""
     payload = message.get("payload", {})
@@ -137,6 +191,7 @@ def parse_gmail_message(message: dict[str, Any]) -> GmailEmail:
         timestamp=normalize_gmail_timestamp(get_header(headers, "Date")),
         body_text=extract_body_text(payload),
         snippet=message.get("snippet", ""),
+        attachments=extract_attachment_parts(payload),
     )
 
 
@@ -157,12 +212,19 @@ class GmailClient:
 
         if credentials and credentials.valid:
             logger.debug("Using existing Gmail OAuth token")
+            clear_oauth_alert("Gmail")
             return credentials
 
         if credentials and credentials.expired and credentials.refresh_token:
             logger.info("Refreshing expired Gmail OAuth token")
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except RefreshError as error:
+                msg = f"OAuth dead — re-consent needed for Gmail: {error}"
+                alert_oauth_dead_once("Gmail", msg, self.settings)
+                raise GmailAuthenticationError(msg) from error
             self._save_token(credentials)
+            clear_oauth_alert("Gmail")
             return credentials
 
         if not self.credentials_path.exists():
@@ -172,6 +234,17 @@ class GmailClient:
             )
             raise GmailAuthenticationError(msg)
 
+        if not sys.stdin.isatty():
+            # A scheduled run has no interactive terminal to complete a fresh
+            # consent flow — run_local_server would otherwise hang up to 120s
+            # and fail anyway. Fail fast with a clear alert instead.
+            msg = (
+                "OAuth dead — re-consent needed for Gmail: no valid/refreshable "
+                "token and this run is not interactive"
+            )
+            alert_oauth_dead_once("Gmail", msg, self.settings)
+            raise GmailAuthenticationError(msg)
+
         logger.info("Starting Gmail OAuth flow")
         flow = InstalledAppFlow.from_client_secrets_file(
             str(self.credentials_path),
@@ -179,6 +252,7 @@ class GmailClient:
         )
         credentials = flow.run_local_server(port=0, timeout_seconds=120)
         self._save_token(credentials)
+        clear_oauth_alert("Gmail")
         return credentials
 
     def fetch_emails_since(
@@ -248,6 +322,24 @@ class GmailClient:
     def fetch_message(self, message_id: str) -> dict[str, Any]:
         """Fetch a specific message by ID."""
         return asdict(self._fetch_message(message_id))
+
+    def fetch_attachment_bytes(self, message_id: str, attachment_id: str) -> bytes:
+        """Fetch and decode a single attachment's raw bytes.
+
+        Attachment bytes are not part of the message payload returned by
+        ``messages().get`` — they must be fetched separately per attachment
+        ID. Used lazily (only when Gemini is about to run on a mail that has
+        attachments), so this never runs for the common no-attachment case.
+        """
+        service = self._get_service()
+        result = (
+            service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=message_id, id=attachment_id)
+            .execute()
+        )
+        return decode_base64url_bytes(result.get("data"))
 
     def _fetch_message(self, message_id: str) -> GmailEmail:
         service = self._get_service()

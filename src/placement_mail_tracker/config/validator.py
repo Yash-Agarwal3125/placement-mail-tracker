@@ -198,6 +198,20 @@ class ConfigValidator:
             component="notifications",
         )
 
+        if self.settings.calendar_sync_enabled:
+            self.validate_file(
+                self.settings.gmail_credentials_file,
+                "Calendar OAuth credentials.json",
+                is_critical=strict,
+                component="calendar",
+            )
+            self.validate_file(
+                self.settings.calendar_token_file,
+                "Calendar OAuth token.json (first run will require interactive consent)",
+                is_critical=False,
+                component="calendar",
+            )
+
         self.validate_directory("data", "Data directory", is_critical=True, component="database")
         self.validate_directory("logs", "Logs directory", is_critical=True)
 

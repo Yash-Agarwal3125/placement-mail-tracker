@@ -149,3 +149,40 @@ def test_development_validation_warns_for_missing_oauth_files(tmp_path: Path):
 
     assert validator.is_healthy() is True
     assert any(result.component == "gmail" for result in validator.warnings())
+
+
+def test_calendar_check_skipped_when_sync_disabled(tmp_path: Path):
+    settings = Settings(
+        DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
+        CALENDAR_SYNC_ENABLED=False,
+    )
+    validator = ConfigValidator(settings)
+
+    validator.run_all_checks()
+
+    assert not any(result.component == "calendar" for result in validator.results)
+
+
+def test_calendar_token_missing_is_warning_not_error(tmp_path: Path):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.touch()
+    settings = Settings(
+        APP_ENV="production",
+        GEMINI_API_KEY="fake_key",
+        GOOGLE_SHEET_ID="fake_sheet",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
+        GMAIL_CREDENTIALS_FILE=str(creds_file),
+        GMAIL_TOKEN_FILE=str(tmp_path / "gmail_token.json"),
+        GOOGLE_SHEETS_CREDENTIALS_FILE=str(creds_file),
+        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "sheets_token.json"),
+        CALENDAR_SYNC_ENABLED=True,
+        CALENDAR_TOKEN_FILE=str(tmp_path / "missing_calendar_token.json"),
+    )
+    settings.gmail_credentials_file = str(creds_file)
+    validator = ConfigValidator(settings)
+
+    validator.run_all_checks()
+
+    calendar_results = [r for r in validator.results if r.component == "calendar"]
+    assert any(r.status == "WARNING" for r in calendar_results)
+    assert not any(r.status == "ERROR" for r in calendar_results)

@@ -9,6 +9,7 @@ from placement_mail_tracker.utils.time import (
     _MIN_YEAR,
     human_relative_time,
     parse_datetime_flexible,
+    parse_datetime_strict,
 )
 
 
@@ -87,6 +88,80 @@ class TestNormalBehaviourPreserved:
         result = parse_datetime_flexible("2026-06-15T10:00:00+05:30")
         assert result is not None
         assert result.tzinfo is None
+
+
+class TestStrictDateParsing:
+    """parse_datetime_strict: a new, additional parser (fuzzy=False-equivalent,
+    explicit format whitelist) used only by the post-extraction validation
+    layer (extraction/validation.py) — never a replacement for
+    parse_datetime_flexible, which every other consumer keeps using unchanged.
+    """
+
+    def test_iso_date_is_accepted(self):
+        result = parse_datetime_strict("2026-07-04")
+        assert result is not None
+        assert (result.year, result.month, result.day) == (2026, 7, 4)
+
+    def test_iso_datetime_with_minutes_is_accepted(self):
+        result = parse_datetime_strict("2026-07-01T15:00")
+        assert result is not None
+        assert (result.hour, result.minute) == (15, 0)
+
+    def test_full_month_name_is_accepted(self):
+        result = parse_datetime_strict("17 June 2026")
+        assert result is not None
+        assert (result.year, result.month, result.day) == (2026, 6, 17)
+
+    def test_abbreviated_month_with_time_is_accepted(self):
+        result = parse_datetime_strict("15-Jun-2026 05:30 PM")
+        assert result is not None
+        assert (result.month, result.day, result.hour) == (6, 15, 17)
+
+    def test_slash_date_is_read_as_day_month_year(self):
+        # "04/07/2026" must mean 4 July 2026, not 7 April (the Indian
+        # placement-cell DMY convention the Gemini prompt now states explicitly).
+        result = parse_datetime_strict("04/07/2026")
+        assert result is not None
+        assert (result.month, result.day) == (7, 4)
+
+    def test_dash_slash_date_is_read_as_day_month_year(self):
+        result = parse_datetime_strict("1-07-2026")
+        assert result is not None
+        assert (result.month, result.day) == (7, 1)
+
+    def test_fuzzy_only_garbage_is_rejected(self):
+        # parse_datetime_flexible's fuzzy mode resolves this to a real-looking
+        # date (it extracts "2026" and "June" and fills in today's day) even
+        # though the string states no actual date. The strict whitelist
+        # requires the *entire* string to match a known format, so it rejects it.
+        garbage = "Contact HR at extension 2026 in June"
+        assert parse_datetime_flexible(garbage) is not None
+        assert parse_datetime_strict(garbage) is None
+
+    def test_free_text_with_numbers_is_rejected(self):
+        assert parse_datetime_strict("Round 3 at 5 in Lab 2") is None
+
+    def test_bare_year_is_rejected(self):
+        assert parse_datetime_strict("2026") is None
+
+    def test_year_before_min_is_rejected(self):
+        assert parse_datetime_strict("1999-06-15") is None
+
+    def test_year_far_in_future_is_rejected(self):
+        far_year = datetime.now().year + _MAX_YEAR_DELTA + 1
+        assert parse_datetime_strict(f"{far_year}-06-15") is None
+
+    def test_year_at_max_boundary_is_accepted(self):
+        max_year = datetime.now().year + _MAX_YEAR_DELTA
+        result = parse_datetime_strict(f"{max_year}-06-15")
+        assert result is not None
+        assert result.year == max_year
+
+    def test_none_input_returns_none(self):
+        assert parse_datetime_strict(None) is None  # type: ignore[arg-type]
+
+    def test_empty_string_returns_none(self):
+        assert parse_datetime_strict("") is None
 
 
 class TestHumanRelativeTime:
