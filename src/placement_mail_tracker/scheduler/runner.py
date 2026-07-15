@@ -10,6 +10,7 @@ import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,11 @@ from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
+from placement_mail_tracker.extraction.confirmation import (
+    detect_confirmation_tier,
+    extract_reference_id,
+    find_confident_drive_match,
+)
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
 from placement_mail_tracker.extraction.rule_engine import (
     classify_email,
@@ -34,6 +40,9 @@ from placement_mail_tracker.extraction.validation import validate_opportunity_da
 from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
+from placement_mail_tracker.scheduler.confirmation_corpus import capture_confirmation_fixture
+from placement_mail_tracker.scheduler.confirmation_digest_store import append_confirmation_lines
+from placement_mail_tracker.scheduler.unattributed_mail_store import append_unattributed_mail
 from placement_mail_tracker.sheets.client import SheetsClient
 from placement_mail_tracker.utils.deduplication import find_best_match
 from placement_mail_tracker.utils.scoring import compute_priority
@@ -79,6 +88,12 @@ _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", 
 # Placeholder company values that mean "extraction failed", not a real drive.
 _UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
 
+# F3: the tracker's own alert/digest mail and GitHub CI notifications land
+# back in the monitored inbox and pass the relevance filter, burning scarce
+# Gemini quota on mail that will never contain a placement to extract.
+_SELF_MAIL_SENDERS = frozenset({"notifications@github.com"})
+_SELF_MAIL_SUBJECT_PREFIXES = ("Placement Mail Tracker", "PLACEMENT SUMMARY")
+
 # Extraction failures are retried at most this many times total (FS INV-26 / BR-16).
 # On the RETRY_MAX-th failure the email moves to PERMANENT_FAILURE (dead-letter).
 _RETRY_MAX = 3
@@ -111,6 +126,48 @@ def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
 def _is_identifiable_company(name: str | None) -> bool:
     """Return True when ``name`` is a real company (not blank/Unknown)."""
     return bool(name) and name.strip().casefold() not in _UNIDENTIFIED_COMPANIES
+
+
+def _is_self_generated_mail(subject: str, sender: str, settings: Settings) -> bool:
+    """F3: short-circuit the tracker's own output and CI mail before extraction.
+
+    The monitored inbox receives the tracker's own alert/digest emails (sent
+    to itself via ``settings.smtp_email``) and GitHub Actions failure
+    notifications, both of which the relevance filter happily scores as
+    RELEVANT — see docs/design/09-manager-review.md F3.
+    """
+    _, sender_address = parseaddr(sender)
+    sender_address = sender_address.lower().strip()
+
+    if settings.smtp_email and sender_address == settings.smtp_email.strip().lower():
+        return True
+    if sender_address in _SELF_MAIL_SENDERS:
+        return True
+    return subject.strip().startswith(_SELF_MAIL_SUBJECT_PREFIXES)
+
+
+def _rescue_company_from_subject(
+    subject: str, active_opportunities: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """F1: deterministic rescue for the "no identifiable company" gate.
+
+    CDC announces a new drive event in its own thread rather than replying
+    in-thread, so ``known_thread_followup`` is False and identity depends
+    entirely on extraction naming the company — but the company name is
+    routinely the first word of the subject (see docs/design/09 F1's Resmed/
+    Varroc/Valuelabs examples). Match each active drive's company name
+    against the subject as a whole word before giving up on the mail.
+    """
+    if not subject:
+        return None
+    for opp in active_opportunities:
+        name = opp.get("company_name")
+        if not name or not _is_identifiable_company(name):
+            continue
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(str(name))}(?![A-Za-z0-9])"
+        if re.search(pattern, subject, re.IGNORECASE):
+            return opp
+    return None
 
 
 def canonicalize_status(status: str | None) -> str | None:
@@ -390,7 +447,7 @@ class PlacementTrackerRunner:
             SELECT id
             FROM processed_emails
             WHERE gmail_message_id = ?
-              AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE')
+              AND processed_status IN ('processed', 'skipped', 'PERMANENT_FAILURE', 'SELF_NOISE')
             LIMIT 1;
             """,
             (msg_id,),
@@ -406,8 +463,29 @@ class PlacementTrackerRunner:
         timestamp = msg.get("timestamp") or msg.get("received_at")
         thread_id = msg.get("thread_id")
 
-        classification = classify_email(subject, body)
+        if _is_self_generated_mail(subject, sender, self.settings):
+            logger.info(
+                "Email %s is self-generated tracker/CI noise; skipping extraction", msg_id
+            )
+            database.log_processed_email(
+                gmail_message_id=msg_id,
+                subject=subject,
+                sender=sender,
+                received_at=timestamp,
+                processed_status="SELF_NOISE",
+            )
+            stats["skipped"] += 1
+            return
+
+        classification = classify_email(subject, body, sender)
         logger.info("Evaluating email: Subject=%r Classification=%s", subject, classification)
+
+        if classification == "APPLICATION_CONFIRMATION":
+            self._handle_confirmation_mail(
+                msg_id, subject, sender, body, timestamp, database, stats
+            )
+            return
+
         decision = is_placement_mail(subject=subject, sender=sender, body=body)
 
         if not decision.is_placement:
@@ -526,21 +604,38 @@ class PlacementTrackerRunner:
             if not known_thread_followup and not _is_identifiable_company(
                 opp_data.get("company_name")
             ):
-                logger.info(
-                    "Email %s has no identifiable company; not creating a drive", msg_id
+                rescue_match = _rescue_company_from_subject(
+                    subject, database.get_active_opportunities()
                 )
-                database.log_processed_email(
-                    gmail_message_id=msg_id,
-                    subject=subject,
-                    sender=sender,
-                    received_at=timestamp,
-                    filter_score=decision.score,
-                    filter_decision=asdict(decision),
-                    processed_status="skipped",
-                    email_classification=classification,
-                )
-                stats["skipped"] += 1
-                return
+                if rescue_match is not None:
+                    logger.info(
+                        "Email %s attributed to active drive %r via subject rescue (F1)",
+                        msg_id,
+                        rescue_match["company_name"],
+                    )
+                    opp_data["company_name"] = rescue_match["company_name"]
+                    if not opp_data.get("role"):
+                        opp_data["role"] = rescue_match.get("role")
+                else:
+                    if any(
+                        opp_data.get(f) for f in ("deadline", "oa_date", "interview_date")
+                    ):
+                        append_unattributed_mail([f"unattributed mail: {subject}"])
+                    logger.info(
+                        "Email %s has no identifiable company; not creating a drive", msg_id
+                    )
+                    database.log_processed_email(
+                        gmail_message_id=msg_id,
+                        subject=subject,
+                        sender=sender,
+                        received_at=timestamp,
+                        filter_score=decision.score,
+                        filter_decision=asdict(decision),
+                        processed_status="skipped",
+                        email_classification=classification,
+                    )
+                    stats["skipped"] += 1
+                    return
 
             if not opp_data.get("current_status") or opp_data["current_status"] == "OPEN":
                 detected_status = detect_status_from_text(subject, body)
@@ -718,6 +813,87 @@ class PlacementTrackerRunner:
                 last_retry_at=utc_now_iso(),
             )
             stats["errors"] += 1
+
+    def _handle_confirmation_mail(
+        self,
+        msg_id: str,
+        subject: str,
+        sender: str,
+        body: str,
+        timestamp: str | None,
+        database: DatabaseManager,
+        stats: dict[str, int],
+    ) -> None:
+        """Feature 1 (docs/design/10-confirmation-and-reminders.md): CDC
+        application-confirmation mails bypass the normal extraction/insert
+        pipeline entirely (D3 — this feature writes my_status ONLY; it must
+        never create a drive, touch current_status, or run through Gemini).
+        """
+        tier, pattern_family = detect_confirmation_tier(subject, body)
+        reference_id = extract_reference_id(subject, body)
+        active_opportunities = database.get_active_opportunities()
+        match, candidates = find_confident_drive_match(
+            subject, body, active_opportunities, reference_id=reference_id
+        )
+
+        logger.info(
+            "Confirmation mail %s: tier=%s family=%s match=%s",
+            msg_id, tier, pattern_family,
+            match.opportunity.get("company_name") if match else None,
+        )
+
+        capture_confirmation_fixture(
+            message_id=msg_id, subject=subject, sender=sender, body=body,
+            received_at=timestamp, tier=tier, pattern_family=pattern_family,
+        )
+
+        digest_lines: list[str] = []
+        opportunity_id = None
+
+        if match is None:
+            database.insert_unmatched_confirmation(
+                gmail_message_id=msg_id, extracted_text=subject, candidates=candidates,
+            )
+            digest_lines.append(
+                f"confirmation received for '{subject}' — no confident drive match, "
+                "review needed."
+            )
+        else:
+            opportunity_id = match.opportunity.get("id")
+            company = match.opportunity.get("company_name")
+            drive_id = match.opportunity.get("drive_id")
+
+            if tier == "UNKNOWN":
+                # Escape valve (feature_1_spec): sender-confirmed, but no
+                # named pattern family matched — never writes status, even
+                # in enforce mode.
+                digest_lines.append(
+                    f"confirmation received for {company} (unrecognized phrasing) — "
+                    "would review manually."
+                )
+            elif self.settings.confirmation_mode == "enforce":
+                changed = database.set_my_status(drive_id, "APPLIED", source="automation")
+                if changed:
+                    digest_lines.append(f"marked {company} APPLIED (confirmation mail).")
+                else:
+                    digest_lines.append(
+                        f"{company} confirmation received — already APPLIED or beyond, no-op."
+                    )
+            else:
+                digest_lines.append(f"would have marked {company} APPLIED (observe mode).")
+
+        append_confirmation_lines(digest_lines)
+
+        database.log_processed_email(
+            gmail_message_id=msg_id,
+            subject=subject,
+            sender=sender,
+            received_at=timestamp,
+            opportunity_id=opportunity_id,
+            processed_status="processed",
+            email_classification="APPLICATION_CONFIRMATION",
+        )
+        stats["processed"] += 1
 
     def _prepare_attachments(
         self, gmail_client: GmailClient | None, msg: dict[str, Any]

@@ -63,7 +63,7 @@ stage per replay.
 | — | The Phase-6 cost guard (`known_thread_followup`) blanket-skipped Gemini for *any* known-thread follow-up, including OA_UPDATE/INTERVIEW_UPDATE | `scheduler/runner.py:426-443` | **User-approved tradeoff** (increases Gemini calls specifically for these two classifications on already-tracked threads). The existing cost-guard test (`test_known_thread_followup_skips_gemini`) was updated to a non-date classification rather than silently broken; a new test proves the OA/INTERVIEW carve-out fires. |
 | Quota | Retry chain: 3 attempts × 6 models = up to 18 live calls/email | `ai/gemini_extractor.py` (`extract_from_text`), `config/settings.py:44-51` | Capped to `gemini_max_models_to_try` (2) × `gemini_max_retries` (1) = 2 calls/email ceiling. |
 | Quota | ~11% JSON-parse failure rate on live responses (doubled braces, truncation) | `ai/gemini_extractor.py` (`_generate_content`, `_extract_result_from_response`) | Migrated to `response_schema=PlacementExtraction` (structured output) with the manual JSON-repair path kept as a fallback. Not eval-visible yet — see "Known gaps" below. |
-| Quota | Quota-exhausted mails silently degraded to rule-only and got marked "processed" (data lost until the mail ages out of Gmail's default retention) | `ai/gemini_extractor.py` (`GeminiQuotaExhaustedError`), `scheduler/runner.py` (`PENDING_EXTRACTION` deferral) | New typed error propagates instead of falling back; the mail is marked `PENDING_EXTRACTION` (an existing, already-wired retry-queue status — not invented this session) and retried on a later run instead of lost. Deliberately does **not** count toward `_RETRY_MAX`/dead-letter (quota resets on its own schedule, isn't a defect in the email). |
+| Quota | Quota-exhausted mails silently degraded to rule-only and got marked "processed" (data lost until the mail ages out of Gmail's default retention) | `ai/gemini_extractor.py` (`GeminiQuotaExhaustedError`), `scheduler/runner.py` (`PENDING_EXTRACTION` deferral) | New typed error propagates instead of falling back; the mail is marked `PENDING_EXTRACTION` (an existing, already-wired retry-queue status — not invented this session) and retried on a later run instead of lost. Deliberately does **not** count toward `_RETRY_MAX`/dead-letter (quota resets on its own schedule, isn't a defect in the email). **Follow-up (2026-07-15): this data-loss fix alone left quota death invisible to the user** — `PENDING_EXTRACTION` was a DB-only signal with nothing reading it back out. Closed by `db/manager.py::get_quota_deferred_count()` (isolates quota-caused deferrals from a generic transient-error retry sharing the same status, via the error-message text) surfaced as a `SYSTEM HEALTH` digest line ("Gemini daily quota exhausted — N email(s) deferred..."), `scheduler/digest_generator.py`. Tests: `tests/test_evolution_improvements.py::test_get_quota_deferred_count_only_counts_quota_causes`, `tests/test_morning_of_event_digest.py` (3 new digest-line tests). |
 | Input | No mail Date header reached the extraction prompt, so relative dates ("this Friday") had no anchor | `ai/gemini_extractor.py` (`clean_email_content` gains a `Received:` line + a prompt rule) | Checked before spending anything: **zero** genuine placement mails in this corpus use relative dates (all state absolute dates) — the fix is real and tested, but this specific corpus can't demonstrate its value. |
 | Input | Attachments (PDF/xlsx/images) were never fetched — `extract_body_text` only walks text/plain and text/html MIME parts | `gmail/gmail_client.py` (`extract_attachment_parts`, `fetch_attachment_bytes`), new `ai/attachments.py` | `.xlsx` parsed with **stdlib only** (`zipfile` + `ElementTree` over the OOXML shared-strings/sheet XML) — no dependency added. `.pdf` needs a dependency (`pypdf>=6.6.2`, added to `requirements.txt`) since stdlib has no PDF text support. Images routed to Gemini multimodal (`Part.from_bytes`), only inside an already-happening Gemini call — never a new call. Cost measured directly (not guessed): 4/118 corpus mails are relevant + need Gemini + carry an image; added tokens are ~500–1500/mail, riding the existing call. |
 | Prompt | No explicit null-discipline, DMY convention, or field-definition rules; no few-shot examples | `ai/gemini_extractor.py` (`SYSTEM_PROMPT`, `build_extraction_prompt`, new `FEW_SHOT_EXAMPLES`) | 4 few-shot examples sourced from real, PII-checked corpus mails, cross-verified against `labels.csv`. Not eval-visible yet — see "Known gaps." |
@@ -101,14 +101,26 @@ stage per replay.
 ## Known gaps — not closed this session
 
 - **The combined prompt (Date-header anchor + null-discipline/DMY/few-shot
-  rewrite) has never been eval-scored end-to-end.** Both changes altered the
-  prompt text, which invalidates the eval cache (`sha256(model+prompt)` keyed)
-  — a full re-score needs ~61 live Gemini calls against a 20-request/day/model
-  free-tier limit. A 15-call partial attempt was made and aborted cleanly
-  (the harness deliberately writes no output unless the full corpus
-  completes, by design — a partial replay would misrepresent production
-  behavior); those 15 responses are now cached, reducing a future complete
-  run's need to ~46 calls. **Regression coverage for this session's prompt/
+  rewrite) has still never been eval-scored end-to-end — this remains open.**
+  A second attempt was made this session (see "2026-07-15 eval-gap attempt"
+  below): planned and disclosed 15 live calls against `gemini-2.5-flash`
+  (before making any call) to avoid starving the production job's share of
+  the same 20-request/day quota; the run made exactly 15 live calls, hit the
+  self-imposed budget, and aborted cleanly per the harness's existing design
+  (`scripts/eval/run_eval.py:331-338` — no output written unless the full
+  corpus completes). Uncached-mail count dropped from 55 to **47** (dry-run
+  count via `scripts/eval/run_eval.py`'s own cache-lookup logic, re-verified
+  after the run). At 20 calls/day shared with production, closing the
+  remaining 47 needs roughly 3 more days of budgeted runs — **the doc's prior
+  "~46 calls remaining" estimate was itself already stale before this session
+  touched it** (dry-run measured 55 uncached at session start, not 46 — the
+  code must have moved between the original estimate and now). **No (a)/(b)/
+  (c) predicted-vs-actual comparison table exists yet** because (c) — the
+  actual combined-system score — cannot be produced until a run completes
+  without aborting. This is not a scoring gap this session hid; it's the
+  literal, disclosed consequence of the free-tier quota making a same-day
+  full run mathematically impossible while `gemini-2.5-flash` is also serving
+  production traffic. **Regression coverage for this session's prompt/
   validation/quota/attachment changes is unit-test only** (the new tests
   listed in each fix's file) — not eval-eval-confirmed. Run the harness fully
   once quota allows, before trusting eval numbers for anything the last two
@@ -145,12 +157,33 @@ stage per replay.
   note for anyone building the calendar module, since the same drive→event
   cardinality assumption shows up there too.
 
+## 2026-07-15 eval-gap attempt (still open)
+
+Planned call count stated before any live call: 15, model `gemini-2.5-flash`
+(the real production model — not spread across `CachingGeminiModel.EVAL_MODELS`
+alternates, which would misrepresent "the current combined production path").
+Chose 15 rather than the default budget of 18-20 specifically to leave same-day
+quota headroom for the production scheduled job, which shares the same
+20-request/day cap on the same model/key.
+
+Result: exactly 15 live calls made, run hit budget, aborted cleanly with no
+output written (`scripts/eval/run_eval.py:331-338`), as designed. Uncached
+mail count (of 61 relevant): 55 at the start of this session's attempt → 47
+after. Remaining budget needed: ~47 more calls, i.e. **~3 more daily 15-20-call
+sessions** before `--score` can run and the (a)/(b)/(c) table in this doc can
+be filled in. Until then: **no combined-system score exists**, so the
+compositional risks called out for this gap (schema-enforced output vs.
+free-JSON prompt instructions; Date-anchor placement once attachment text
+enlarges the prompt; strict-parser format mismatches) remain unverified by
+eval — only by the unit tests already covering each fix individually.
+
 ## Runbook: closing the gaps above
 
 1. **Re-score the combined prompt** once today's Gemini quota resets:
    `python scripts/eval/run_eval.py --extract --gemini-all --max-live-calls 20`
    (repeat across days as needed — the cache persists, so each day's calls
-   are never wasted), then `python scripts/eval/run_eval.py --score`. Compare
+   are never wasted; ~3 more runs needed as of 2026-07-15), then
+   `python scripts/eval/run_eval.py --score`. Compare
    against the last table in this doc; update `tests/test_eval_extraction_reliability.py`'s
    floors only if the new numbers are a genuine, understood improvement.
 2. Run the opt-in eval pytest marker any time after regenerating

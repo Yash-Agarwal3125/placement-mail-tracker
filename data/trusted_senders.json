@@ -215,5 +215,16 @@
       "domain:institutional"
     ],
     "score": 40
+  },
+  {
+    "display_name": "Infosys Freshers Recruitment",
+    "email": "talent.acquisition@infosys.com",
+    "first_seen": "2026-07-09T17:19:08.647818+00:00",
+    "last_seen": "2026-07-09T17:19:08.647818+00:00",
+    "matched_keywords": [
+      "display:recruitment",
+      "subject:campus recruitment"
+    ],
+    "score": 40
   }
 ]

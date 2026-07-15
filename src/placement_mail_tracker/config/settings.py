@@ -33,11 +33,7 @@ class Settings(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_fallback_models: list[str] = Field(
         default_factory=lambda: [
-            "gemini-2.5-flash-lite-preview-06-17",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
+            "gemini-2.5-flash-lite",
         ],
         alias="GEMINI_FALLBACK_MODELS",
     )
@@ -93,6 +89,26 @@ class Settings(BaseSettings):
     email_receiver: str = Field(default="", alias="EMAIL_RECEIVER")
     notification_email: str = Field(default="", alias="NOTIFICATION_EMAIL")
     digest_send_time: str = Field(default="08:00", alias="DIGEST_SEND_TIME")
+
+    # Backlog item 1 (docs/design/05, promoted in 09): T-48h/T-24h nudges for
+    # ELIGIBLE drives the user hasn't applied to yet, distinct from the
+    # generic deadline alerts which fire regardless of application status.
+    deadline_escalation_thresholds_hours: list[int] = Field(
+        default_factory=lambda: [48, 24],
+        alias="DEADLINE_ESCALATION_THRESHOLDS_HOURS",
+    )
+    reminder_escalation_enabled: bool = Field(
+        default=True, alias="REMINDER_ESCALATION_ENABLED"
+    )
+    reminder_max_per_mail: int = Field(default=20, alias="REMINDER_MAX_PER_MAIL")
+
+    # Feature 1 (docs/design/10-confirmation-and-reminders.md): automatic
+    # my_status writes from CDC application-confirmation mails ship OFF by
+    # default. "observe" runs the full detection/matching pipeline but only
+    # logs + digests what it WOULD have written; "enforce" actually calls
+    # set_my_status(..., source="automation"). Flipping this is a config
+    # change, not a code change — see the doc's enforce-mode flip checklist.
+    confirmation_mode: str = Field(default="observe", alias="CONFIRMATION_MODE")
 
     sync_interval_hours: int = Field(default=3, alias="SYNC_INTERVAL_HOURS")
     failure_alert_threshold: int = Field(default=3, alias="FAILURE_ALERT_THRESHOLD")

@@ -316,6 +316,38 @@ class TestQuotaAwareDeferral:
         assert row["processed_status"] == "PENDING_EXTRACTION"
         assert row["retry_count"] == 0
 
+    def test_get_quota_deferred_count_only_counts_quota_causes(
+        self, db_manager: DatabaseManager, mock_settings
+    ):
+        """Quota-death visibility (docs/design/06-extraction-reliability.md):
+        the digest-facing count must isolate quota-caused PENDING_EXTRACTION
+        rows from a generic transient-error retry using the same status."""
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
+        extractor = MagicMock()
+
+        def _msg(msg_id: str) -> dict:
+            return {
+                "message_id": msg_id, "thread_id": f"thread_{msg_id}",
+                "subject": "Interview scheduled for TestCo", "sender": "cdc@college.edu",
+                "body_text": "Your technical interview round has been scheduled.",
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0,
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+        }
+
+        profile = UserProfile.load()
+        extractor.extract_from_email.side_effect = GeminiQuotaExhaustedError("429 PerDay")
+        runner._process_single_message(_msg("quota_a"), db_manager, extractor, profile, stats)
+        runner._process_single_message(_msg("quota_b"), db_manager, extractor, profile, stats)
+
+        extractor.extract_from_email.side_effect = ValueError("transient network blip")
+        runner._process_single_message(_msg("transient_c"), db_manager, extractor, profile, stats)
+
+        assert db_manager.get_quota_deferred_count() == 2
+
 
 # ---------------------------------------------------------------------------
 # Data-quality guards surfaced by a live run

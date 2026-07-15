@@ -10,9 +10,22 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from email.utils import parseaddr
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# D1 (docs/design/10-confirmation-and-reminders.md): the sender gate for
+# APPLICATION_CONFIRMATION. Defined here (a leaf module with no internal
+# package dependencies) so both gmail/filters.py and extraction/confirmation.py
+# can import it without creating an import cycle.
+CONFIRMATION_SENDER = "noreply.cdcinfo@vitstudent.ac.in"
+
+
+def is_confirmation_sender(sender: str) -> bool:
+    """Exact match on the CDC confirmation address, case-insensitive."""
+    _, address = parseaddr(sender or "")
+    return address.strip().lower() == CONFIRMATION_SENDER
 
 # ---------------------------------------------------------------------------
 # Company Normalization
@@ -167,6 +180,7 @@ EMAIL_CLASSIFICATIONS = (
     "OA_UPDATE",
     "SHORTLIST_UPDATE",
     "INTERVIEW_UPDATE",
+    "APPLICATION_CONFIRMATION",
     "OFFER_UPDATE",
     "REMINDER",
     "IRRELEVANT",
@@ -214,8 +228,17 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def classify_email(subject: str, body: str = "") -> str:
-    """Classify an email into one of the EMAIL_CLASSIFICATIONS categories."""
+def classify_email(subject: str, body: str = "", sender: str = "") -> str:
+    """Classify an email into one of the EMAIL_CLASSIFICATIONS categories.
+
+    D1: the sender gate is checked before the ordered pattern list (which
+    contains OFFER_UPDATE's bare "congratulations" pattern), so a confirmation
+    mail phrased "Congratulations, your application has been submitted" can
+    never misfire as OFFER_UPDATE — it never reaches that pattern at all.
+    """
+    if sender and is_confirmation_sender(sender):
+        return "APPLICATION_CONFIRMATION"
+
     combined = f"{subject} {body[:500]}"
 
     for classification, pattern in _CLASSIFICATION_PATTERNS:
@@ -706,7 +729,7 @@ def extract_from_email(
     result = RuleExtractionResult()
 
     # 1. Classify the email
-    result.email_classification = classify_email(subject, body)
+    result.email_classification = classify_email(subject, body, sender)
 
     # 2. Detect status
     result.current_status = detect_status_from_text(subject, body)

@@ -49,6 +49,81 @@ class TestBulkUpdateMyStatus:
         assert db_manager.bulk_update_my_status({"NOT_A_REAL_DRIVE": "APPLIED"}) == 0
 
 
+class TestSetMyStatusLadder:
+    """D4 (docs/design/10-confirmation-and-reminders.md): source='automation'
+    enforces an upgrade-only ladder; source='sheet' stays fully authoritative,
+    including downgrades — unchanged from the pre-D4 behaviour."""
+
+    def _seed(self, db_manager: DatabaseManager, sample_opportunity, my_status="NOT_APPLIED"):
+        opp_id, _ = db_manager.insert_or_update_opportunity(
+            sample_opportunity("LadderCo", "SDE Intern"), source_email_id=f"seed_{my_status}",
+        )
+        drive_id = db_manager.fetch_opportunity_by_id(opp_id)["drive_id"]
+        if my_status != "NOT_APPLIED":
+            db_manager.set_my_status(drive_id, my_status, source="sheet")
+        return drive_id
+
+    def test_automation_upgrades_not_applied_to_applied(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        drive_id = self._seed(db_manager, sample_opportunity)
+
+        changed = db_manager.set_my_status(drive_id, "APPLIED", source="automation")
+
+        assert changed is True
+        row = db_manager.connection.execute(
+            "SELECT my_status FROM opportunities WHERE drive_id = ?", (drive_id,)
+        ).fetchone()
+        assert row["my_status"] == "APPLIED"
+
+    def test_automation_cannot_downgrade(self, db_manager: DatabaseManager, sample_opportunity):
+        drive_id = self._seed(db_manager, sample_opportunity, my_status="SHORTLISTED")
+
+        changed = db_manager.set_my_status(drive_id, "APPLIED", source="automation")
+
+        assert changed is False
+        row = db_manager.connection.execute(
+            "SELECT my_status FROM opportunities WHERE drive_id = ?", (drive_id,)
+        ).fetchone()
+        assert row["my_status"] == "SHORTLISTED"
+
+    def test_duplicate_confirmation_is_a_noop(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        """D6: message-ID dedup + ladder idempotency is the whole dedup design
+        -- a second automation write of the same target status is a no-op."""
+        drive_id = self._seed(db_manager, sample_opportunity)
+
+        first = db_manager.set_my_status(drive_id, "APPLIED", source="automation")
+        second = db_manager.set_my_status(drive_id, "APPLIED", source="automation")
+
+        assert first is True
+        assert second is False
+
+    def test_shortlisted_drive_plus_late_confirmation_is_a_noop(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        drive_id = self._seed(db_manager, sample_opportunity, my_status="SHORTLISTED")
+
+        changed = db_manager.set_my_status(drive_id, "APPLIED", source="automation")
+
+        assert changed is False
+
+    def test_sheet_source_can_downgrade(self, db_manager: DatabaseManager, sample_opportunity):
+        drive_id = self._seed(db_manager, sample_opportunity, my_status="SHORTLISTED")
+
+        changed = db_manager.set_my_status(drive_id, "NOT_APPLIED", source="sheet")
+
+        assert changed is True
+        row = db_manager.connection.execute(
+            "SELECT my_status FROM opportunities WHERE drive_id = ?", (drive_id,)
+        ).fetchone()
+        assert row["my_status"] == "NOT_APPLIED"
+
+    def test_unknown_drive_id_is_a_noop_for_automation(self, db_manager: DatabaseManager):
+        assert db_manager.set_my_status("NOT_A_REAL_DRIVE", "APPLIED", source="automation") is False
+
+
 class TestMyStatusToEnum:
     @pytest.mark.parametrize(
         "display,expected",
