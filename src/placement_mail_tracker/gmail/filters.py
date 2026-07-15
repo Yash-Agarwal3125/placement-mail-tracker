@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from email.utils import parseaddr
 
+from placement_mail_tracker.extraction.rule_engine import CONFIRMATION_SENDER
 from placement_mail_tracker.gmail.gmail_client import GmailEmail
 from placement_mail_tracker.utils.trusted_senders import get_shared_manager
 
@@ -139,6 +140,22 @@ def calculate_relevance_score(
     display_name_clean = display_name.strip()
     email_clean = email_address.lower().strip()
     domain = email_clean.split("@")[-1] if "@" in email_clean else ""
+
+    # D2 (docs/design/10-confirmation-and-reminders.md): explicit allow rule
+    # for the CDC confirmation sender. Deliberately does not rely on the
+    # relaxed-path substring match / trusted-sender convergence that docs/
+    # design/08-confirmation-audit.md A2 predicted (but never confirmed
+    # against a real sample) would also let this sender through — a
+    # confirmation mail's subject wording is unverified and could trip a
+    # negative/newsletter keyword under those paths.
+    if email_clean == CONFIRMATION_SENDER:
+        logger.info("Filter: RELEVANT (explicit allow: CDC confirmation sender)")
+        return FilterDecision(
+            is_placement=True,
+            score=100,
+            confidence="high",
+            matched_sender_terms=["explicit_allow:cdc_confirmation"],
+        )
 
     subj_lower = subject.lower()
     disp_lower = display_name_clean.lower()

@@ -54,12 +54,15 @@ class TestDeadlineAlertRearm:
 
 class TestEventAlertRearm:
     def test_reschedule_to_a_new_date_fires_again(self, db_manager: DatabaseManager):
+        """F2: _check_event_alerts now reads oa_date/interview_date directly
+        (not the single derived next_event_date), so re-arm on reschedule is
+        exercised against oa_date here instead."""
         gen = _make_alert_generator(db_manager)
 
         now1 = datetime(2026, 1, 1, 12, 0, 0)
         opp = {
             "id": 2, "company_name": "Test Co",
-            "next_event_date": (now1 + timedelta(hours=20)).isoformat(),
+            "oa_date": (now1 + timedelta(hours=20)).isoformat(),
         }
         gen._check_event_alerts(opp, now1)
         assert gen.notifier.send_email.call_count == 1
@@ -69,7 +72,7 @@ class TestEventAlertRearm:
 
         now2 = datetime(2026, 1, 8, 12, 0, 0)
         opp_rescheduled = {
-            **opp, "next_event_date": (now2 + timedelta(hours=20)).isoformat(),
+            **opp, "oa_date": (now2 + timedelta(hours=20)).isoformat(),
         }
         gen._check_event_alerts(opp_rescheduled, now2)
         assert gen.notifier.send_email.call_count == 2

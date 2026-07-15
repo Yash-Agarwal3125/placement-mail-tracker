@@ -21,6 +21,7 @@ env/
 .env.*
 !.env.example
 config/*.json
+config/*.json.old_*
 
 # Local data
 data/*.db

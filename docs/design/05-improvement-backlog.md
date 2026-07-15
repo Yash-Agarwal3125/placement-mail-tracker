@@ -1,5 +1,45 @@
 # 05 — Student-Utility Improvement Backlog
 
+**Status check (2026-07-15, against `docs/design/10-confirmation-and-
+reminders.md` Feature 2, and the calendar-sync module landing separately):**
+
+- **Item 1 (deadline-escalation T-48h/T-24h) — DONE, superseded.** Shipped as
+  the batched `DEADLINE_T48`/`DEADLINE_T24` escalation
+  (`scheduler/alert_generator.py::_collect_deadline_escalation_candidate` /
+  `_send_batched_deadline_escalations`), not the simple per-drive design
+  sketched below — batched into one mail per threshold, capped at
+  `reminder_max_per_mail`, and additionally excludes validation-flagged
+  deadlines (a refinement this backlog entry didn't anticipate). The original
+  unfiltered `DEADLINE_4H`/`DEADLINE_24H` alerts (`_check_deadline_alerts`)
+  from before this backlog was written are still present *in addition to* the
+  new batched ones — not removed, not merged. See the reminders-readiness
+  review in this repo's history for the resulting gap (a validation-flagged
+  deadline still fires through that older, unfiltered path).
+- **Item 2 (morning-of-event digest) — DONE.** Shipped essentially as
+  described: a `TODAY` section in `digest_generator.py`, restricted to drives
+  with `my_status` past `NOT_APPLIED` (an explicit refinement over "list
+  everything").
+- **Item 3 (OA/interview conflict detection) — still open, but its stated
+  prerequisite ("after the calendar module lands") is now satisfied** — the
+  calendar-sync module (`calendar_sync/derive.py`) exists and already builds
+  normalized datetimes per event, so this is now buildable at the **S**
+  effort this entry originally estimated for the post-calendar case, not the
+  **M** standalone estimate.
+- **Item 4 (`--status` CLI) and item 5 (weekly stats digest section) —
+  still open**, unimplemented, estimates unchanged.
+- **Telegram notifier — still a no-op stub** (`notifications/telegram.py`),
+  unchanged since this was written.
+- **Registration-link in alerts — partially done.** The new batched
+  `DEADLINE_T48`/`T24` escalation mail includes an "Apply" link column
+  (`alert_generator.py::_send_batched_deadline_escalations`), but the older
+  per-drive `DEADLINE_4H`/`24H`/`EVENT_*` alert emails
+  (`_send_alert_email`) still omit it, exactly as this entry originally
+  described.
+- **Dead-letter digest deep-link, prep notes, extraction-quality feedback
+  loop — all still open**, unimplemented, unchanged.
+
+---
+
 Whole-system ideas for active placement season, one paragraph each. Effort:
 S ≈ hours, M ≈ a day-ish, L ≈ multi-day. "Critical path" = touches
 fetch→extract→store (the part that must never break). The ADR-D8 upstream

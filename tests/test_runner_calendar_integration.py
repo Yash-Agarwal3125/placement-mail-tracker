@@ -18,10 +18,15 @@ from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
 
 
 def test_calendar_disabled_by_default_is_a_noop(db_manager, mock_settings):
-    """Rollout checklist step 3: CALENDAR_SYNC_ENABLED unset -> no import, no call."""
-    assert mock_settings.calendar_sync_enabled is False
-    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
-    report = RunReport(environment=mock_settings.environment)
+    """Rollout checklist step 3: CALENDAR_SYNC_ENABLED unset -> no import, no call.
+
+    Forces calendar_sync_enabled=False explicitly rather than relying on
+    mock_settings' ambient value, since Settings() reads the real .env file
+    and this repo's own .env legitimately sets CALENDAR_SYNC_ENABLED=true.
+    """
+    settings = mock_settings.model_copy(update={"calendar_sync_enabled": False})
+    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+    report = RunReport(environment=settings.environment)
 
     with patch(
         "placement_mail_tracker.calendar_sync.sync.CalendarSyncEngine.sync"
@@ -35,9 +40,9 @@ def test_calendar_disabled_by_default_is_a_noop(db_manager, mock_settings):
 
 def test_calendar_dry_run_flag_runs_even_when_disabled(db_manager, mock_settings):
     """--calendar-dry-run must work for manual verification before the flag is on."""
-    assert mock_settings.calendar_sync_enabled is False
-    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
-    report = RunReport(environment=mock_settings.environment)
+    settings = mock_settings.model_copy(update={"calendar_sync_enabled": False})
+    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+    report = RunReport(environment=settings.environment)
 
     with patch(
         "placement_mail_tracker.calendar_sync.sync.CalendarSyncEngine.sync",

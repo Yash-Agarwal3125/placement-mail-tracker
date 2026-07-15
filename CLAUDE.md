@@ -37,15 +37,20 @@ gmail/gmail_client.py        Gmail OAuth + fetch (gmail/client.py is a re-export
 gmail/filters.py             is_placement_mail() relevance scoring
 extraction/rule_engine.py    regex extraction, classification, status detection
 extraction/eligibility.py    branch/degree/CGPA eligibility vs UserProfile
+extraction/validation.py     post-extraction plausibility checks -> NEEDS_REVIEW flags
 ai/gemini_extractor.py       Gemini fallback extraction (+ ai/models.py schema)
 utils/deduplication.py       fuzzy duplicate detection (rapidfuzz)
 utils/scoring.py             priority (HIGH/MEDIUM/LOW)
 db/manager.py                DatabaseManager: the real schema + all queries
 db/connection.py             sqlite connection factory (WAL)
 sheets/sheets_sync.py        Google Sheets sync + formatting
-scheduler/digest_generator.py / alert_generator.py  email digests + deadline alerts
+calendar_sync/               Google Calendar sync (client/derive/sync); opt-in via
+                              CALENDAR_SYNC_ENABLED, see docs/design/03-adr-calendar-sync.md
+scheduler/digest_generator.py / alert_generator.py  email digests + deadline/event alerts
 reliability/                 status report, health (failure streak), heartbeat
+reliability/auth_alerts.py   one-shot SMTP alert when an OAuth token stack goes dead
 utils/lock_manager.py        single-instance lock (PID liveness)
+scripts/eval/                opt-in extraction-quality eval harness (pytest -m eval)
 ```
 
 ## Data model (drive-centric)

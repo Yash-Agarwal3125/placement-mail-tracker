@@ -277,6 +277,14 @@ class DatabaseManager:
                 UNIQUE(opportunity_id, event_type),
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS unmatched_confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gmail_message_id TEXT NOT NULL,
+                extracted_text TEXT,
+                candidates TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            );
             """
         )
         self._migrate_existing_opportunities_table()
@@ -304,6 +312,8 @@ class DatabaseManager:
                 ON calendar_events(status);
             CREATE INDEX IF NOT EXISTS idx_calendar_events_opportunity_id
                 ON calendar_events(opportunity_id);
+            CREATE INDEX IF NOT EXISTS idx_unmatched_confirmations_message_id
+                ON unmatched_confirmations(gmail_message_id);
             """
         )
         self.connection.commit()
@@ -531,26 +541,107 @@ class DatabaseManager:
     # Query Methods
     # ------------------------------------------------------------------
 
-    def bulk_update_my_status(self, my_status_by_drive_id: dict[str, str]) -> int:
-        """Write the sheet's user-owned My Status column back into the DB.
+    # Upgrade-only ladder for source="automation" writes (D4, docs/design/10-
+    # confirmation-and-reminders.md). SELECTED/REJECTED share a rank: both are
+    # terminal outcomes, neither is an "upgrade" over the other, but either is
+    # an upgrade over SHORTLISTED/APPLIED/NOT_APPLIED.
+    MY_STATUS_LADDER: dict[str, int] = {
+        "NOT_APPLIED": 0,
+        "APPLIED": 1,
+        "SHORTLISTED": 2,
+        "SELECTED": 3,
+        "REJECTED": 3,
+    }
+
+    def set_my_status(self, drive_id: str, my_status: str, *, source: str = "sheet") -> bool:
+        """Source-aware My Status write — the single choke point (D4).
+
+        source="sheet" (default) is the existing, fully-authoritative human
+        path: the sheet read-back may set any value, including a downgrade —
+        unchanged from the original bulk_update_my_status behaviour.
+        source="automation" enforces an upgrade-only ladder: a write is only
+        applied when it strictly advances rank over the current value, and a
+        drive already at or above the target rank is a no-op. This is what
+        makes a duplicate or late confirmation mail idempotent for free (D6).
+
+        Returns True if a row was actually changed, False on any no-op.
+        """
+        if not drive_id or not my_status:
+            return False
+
+        if source == "automation":
+            row = self.connection.execute(
+                "SELECT my_status FROM opportunities WHERE drive_id = ?;", (drive_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            current_rank = self.MY_STATUS_LADDER.get(row["my_status"] or "NOT_APPLIED", 0)
+            target_rank = self.MY_STATUS_LADDER.get(my_status, 0)
+            if target_rank <= current_rank:
+                return False
+
+        cursor = self.connection.execute(
+            "UPDATE opportunities SET my_status = ? WHERE drive_id = ? AND my_status != ?;",
+            (my_status, drive_id, my_status),
+        )
+        if cursor.rowcount:
+            self.connection.commit()
+        return cursor.rowcount > 0
+
+    def bulk_update_my_status(
+        self, my_status_by_drive_id: dict[str, str], *, source: str = "sheet"
+    ) -> int:
+        """Write multiple My Status values back into the DB via set_my_status.
 
         Called by the sheets sync right after it reads the current My Status
         values back from the sheet (ADR-D8 / Decision 6): the DB becomes the
         durable copy of user intent instead of a dead column that always
-        reads NOT_APPLIED. Skips no-op writes; returns the changed-row count.
+        reads NOT_APPLIED. Returns the changed-row count.
         """
         changed = 0
         for drive_id, my_status in my_status_by_drive_id.items():
-            if not drive_id or not my_status:
-                continue
-            cursor = self.connection.execute(
-                "UPDATE opportunities SET my_status = ? WHERE drive_id = ? AND my_status != ?;",
-                (my_status, drive_id, my_status),
-            )
-            changed += cursor.rowcount
-        if changed:
-            self.connection.commit()
+            if self.set_my_status(drive_id, my_status, source=source):
+                changed += 1
         return changed
+
+    # ------------------------------------------------------------------
+    # Confirmation-mail matching gaps (docs/design/08-confirmation-audit.md
+    # C3, docs/design/10-confirmation-and-reminders.md): a confirmation mail
+    # that matches no drive at all, or matches ambiguously, is never
+    # silent-dropped -- it lands here for a human to review.
+    # ------------------------------------------------------------------
+
+    def insert_unmatched_confirmation(
+        self,
+        *,
+        gmail_message_id: str,
+        extracted_text: str | None,
+        candidates: list[dict[str, Any]],
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO unmatched_confirmations
+                (gmail_message_id, extracted_text, candidates, created_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            (gmail_message_id, extracted_text, json.dumps(candidates), utc_now_iso()),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def fetch_unmatched_confirmations(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM unmatched_confirmations ORDER BY created_at DESC;"
+        ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["candidates"] = json.loads(item["candidates"])
+            except Exception:
+                item["candidates"] = []
+            results.append(item)
+        return results
 
     # ------------------------------------------------------------------
     # Calendar Sync state (docs/design/04-integration-spec.md §3.3)
@@ -767,6 +858,24 @@ class DatabaseManager:
         """Count emails that permanently failed processing."""
         row = self.connection.execute(
             "SELECT COUNT(*) FROM processed_emails WHERE processed_status = 'PERMANENT_FAILURE'"
+        ).fetchone()
+        return row[0] if row else 0
+
+    def get_quota_deferred_count(self) -> int:
+        """Count emails currently deferred by Gemini daily-quota exhaustion.
+
+        Distinguishes quota-caused ``PENDING_EXTRACTION`` rows (retried once
+        quota frees up, per ``GeminiQuotaExhaustedError`` handling in
+        ``scheduler/runner.py``) from the same status used for a generic
+        transient error retry, so this stays a "quota is dead today" signal
+        rather than a catch-all in-flight-retry counter.
+        """
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) FROM processed_emails
+            WHERE processed_status = 'PENDING_EXTRACTION'
+              AND (error_message LIKE '%quota%' OR error_message LIKE '%429%')
+            """
         ).fetchone()
         return row[0] if row else 0
 

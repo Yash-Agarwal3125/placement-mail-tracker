@@ -10,6 +10,12 @@ from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
 from placement_mail_tracker.scheduler.calendar_flags_store import pop_pending_calendar_flags
+from placement_mail_tracker.scheduler.confirmation_digest_store import (
+    pop_pending_confirmation_lines,
+)
+from placement_mail_tracker.scheduler.unattributed_mail_store import (
+    pop_pending_unattributed_mail,
+)
 from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
@@ -42,6 +48,8 @@ class DailyDigestGenerator:
         action_required: list[dict[str, Any]] = []
         upcoming_events: list[dict[str, Any]] = []
         new_opps: list[dict[str, Any]] = []
+        today_events: list[tuple[dict[str, Any], str, datetime]] = []
+        flagged_deadlines: list[dict[str, Any]] = []
 
         now_date = now.date()
 
@@ -66,18 +74,68 @@ class DailyDigestGenerator:
                     upcoming_events.append(opp)
                     break
 
+            # Backlog item 2 (docs/design/05, morning-of-event section): only
+            # for drives the user has actually engaged with (my_status past
+            # NOT_APPLIED) -- an OA today on a drive nobody applied to isn't
+            # "today", it's noise.
+            if (opp.get("my_status") or "NOT_APPLIED") != "NOT_APPLIED":
+                for date_field, label in (("oa_date", "OA"), ("interview_date", "Interview")):
+                    raw = opp.get(date_field)
+                    if not raw:
+                        continue
+                    parsed = parse_datetime_flexible(str(raw))
+                    if parsed and parsed.date() == now_date:
+                        today_events.append((opp, label, parsed))
+
+            # Feature 2 (docs/design/10): a deadline the validation layer
+            # already distrusts is excluded from escalation alerts (alert_
+            # generator._collect_deadline_escalation_candidate) -- surface it
+            # here once instead of alarming on data we don't trust.
+            if (
+                opp.get("eligibility_status") == "ELIGIBLE"
+                and (opp.get("my_status") or "NOT_APPLIED") == "NOT_APPLIED"
+                and opp.get("deadline")
+                and any(
+                    str(flag).startswith("deadline ")
+                    for flag in (opp.get("validation_flags") or [])
+                )
+            ):
+                flagged_deadlines.append(opp)
+
         dead_letter_count = self.database.get_dead_letter_count()
+        quota_deferred_count = self.database.get_quota_deferred_count()
         calendar_flags = pop_pending_calendar_flags()
+        unattributed_mail = pop_pending_unattributed_mail()
+        confirmation_lines = pop_pending_confirmation_lines()
 
         if not (
-            action_required or upcoming_events or new_opps or dead_letter_count or calendar_flags
+            action_required
+            or upcoming_events
+            or new_opps
+            or dead_letter_count
+            or quota_deferred_count
+            or calendar_flags
+            or unattributed_mail
+            or today_events
+            or confirmation_lines
+            or flagged_deadlines
         ):
             logger.info("No significant updates for the daily digest.")
             self._record_digest_sent()
             return False
 
         digest_body = _format_digest(
-            action_required, upcoming_events, new_opps, now, dead_letter_count, calendar_flags
+            action_required,
+            upcoming_events,
+            new_opps,
+            now,
+            dead_letter_count,
+            calendar_flags,
+            unattributed_mail,
+            today_events,
+            confirmation_lines,
+            flagged_deadlines,
+            quota_deferred_count,
         )
 
         # Build a descriptive subject line
@@ -145,8 +203,25 @@ def _format_digest(
     now: datetime,
     dead_letter_count: int = 0,
     calendar_flags: list[str] | None = None,
+    unattributed_mail: list[str] | None = None,
+    today_events: list[tuple[dict[str, Any], str, datetime]] | None = None,
+    confirmation_lines: list[str] | None = None,
+    flagged_deadlines: list[dict[str, Any]] | None = None,
+    quota_deferred_count: int = 0,
 ) -> str:
     lines = ["PLACEMENT SUMMARY", ""]
+
+    if today_events:
+        lines.append("TODAY")
+        for opp, label, parsed in sorted(today_events, key=lambda t: t[2]):
+            company = opp.get("company_name") or "?"
+            time_str = parsed.strftime("%I:%M %p").lstrip("0")
+            detail = f"{label} {time_str}".strip()
+            venue = opp.get("work_location")
+            if venue:
+                detail += f" - {venue}"
+            lines.append(f"* {company}: {detail}")
+        lines.append("")
 
     if action_required:
         lines.append("ACTION REQUIRED")
@@ -178,16 +253,43 @@ def _format_digest(
             lines.append(f"* {opp.get('company_name') or '?'}")
         lines.append("")
 
-    if dead_letter_count:
+    if dead_letter_count or quota_deferred_count:
         lines.append("SYSTEM HEALTH")
-        lines.append(f"* {dead_letter_count} email(s) failed processing permanently (dead letters)")
-        lines.append("  Check logs or the RECENT UPDATES sheet for details.")
+        if dead_letter_count:
+            lines.append(
+                f"* {dead_letter_count} email(s) failed processing permanently (dead letters)"
+            )
+            lines.append("  Check logs or the RECENT UPDATES sheet for details.")
+        if quota_deferred_count:
+            lines.append(
+                f"* Gemini daily quota exhausted — {quota_deferred_count} email(s) deferred, "
+                "will retry automatically once quota resets."
+            )
         lines.append("")
 
     if calendar_flags:
         lines.append("CALENDAR FLAGS")
         for flag in calendar_flags:
             lines.append(f"* {flag}")
+        lines.append("")
+
+    if unattributed_mail:
+        lines.append("UNATTRIBUTED MAIL")
+        for flag in unattributed_mail:
+            lines.append(f"* {flag}")
+        lines.append("")
+
+    if confirmation_lines:
+        lines.append("CONFIRMATIONS")
+        for line in confirmation_lines:
+            lines.append(f"* {line}")
+        lines.append("")
+
+    if flagged_deadlines:
+        lines.append("DEADLINE UNVERIFIED — CHECK MANUALLY")
+        for opp in flagged_deadlines:
+            company = opp.get("company_name") or "?"
+            lines.append(f"* {company}: {opp.get('deadline')} — check manually")
         lines.append("")
 
     return "\n".join(lines)
