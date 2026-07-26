@@ -226,5 +226,15 @@
       "subject:campus recruitment"
     ],
     "score": 40
+  },
+  {
+    "display_name": "Flipkart",
+    "email": "admin@hirepro.in",
+    "first_seen": "2026-07-15T16:05:37.672112+00:00",
+    "last_seen": "2026-07-15T16:05:37.672112+00:00",
+    "matched_keywords": [
+      "subject:online assessment"
+    ],
+    "score": 15
   }
 ]

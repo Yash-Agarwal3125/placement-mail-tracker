@@ -1,0 +1,7 @@
+[2026-07-15] .coverage
+  Purpose: coverage.py data file from a one-off manual `pytest --cov` run (last
+  modified 2026-05-29), predating most of the codebase's current sessions.
+  Why kept in this log: gitignored, unreferenced by pyproject.toml/.github/CI
+  (no coverage tooling wired into the project), and stale by ~1.5 months
+  relative to the current codebase state — logged rather than silently
+  discarded per the "uncertain -> STALE BUT LOGGED" rule.
