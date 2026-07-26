@@ -92,18 +92,61 @@ def detect_confirmation_tier(subject: str, body: str = "") -> tuple[str, str | N
 # not something CDC would echo back). Implemented per spec anyway — it's
 # cheap, and the enforce-mode flip checklist explicitly anticipates adding a
 # real reference-number column once a real sample reveals CDC's ID format.
-_REFERENCE_ID_RE = re.compile(
-    r"(?:drive|ref(?:erence)?|registration)\s*(?:id|no\.?|number)?\s*[:\-#]?\s*"
-    r"([A-Za-z0-9][A-Za-z0-9\-]{2,19})",
+#
+# Anchored to a labeled line (real Ion Group sample, 2026-07-14): the
+# original version made the id/no/number qualifier optional for every
+# keyword and the ":"/"-"/"#" separator optional too, so a bare "drive"
+# occurring anywhere in ordinary prose (extremely common in placement mail)
+# was itself treated as a label, with only whitespace — including
+# newlines — required before the "captured" value. On real text this matched
+# "Drive" at the end of the subject line ("...ION Group Placement Drive")
+# and then captured "Placement" from the very next line (the body's opening
+# line, "Placement Drive Invitation"), nowhere near the real
+# "Drive Number:\npat-PL-2026-1101" field further down. Fixed: the separator
+# is now mandatory and must appear on the SAME line as the label ("Drive
+# Number:", "Reference:", "Registration ID:"); bare "drive" without a
+# qualifier is no longer a label at all (only "Reference"/"Registration" are
+# accepted bare, matching the labels this feature is actually built to
+# recognize). The value itself may still be on the next non-blank line
+# (real CDC mail wraps the value after the label's colon).
+_LABEL_LINE_RE = re.compile(
+    r"(?:drive\s*(?:id|no\.?|number)|ref(?:erence)?\s*(?:id|no\.?|number)?|"
+    r"registration\s*(?:id|no\.?|number)?)\s*[:\-#]\s*(.*)$",
     re.IGNORECASE,
 )
+_ID_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]{2,19}")
 
 
 def extract_reference_id(subject: str, body: str = "") -> str | None:
-    """Best-effort drive/ref/registration ID near a labeling word."""
+    """Best-effort drive/ref/registration ID from a labeled line.
+
+    Only matches an ID immediately following a recognized label ("Drive
+    Number:", "Reference:", "Registration ID:", ...) on the same line — never
+    a bare-word proximity match. If the label's line has no value after the
+    separator, the value is looked for on the next non-blank line (the shape
+    real CDC mail uses).
+    """
     combined = _strip_html(f"{subject}\n{body}"[:1000])
-    match = _REFERENCE_ID_RE.search(combined)
-    return match.group(1) if match else None
+    lines = combined.splitlines()
+    for i, line in enumerate(lines):
+        label_match = _LABEL_LINE_RE.search(line)
+        if not label_match:
+            continue
+
+        same_line_value = label_match.group(1).strip()
+        if same_line_value:
+            value_match = _ID_VALUE_RE.match(same_line_value)
+            return value_match.group(0) if value_match else None
+
+        for next_line in lines[i + 1 :]:
+            candidate = next_line.strip()
+            if not candidate:
+                continue
+            value_match = _ID_VALUE_RE.match(candidate)
+            return value_match.group(0) if value_match else None
+        return None
+
+    return None
 
 
 @dataclass

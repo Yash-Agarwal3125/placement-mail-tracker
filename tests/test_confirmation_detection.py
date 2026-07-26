@@ -151,6 +151,47 @@ class TestExtractReferenceId:  # SYNTHETIC fixtures
     def test_returns_none_when_absent(self):
         assert extract_reference_id("Application received", "Thanks for applying.") is None
 
+    def test_real_ion_group_sample_extracts_labeled_id_not_a_bare_word(self):
+        """Real sample (2026-07-14, message 19f60b9495b5b9c9): the original
+        regex made the id/no/number qualifier and the ':' separator both
+        optional, so a bare 'drive' anywhere in ordinary prose was itself
+        treated as a label with only whitespace before the 'captured' value
+        — on this real mail it matched 'Drive' at the end of the subject
+        ('...ION Group Placement Drive') and captured 'Placement' from the
+        very next line (the body's own opening line), nowhere near the real
+        'Drive Number:\\npat-PL-2026-1101' field. Must now return the real ID."""
+        subject = "Congratulations! You're Eligible for ION Group Placement Drive"
+        body = (
+            "Placement Drive Invitation\n"
+            "Dear Yash Agarwal,\n"
+            "Congratulations! Based on your profile, you are eligible to "
+            "participate in the upcoming placement drive with ION Group.\n"
+            "Drive Details:\n"
+            "Drive Name:\n"
+            "ION group\n"
+            "Drive Number:\n"
+            "pat-PL-2026-1101\n"
+            "Date:\n"
+            "Company:\n"
+            "ION Group\n"
+            "Please log in to your placement portal to confirm your "
+            "participation and view additional details about the drive."
+        )
+        assert extract_reference_id(subject, body) == "pat-PL-2026-1101"
+
+    def test_bare_drive_word_in_prose_is_not_treated_as_a_label(self):
+        """SYNTHETIC: a mail that mentions 'drive' repeatedly in ordinary
+        prose, with no actual Drive Number/Reference/Registration field
+        anywhere, must return None rather than a bare-word false positive
+        (the exact failure mode the Ion Group sample above demonstrated)."""
+        subject = "Update on your placement drive"
+        body = (
+            "This is regarding the upcoming drive.\n"
+            "Please review the drive details before the drive begins.\n"
+            "Thank you for your participation in the drive."
+        )
+        assert extract_reference_id(subject, body) is None
+
 
 class TestFindConfidentDriveMatch:  # SYNTHETIC fixtures
     def _active_opps(self):
