@@ -22,6 +22,8 @@ env/
 !.env.example
 config/*.json
 config/*.json.old_*
+config/**/*.json
+config/token_backups*/
 
 # Local data
 data/*.db
