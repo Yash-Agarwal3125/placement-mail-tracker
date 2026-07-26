@@ -183,10 +183,9 @@ class GoogleSheetsSync:
                         return {"created": 0, "updated": 0, "skipped": 0}
                     elif isinstance(e, SheetsAuthenticationError):
                         self.last_error = str(e)
-                        if self.settings.is_production:
-                            raise e
-                        logger.warning("%s", e)
-                        return {"created": 0, "updated": 0, "skipped": 0}
+                        if not self.settings.is_production:
+                            logger.warning("%s", e)
+                        raise
                     else:
                         raise
 
