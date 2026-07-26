@@ -29,7 +29,7 @@
     "display_name": "'No Reply CDC Info' via VITIANS CDC Group, Vellore and Chennai Campus",
     "email": "vitianscdc2027@vitstudent.ac.in",
     "first_seen": "2026-05-27T09:58:21.682060+00:00",
-    "last_seen": "2026-07-09T05:19:16.073093+00:00",
+    "last_seen": "2026-07-26T18:20:36.289518+00:00",
     "matched_keywords": [
       "display:cdc",
       "display:helpdesk",
@@ -41,7 +41,7 @@
     "display_name": "'HOD, Department of Computational Intelligence' via B.Tech. - C S E (A I and M L) 2023 Group, Vellore Campus",
     "email": "23bai@vitstudent.ac.in",
     "first_seen": "2026-05-29T08:04:18.572155+00:00",
-    "last_seen": "2026-06-24T18:02:42.443277+00:00",
+    "last_seen": "2026-07-26T18:20:36.366386+00:00",
     "matched_keywords": [
       "display:cdc",
       "display:helpdesk",
@@ -210,7 +210,7 @@
     "display_name": "Saravanakumar K",
     "email": "ksaravanakumar@vit.ac.in",
     "first_seen": "2026-07-09T05:19:21.150088+00:00",
-    "last_seen": "2026-07-09T05:19:21.150088+00:00",
+    "last_seen": "2026-07-26T18:20:33.919782+00:00",
     "matched_keywords": [
       "domain:institutional"
     ],
@@ -236,5 +236,25 @@
       "subject:online assessment"
     ],
     "score": 15
+  },
+  {
+    "display_name": "Chief Warden Mens Hostel",
+    "email": "cw.mh@vit.ac.in",
+    "first_seen": "2026-07-26T18:20:35.128812+00:00",
+    "last_seen": "2026-07-26T18:20:35.128812+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
+  },
+  {
+    "display_name": "Convenor Gravitas",
+    "email": "convenor.gravitas@vit.ac.in",
+    "first_seen": "2026-07-26T18:20:36.369758+00:00",
+    "last_seen": "2026-07-26T18:20:36.369758+00:00",
+    "matched_keywords": [
+      "domain:institutional"
+    ],
+    "score": 40
   }
 ]
