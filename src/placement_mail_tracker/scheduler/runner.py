@@ -958,7 +958,7 @@ class PlacementTrackerRunner:
             sheets_sync_successful = True
             logger.info("[SYNC] Google Sheets Write Success")
         except Exception as e:
-            logger.exception("[SYNC] Google Sheets Sync Failed: %s", e)
+            logger.exception("[SYNC] Google Sheets Write FAILED: %s", e)
 
         if not sheets_sync_successful:
             report.mark_component(

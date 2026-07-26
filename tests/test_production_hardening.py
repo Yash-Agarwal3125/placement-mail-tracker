@@ -1,10 +1,15 @@
 import smtplib
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.notifications.email_notifier import EmailNotifier
-from placement_mail_tracker.sheets.sheets_sync import GoogleSheetsSync
+from placement_mail_tracker.sheets.sheets_sync import (
+    GoogleSheetsSync,
+    SheetsAuthenticationError,
+)
 from placement_mail_tracker.utils.lock_manager import SingleInstanceLock
 
 
@@ -132,6 +137,19 @@ def test_sheets_network_resilience(mock_internal, mock_sleep, mock_settings):
     mock_sleep.assert_any_call(2)
     mock_sleep.assert_any_call(5)
     assert result == {"created": 1, "updated": 0, "skipped": 0}
+
+
+# 5b. Sheets auth failure must never be reported as success, in any environment
+@pytest.mark.parametrize("app_env", ["production", "development"])
+@patch("placement_mail_tracker.sheets.sheets_sync.GoogleSheetsSync._sync_active_opportunities_internal")
+def test_sheets_auth_failure_is_never_swallowed_as_success(mock_internal, mock_settings, app_env):
+    settings = mock_settings.model_copy(update={"app_env": app_env})
+    sync = GoogleSheetsSync(settings)
+    mock_internal.side_effect = SheetsAuthenticationError("token dead")
+
+    db_manager = MagicMock()
+    with pytest.raises(SheetsAuthenticationError):
+        sync.sync_active_opportunities(db_manager)
 
 
 # 6. Lock Safety

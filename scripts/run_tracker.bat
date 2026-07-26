@@ -2,6 +2,8 @@
 
 cd /d "C:\Users\Yash\Documents\Codex\2026-05-26\build-a-production-ready-python-project\placement-mail-tracker"
 
+set APP_ENV=production
+
 echo ================================================== >> logs\scheduler.log
 echo STARTED %date% %time% >> logs\scheduler.log
 
