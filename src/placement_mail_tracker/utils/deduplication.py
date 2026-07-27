@@ -7,11 +7,15 @@ placement/internship opportunities. Compares ``company_name``, ``role``, and
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
+
+from placement_mail_tracker.extraction.rule_engine import normalize_company_name
+from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 try:
     from rapidfuzz import fuzz as _fuzz
@@ -78,6 +82,10 @@ class DeduplicationConfig:
 
     require_type_match: bool = True
 
+    # Doc 15 §1.4-D: event-coincidence tolerance used when neither side shares
+    # a source_thread_id and no date field matches to the exact minute.
+    event_coincidence_tolerance_hours: float = 6.0
+
     def __post_init__(self) -> None:
         total = self.company_weight + self.role_weight + self.type_weight
         if abs(total - 1.0) > 1e-6:
@@ -112,6 +120,11 @@ class FieldScore:
     candidate_value: str
     exact_match: bool
     fuzzy_score: float | None = None
+    is_absent: bool = False
+    """``True`` when either side's normalised value is missing/empty, or the
+    role sentinel ``"unknown role"``. Doc 15 §1.4-A: an absent value must
+    never be scored as a mismatch — the field is dropped from the aggregate
+    and its weight redistributed."""
 
     @property
     def effective_score(self) -> float:
@@ -144,6 +157,15 @@ class DuplicateResult:
     is_duplicate: bool
     is_exact: bool
     updated_fields: list[UpdatedField] = field(default_factory=list)
+    review_required: bool = False
+    """Doc 15 §1.4-D: identity (company+role/type) matched well enough to be
+    suspicious, but no event coincidence (shared thread / matching date) was
+    found and no blocker fired either. Route to ``unmatched_confirmations``
+    for human review instead of silently inserting or silently merging."""
+    blocked_reason: str | None = None
+    """Set when a hard blocker (type conflict, role conflict, eligibility
+    conflict, non-overlapping dates) prevented a merge that the raw
+    confidence score alone would otherwise have allowed."""
 
     @property
     def candidate_id(self) -> int | None:
@@ -231,7 +253,16 @@ _TYPE_SYNONYMS: dict[str, str] = {
     "freelance": "contract",
     "part time": "part_time",
     "part-time": "part_time",
+    "internship_and_fulltime": "internship_and_fulltime",
+    "internship and fulltime": "internship_and_fulltime",
+    "internship and full time": "internship_and_fulltime",
+    "internship full time": "internship_and_fulltime",
 }
+
+# Canonical opportunity types that are considered directly comparable.
+# ``internship_and_fulltime`` is compatible with *both* — never a third,
+# mutually-exclusive value (doc 15 §1.4-D).
+_KNOWN_TYPES = frozenset({"internship", "full_time", "internship_and_fulltime"})
 
 
 def _unicode_normalize(text: str) -> str:
@@ -259,19 +290,29 @@ def normalize_text(text: str | None) -> str:
 
 
 def normalize_company(text: str | None) -> str:
-    """Normalise a company name by stripping common legal-entity suffixes and title-casing.
+    """Normalise a company name for duplicate matching.
+
+    Doc 15 §1.4-C: this used to duplicate a weaker suffix-stripping routine
+    that never handled label-colon prefixes ("Update:", "Join Immediately:")
+    or alias canonicalisation. It now routes through
+    :func:`rule_engine.normalize_company_name`, the richer implementation
+    already used at extraction time, so the two layers agree on identity.
 
     Example
     -------
     >>> normalize_company("Acme Technologies Pvt. Ltd.")
     'Acme'
-    >>> normalize_company("TATA MOTORS")
-    'Tata Motors'
+    >>> normalize_company("Update: Varroc Engineering")
+    'Varroc Engineering'
     """
+    normalized = normalize_company_name(text)
+    if normalized:
+        return normalized
+    # Fall back to the legacy suffix-stripping path only when rule_engine
+    # returns nothing usable (e.g. pure punctuation/garbage input).
     base = normalize_text(text)
     tokens = [t for t in base.split() if t not in _STRIP_TOKENS]
     normalized = " ".join(tokens) if tokens else base
-    # Return Title Case for presentation
     return normalized.title()
 
 
@@ -350,15 +391,36 @@ def fuzzy_score_role(a: str | None, b: str | None) -> float:
     return _rapidfuzz_ratio(normalize_text(a), normalize_text(b))
 
 
+def types_compatible(canon_a: str, canon_b: str) -> bool:
+    """Return ``True`` when two *canonical* opportunity types may co-exist.
+
+    ``internship_and_fulltime`` is compatible with both ``internship`` and
+    ``full_time`` (and with itself) — it is not a third, mutually-exclusive
+    value (doc 15 §1.4-D). Unknown/empty values are handled separately by the
+    absent-field logic and are not this function's concern.
+    """
+    if not canon_a or not canon_b:
+        return True
+    if canon_a == canon_b:
+        return True
+    if "internship_and_fulltime" in (canon_a, canon_b):
+        other = canon_b if canon_a == "internship_and_fulltime" else canon_a
+        return other in _KNOWN_TYPES
+    return False
+
+
 def fuzzy_score_type(a: str | None, b: str | None) -> float:
     """Return fuzzy similarity score for two opportunity-type strings (0–100).
 
-    Uses exact canonical mapping first; falls back to fuzzy on the raw
+    Uses exact canonical mapping first, then the compatibility rule for
+    ``internship_and_fulltime``, then falls back to fuzzy matching on the raw
     normalised strings to handle typos such as "internhsip".
     """
     canon_a = normalize_opportunity_type(a)
     canon_b = normalize_opportunity_type(b)
     if canon_a == canon_b:
+        return 100.0
+    if types_compatible(canon_a, canon_b):
         return 100.0
     return _rapidfuzz_ratio(canon_a, canon_b)
 
@@ -366,6 +428,16 @@ def fuzzy_score_type(a: str | None, b: str | None) -> float:
 # ---------------------------------------------------------------------------
 # Per-field score builders
 # ---------------------------------------------------------------------------
+
+
+# Sentinel normalised values that mean "no real data was extracted here" per
+# field. Doc 15 §1.4-A: a value in this set on *either* side means the field
+# must be dropped from the comparison, never scored as a mismatch.
+_ABSENT_SENTINELS: dict[str, frozenset[str]] = {
+    FIELD_COMPANY: frozenset({""}),
+    FIELD_ROLE: frozenset({"", "unknown role"}),
+    FIELD_TYPE: frozenset({""}),
+}
 
 
 def _score_field(
@@ -381,12 +453,15 @@ def _score_field(
     norm_cnd = normalise_fn(candidate_raw)
     is_exact = exact_match(norm_inc, norm_cnd)
     fuzzy = fuzzy_fn(incoming_raw, candidate_raw) if not is_exact else None
+    sentinels = _ABSENT_SENTINELS.get(field_name, frozenset({""}))
+    is_absent = norm_inc in sentinels or norm_cnd in sentinels
     return FieldScore(
         field_name=field_name,
         incoming_value=norm_inc,
         candidate_value=norm_cnd,
         exact_match=is_exact,
         fuzzy_score=fuzzy,
+        is_absent=is_absent,
     )
 
 
@@ -446,14 +521,145 @@ def compute_confidence_score(
     Returns
     -------
     float
-        Weighted average of the three effective scores, rounded to 2 dp.
+        Weighted average of the effective scores over the fields that
+        actually have data on both sides, rounded to 2 dp.
+
+    Doc 15 §1.4-A: a field where either side is absent/empty (or the role
+    sentinel ``"unknown role"``) is dropped entirely rather than scored as a
+    0.0 mismatch, and its weight is redistributed across the remaining
+    fields. If every field is absent there is nothing to compare, so the
+    result is 0.0.
     """
-    weighted = (
-        company_score.effective_score * config.company_weight
-        + role_score.effective_score * config.role_weight
-        + type_score.effective_score * config.type_weight
+    candidates = (
+        (company_score, config.company_weight),
+        (role_score, config.role_weight),
+        (type_score, config.type_weight),
     )
-    return round(weighted, 2)
+    applicable = [(score, weight) for score, weight in candidates if not score.is_absent]
+    if not applicable:
+        return 0.0
+
+    total_weight = sum(weight for _, weight in applicable)
+    weighted = sum(score.effective_score * weight for score, weight in applicable)
+    return round(weighted / total_weight, 2)
+
+
+# ---------------------------------------------------------------------------
+# Doc 15 §1.4-D: blockers and event coincidence
+#
+# These implement the two-stage discriminating key: (1) identity — canonical
+# company + role/type similarity, necessary but never sufficient — and
+# (2) event coincidence, required to actually merge. A handful of hard
+# blockers can veto a merge even when identity and coincidence both pass.
+# ---------------------------------------------------------------------------
+
+
+def _type_conflict(type_score: FieldScore) -> bool:
+    """``True`` when both sides have a known, genuinely incompatible type.
+
+    Absent-vs-present never conflicts (handled by ``is_absent``);
+    ``internship_and_fulltime`` never conflicts with ``internship`` or
+    ``full_time``.
+    """
+    if type_score.is_absent:
+        return False
+    return not types_compatible(type_score.incoming_value, type_score.candidate_value)
+
+
+def _role_conflict(role_score: FieldScore, config: DeduplicationConfig) -> bool:
+    """``True`` when both sides name a specific, different, non-placeholder role."""
+    if role_score.is_absent:
+        return False
+    return role_score.effective_score < config.role_fuzzy_threshold
+
+
+def _parse_branch_set(value: Any) -> set[str]:
+    """Best-effort parse of a ``branches_allowed`` value into a lowercase set."""
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return set()
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        return set()
+    return {str(item).strip().lower() for item in items if str(item).strip()}
+
+
+def _eligibility_conflict(incoming: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """``True`` when both records have disjoint populated eligibility criteria.
+
+    Checks ``degree_level``/``batch`` for equality and ``branches_allowed``
+    for set overlap, only when *both* sides have a populated (non-UNKNOWN)
+    value — an unpopulated side must never block a merge.
+    """
+    for key in ("degree_level", "batch"):
+        a = incoming.get(key)
+        b = candidate.get(key)
+        if not a or not b:
+            continue
+        if str(a).strip().upper() in ("", "UNKNOWN") or str(b).strip().upper() in (
+            "",
+            "UNKNOWN",
+        ):
+            continue
+        if str(a).strip().casefold() != str(b).strip().casefold():
+            return True
+
+    branches_a = _parse_branch_set(incoming.get("branches_allowed"))
+    branches_b = _parse_branch_set(candidate.get("branches_allowed"))
+    if branches_a and branches_b and branches_a.isdisjoint(branches_b):
+        return True
+
+    return False
+
+
+_EVENT_DATE_FIELDS = ("oa_date", "interview_date", "deadline")
+
+
+def has_event_coincidence(
+    incoming: dict[str, Any],
+    candidate: dict[str, Any],
+    config: DeduplicationConfig | None = None,
+) -> bool:
+    """Doc 15 §1.4-D stage 2: do these two records describe the same event?
+
+    ``True`` when either side holds:
+
+    - a shared, non-empty ``source_thread_id``, or
+    - any populated date field (``oa_date``/``interview_date``/``deadline``)
+      that matches the other side to the minute, or
+    - a populated date field within
+      ``config.event_coincidence_tolerance_hours`` of the other side.
+    """
+    if config is None:
+        config = DeduplicationConfig()
+
+    thread_a = incoming.get("source_thread_id")
+    thread_b = candidate.get("source_thread_id")
+    if thread_a and thread_b and thread_a == thread_b:
+        return True
+
+    for date_field in _EVENT_DATE_FIELDS:
+        raw_a = incoming.get(date_field)
+        raw_b = candidate.get(date_field)
+        if not raw_a or not raw_b:
+            continue
+        dt_a = parse_datetime_flexible(raw_a)
+        dt_b = parse_datetime_flexible(raw_b)
+        if dt_a is None or dt_b is None:
+            continue
+        diff_hours = abs((dt_a - dt_b).total_seconds()) / 3600.0
+        if diff_hours <= config.event_coincidence_tolerance_hours:
+            return True
+
+    return False
+
+
+def _has_any_populated_date(record: dict[str, Any]) -> bool:
+    return any(record.get(f) for f in _EVENT_DATE_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -492,17 +698,46 @@ def compare_opportunities(
 
     confidence = compute_confidence_score(c_score, r_score, t_score, config)
 
-    # Hard gate: type mismatch can disqualify regardless of confidence
-    if config.require_type_match:
-        type_effective = t_score.effective_score
-        if type_effective < config.type_fuzzy_threshold:
-            confidence = min(confidence, config.duplicate_confidence_threshold - 0.01)
+    # Hard gate (doc 15 §1.4-A): a type mismatch can disqualify regardless of
+    # confidence, but *only* when both sides have a known, incompatible type.
+    # An absent type on either side must never trip this gate.
+    type_conflict = config.require_type_match and _type_conflict(t_score)
+    if type_conflict:
+        confidence = min(confidence, config.duplicate_confidence_threshold - 0.01)
 
-    is_dup = (
-        c_score.effective_score >= config.company_fuzzy_threshold
-        and r_score.effective_score >= config.role_fuzzy_threshold
-        and confidence >= config.duplicate_confidence_threshold
+    role_conflict = _role_conflict(r_score, config)
+    eligibility_conflict = _eligibility_conflict(incoming, candidate)
+    blocked = type_conflict or role_conflict or eligibility_conflict
+
+    blocked_reason: str | None = None
+    if type_conflict:
+        blocked_reason = "type_conflict"
+    elif role_conflict:
+        blocked_reason = "role_conflict"
+    elif eligibility_conflict:
+        blocked_reason = "eligibility_conflict"
+
+    # A field that was dropped as absent must not gate is_duplicate on its
+    # (meaningless) threshold — that is precisely the "missing value voted"
+    # bug this fix removes.
+    company_ok = c_score.is_absent or c_score.effective_score >= config.company_fuzzy_threshold
+    role_ok = r_score.is_absent or r_score.effective_score >= config.role_fuzzy_threshold
+    identity_ok = company_ok and role_ok and confidence >= config.duplicate_confidence_threshold
+
+    # Doc 15 §1.4-D stage 2: identity alone is never sufficient. Require
+    # event coincidence (shared thread, or a date match/near-match) before
+    # actually merging. When neither side has *any* populated date field and
+    # there is no shared thread, there is nothing to contradict identity
+    # with either — treat that as non-blocking rather than silently refusing
+    # every dateless pair.
+    coincidence = has_event_coincidence(incoming, candidate, config)
+    no_date_evidence = not _has_any_populated_date(incoming) and not _has_any_populated_date(
+        candidate
     )
+    coincidence_satisfied = coincidence or no_date_evidence
+
+    is_dup = identity_ok and not blocked and coincidence_satisfied
+    review_required = identity_ok and not blocked and not coincidence_satisfied
 
     is_exact = c_score.exact_match and r_score.exact_match and t_score.exact_match
 
@@ -514,6 +749,8 @@ def compare_opportunities(
         confidence_score=confidence,
         is_duplicate=is_dup,
         is_exact=is_exact,
+        review_required=review_required,
+        blocked_reason=blocked_reason,
     )
 
 
@@ -542,23 +779,44 @@ def find_all_matches(
     -------
     list[DuplicateResult]
         Only results where ``is_duplicate`` is ``True``, highest confidence first.
+
+    Note
+    ----
+    Doc 15 §1.4-C: this used to pre-filter candidates to those sharing the
+    first character of the normalised company name — at 115 rows that is a
+    correctness bug, not an optimisation (it permanently prevents e.g.
+    "Eternal (Zomato)" [E] from ever being compared against "Zomato" [Z]).
+    The prefilter has been removed; every candidate is compared.
     """
     if config is None:
         config = DeduplicationConfig()
 
-    inc_company = normalize_company(incoming.get(FIELD_COMPANY, ""))
-    first_char = inc_company[0] if inc_company else ""
-
-    filtered_candidates = []
-    for c in candidates:
-        cand_company = normalize_company(c.get(FIELD_COMPANY, ""))
-        if not first_char or not cand_company or cand_company[0] == first_char:
-            filtered_candidates.append(c)
-
-    results = [compare_opportunities(incoming, c, config=config) for c in filtered_candidates]
+    results = [compare_opportunities(incoming, c, config=config) for c in candidates]
     duplicates = [r for r in results if r.is_duplicate]
     duplicates.sort(key=lambda r: r.confidence_score, reverse=True)
     return duplicates
+
+
+def find_review_matches(
+    incoming: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    config: DeduplicationConfig | None = None,
+) -> list[DuplicateResult]:
+    """Return candidates that matched on identity but lack event coincidence.
+
+    Doc 15 §1.4-D: a pair that passes identity (company/role/type) but has
+    neither a shared thread nor a matching/near-matching date, and is not
+    vetoed by a hard blocker, must not be silently merged *or* silently
+    inserted as a new drive. It is surfaced here so the caller can route it
+    to ``unmatched_confirmations`` for human review.
+    """
+    if config is None:
+        config = DeduplicationConfig()
+
+    results = [compare_opportunities(incoming, c, config=config) for c in candidates]
+    reviews = [r for r in results if r.review_required]
+    reviews.sort(key=lambda r: r.confidence_score, reverse=True)
+    return reviews
 
 
 def find_best_match(
@@ -583,25 +841,42 @@ def find_best_match(
     Returns
     -------
     DuplicateResult | None
-        Best match (highest confidence) when a duplicate exists, else ``None``.
+        Best duplicate match (``is_duplicate=True``) when one exists;
+        otherwise the best *review* match (``review_required=True``, doc 15
+        §1.4-D) when identity matched without event coincidence; otherwise
+        ``None``. Callers must check ``is_duplicate`` vs ``review_required``
+        — they are mutually exclusive on the returned result.
     """
     matches = find_all_matches(incoming, candidates, config=config)
-    if not matches:
-        logger.debug(
-            "No duplicate found for %s / %s",
+    if matches:
+        best = matches[0]
+        logger.info(
+            "Duplicate detected for '%s / %s' → candidate id=%s  %s",
             incoming.get(FIELD_COMPANY),
             incoming.get(FIELD_ROLE),
+            best.candidate_id,
+            best.summary(),
         )
-        return None
+        return best
 
-    best = matches[0]
-    logger.info(
-        "Duplicate detected for '%s / %s' → candidate id=%s  %s",
+    reviews = find_review_matches(incoming, candidates, config=config)
+    if reviews:
+        best_review = reviews[0]
+        logger.info(
+            "Identity match without event coincidence for '%s / %s' → "
+            "candidate id=%s  %s (routing to review)",
+            incoming.get(FIELD_COMPANY),
+            incoming.get(FIELD_ROLE),
+            best_review.candidate_id,
+            best_review.summary(),
+        )
+        return best_review
+
+    logger.debug(
+        "No duplicate found for %s / %s",
         incoming.get(FIELD_COMPANY),
         incoming.get(FIELD_ROLE),
-        best.candidate_id,
-        best.summary(),
     )
-    return best
+    return None
 
 

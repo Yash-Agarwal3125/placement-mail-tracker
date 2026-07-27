@@ -110,6 +110,9 @@ _CANONICAL_NAMES: dict[str, str] = {
     "jw consultants": "JW Consultants",
     "cisco": "Cisco",
     "clayfin": "Clayfin",
+    "eternal (zomato)": "Zomato",
+    "eternal(zomato)": "Zomato",
+    "zomato": "Zomato",
 }
 
 
