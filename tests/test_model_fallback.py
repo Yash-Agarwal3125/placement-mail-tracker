@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from placement_mail_tracker.ai.gemini_extractor import (
@@ -214,6 +215,83 @@ def test_generate_content_uses_zero_temperature(test_settings):
 # Prompt-and-validation workstream: confidence field, null-discipline, DMY
 # convention, field definitions, and few-shot examples in the prompt.
 # ---------------------------------------------------------------------------
+
+
+class TestGroqProvider:
+    """AI_PROVIDER=groq routes extraction through Groq's OpenAI-compatible
+    endpoint instead of the Gemini SDK, reusing the same retry/fallback/
+    JSON-parse machinery."""
+
+    @pytest.fixture
+    def groq_settings(self):
+        # Settings fields use `alias=...`; model_config has no
+        # populate_by_name, so construction must use the UPPERCASE env-var
+        # aliases (see conftest.py's mock_settings) — snake_case kwargs are
+        # silently dropped by extra="ignore" and fall back to real .env values.
+        return Settings(
+            APP_ENV="testing",
+            AI_PROVIDER="groq",
+            GROQ_API_KEY="fake-groq-key",
+            GROQ_MODEL="llama-3.3-70b-versatile",
+            GROQ_FALLBACK_MODELS=["llama-3.1-8b-instant"],
+            GEMINI_MAX_RETRIES=1,
+            GEMINI_RETRY_DELAY_SECONDS=0.01,
+        )
+
+    def test_calls_groq_endpoint_with_expected_shape(self, groq_settings, monkeypatch):
+        captured = {}
+
+        def fake_post(url, *, headers, json, timeout):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {
+                "choices": [{"message": {"content": '{"company_name": "Tekion"}'}}]
+            }
+            return response
+
+        monkeypatch.setattr(
+            "placement_mail_tracker.ai.gemini_extractor.httpx.post", fake_post
+        )
+        extractor = GeminiPlacementExtractor(groq_settings)
+
+        result = extractor.extract_from_text("Test email")
+
+        assert result["company_name"] == "Tekion"
+        assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+        assert captured["headers"]["Authorization"] == "Bearer fake-groq-key"
+        assert captured["json"]["model"] == "llama-3.3-70b-versatile"
+        assert captured["json"]["response_format"] == {"type": "json_object"}
+
+    def test_daily_quota_exhaustion_detected_for_groq_wording(self, groq_settings, monkeypatch):
+        """Groq's 429 body says 'requests per day (RPD)', not Gemini's
+        camelCase 'PerDay' — _is_daily_quota_exhausted must catch both."""
+
+        def fake_post(url, *, headers, json, timeout):
+            request = httpx.Request("POST", url)
+            response = httpx.Response(
+                429,
+                request=request,
+                json={
+                    "error": {
+                        "message": (
+                            "Rate limit reached for model `llama-3.3-70b-versatile` "
+                            "on requests per day (RPD): Limit 1000, Used 1000."
+                        )
+                    }
+                },
+            )
+            return response
+
+        monkeypatch.setattr(
+            "placement_mail_tracker.ai.gemini_extractor.httpx.post", fake_post
+        )
+        extractor = GeminiPlacementExtractor(groq_settings)
+
+        with pytest.raises(GeminiQuotaExhaustedError):
+            extractor.extract_from_text("Test email")
 
 
 class TestConfidenceField:
