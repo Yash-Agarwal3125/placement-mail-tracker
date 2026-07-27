@@ -180,11 +180,18 @@ class ConfigValidator:
             component="sheets",
         )
         
-        self.validate_env_var(
-            self.settings.gemini_api_key,
-            "Gemini API Key (GEMINI_API_KEY)",
-            is_critical=strict,
-        )
+        if self.settings.ai_provider == "groq":
+            self.validate_env_var(
+                self.settings.groq_api_key,
+                "Groq API Key (GROQ_API_KEY)",
+                is_critical=strict,
+            )
+        else:
+            self.validate_env_var(
+                self.settings.gemini_api_key,
+                "Gemini API Key (GEMINI_API_KEY)",
+                is_critical=strict,
+            )
         self.validate_env_var(
             self.settings.google_sheet_id,
             "Google Sheet ID (GOOGLE_SHEET_ID)",
