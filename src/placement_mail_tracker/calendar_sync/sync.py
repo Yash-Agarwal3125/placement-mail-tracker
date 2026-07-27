@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from placement_mail_tracker.calendar_sync.client import (
     CalendarAuthenticationError,
+    CalendarEventGoneError,
     GoogleCalendarClient,
 )
 from placement_mail_tracker.calendar_sync.derive import CalendarEvent, derive_events
@@ -117,6 +118,54 @@ class CalendarSyncEngine:
 
         if stale_pass_enabled:
             self._stale_pass(states_by_key, active_opp_ids, calendar_id, dry_run, result)
+
+        return result
+
+    def reconcile_deletions(self) -> CalendarSyncResult:
+        """One-time sweep marking rows the user deleted on Google as ``done``.
+
+        Opposite of ``rebuild()``: a manual Google-side deletion is treated as
+        intentional (drive the user never applied to / wasn't shortlisted for)
+        and is never recreated. GETs every non-``done`` row's stored
+        ``gcal_event_id``; a 404 freezes the row (``done``) instead of
+        re-inserting. Existing events are left untouched. CLI-only
+        (``--calendar-reconcile``), never run automatically.
+        """
+        result = CalendarSyncResult(dry_run=False)
+        self.last_error = None
+
+        for state in self.database.fetch_calendar_event_states():
+            if state["status"] == "done":
+                continue
+
+            calendar_id = state.get("gcal_calendar_id")
+            gcal_event_id = state.get("gcal_event_id")
+            if not calendar_id or not gcal_event_id:
+                continue  # nothing on Google to check
+
+            try:
+                remote = self.client.get_event(calendar_id, gcal_event_id)
+            except CalendarAuthenticationError:
+                raise
+            except Exception as error:  # noqa: BLE001 - per-row isolation
+                logger.warning(
+                    "Calendar reconcile get_event failed for row id=%s: %s",
+                    state.get("id"), error,
+                )
+                self.last_error = str(error)
+                continue
+
+            if remote is not None:
+                result.unchanged += 1
+                continue
+
+            row_id = state.get("id")
+            if row_id is not None:
+                self.database.set_calendar_event_status(row_id, "done")
+            result.marked_done += 1
+            result.flagged.append(
+                f"{state['title']}: removed from Google Calendar — no longer tracked"
+            )
 
         return result
 
@@ -309,6 +358,26 @@ class CalendarSyncEngine:
             self.client.patch_event(calendar_id, gcal_event_id, self._build_body(event))
         except CalendarAuthenticationError:
             raise
+        except CalendarEventGoneError:
+            # The user deleted this event on Google's side directly (e.g. a
+            # drive they never applied to / weren't shortlisted for). Freeze
+            # the row instead of retrying every cycle or silently drifting —
+            # "done" is already excluded from all future diffing and from
+            # rebuild(), so it stays deleted and is never recreated.
+            logger.info(
+                "Calendar event for %s %s (opportunity_id=%s) was deleted on Google; "
+                "marking done",
+                event.event_type, event.title, event.opportunity_id,
+            )
+            row_id = existing.get("id")
+            if row_id is not None:
+                self.database.set_calendar_event_status(row_id, "done")
+            result.marked_done += 1
+            result.flagged.append(
+                f"{event.title}: removed from Google Calendar — no longer tracked"
+            )
+            states_by_key[key]["status"] = "done"
+            return
         except Exception as error:  # noqa: BLE001 - one bad event must not abort the pass
             logger.warning(
                 "Calendar patch failed for %s %s (opportunity_id=%s): %s",
@@ -419,6 +488,22 @@ class CalendarSyncEngine:
                 self.client.patch_event(calendar_id, gcal_event_id, {"summary": new_title})
             except CalendarAuthenticationError:
                 raise
+            except CalendarEventGoneError:
+                # Already deleted on Google (user cleanup) — freeze instead
+                # of retitling-forever a row that has nothing left to retitle.
+                logger.info(
+                    "Calendar event for opportunity_id=%s was deleted on Google; marking done",
+                    opportunity_id,
+                )
+                row_id = state.get("id")
+                if row_id is not None:
+                    self.database.set_calendar_event_status(row_id, "done")
+                result.marked_done += 1
+                result.flagged.append(
+                    f"{state['title']}: removed from Google Calendar — no longer tracked"
+                )
+                state["status"] = "done"
+                continue
             except Exception as error:  # noqa: BLE001 - one bad event must not abort the pass
                 logger.warning(
                     "Calendar stale retitle failed for opportunity_id=%s: %s", opportunity_id, error

@@ -479,6 +479,13 @@ _COMPANY_FROM_SUBJECT = [
         r"(.+?)(?:\s*[–—\-:\|]|\s*$)",
         re.IGNORECASE,
     ),
+    # VIT CDC shortlist-notice subjects: "Hindustan Unilever - Bio Tech
+    # shortlisted list - Reg", "Clayfin - Shortlisted list - Reg". Appended
+    # last so it only fires when nothing more specific already matched.
+    re.compile(
+        r"^(.+?)\s*[–—\-]\s*.*?\b(?:shortlist(?:ed)?|selection|selected)\s*list\b",
+        re.IGNORECASE,
+    ),
 ]
 
 _DEGREE_LEVEL_PATTERNS: dict[str, re.Pattern[str]] = {

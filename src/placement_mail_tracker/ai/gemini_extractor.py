@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
@@ -99,14 +100,20 @@ def _backoff_secs(attempt: int) -> float:
     return min(2 ** attempt + random.uniform(0, 1), 30.0)
 
 
+_PER_DAY_RE = re.compile(r"per\s*day", re.IGNORECASE)
+
+
 def _is_daily_quota_exhausted(error: Exception) -> bool:
     """Detect a genuine per-day quota 429, not a per-minute throttle or any
     other transient error. Mirrors the detection already used by the eval
     harness (scripts/eval/run_eval.py CachingGeminiModel.generate_content),
     which checks the same "429" + "PerDay" substrings in the error text.
+    Case-insensitive/whitespace-tolerant so it also matches Groq's "requests
+    per day (RPD)" / "tokens per day (TPD)" wording, not just Gemini's
+    camelCase "PerDay".
     """
     msg = str(error)
-    return "429" in msg and "PerDay" in msg
+    return "429" in msg and bool(_PER_DAY_RE.search(msg))
 
 
 def _load_health() -> dict[str, dict[str, int]]:
@@ -264,9 +271,15 @@ class GeminiPlacementExtractor:
         *,
         image_parts: list[tuple[bytes, str]] | None = None,
     ) -> dict[str, Any]:
-        """Send cleaned email content to Gemini and return validated dictionaries."""
-        if not self.settings.gemini_api_key and self._model is None:
-            logger.warning("Gemini API key is missing; returning empty extraction result")
+        """Send cleaned email content to the configured AI provider and return
+        validated dictionaries."""
+        is_groq = self.settings.ai_provider == "groq"
+        api_key = self.settings.groq_api_key if is_groq else self.settings.gemini_api_key
+        if not api_key and self._model is None:
+            logger.warning(
+                "%s API key is missing; returning empty extraction result",
+                "Groq" if is_groq else "Gemini",
+            )
             return empty_extraction_result()
 
         prompt = build_extraction_prompt(email_content)
@@ -277,7 +290,10 @@ class GeminiPlacementExtractor:
         # primary + one fallback), each retried `max_retries` time(s) (default
         # 1). This bounds live calls per email to max_models_to_try *
         # max_retries instead of trying every configured fallback model.
-        all_models = [self.settings.gemini_model] + self.settings.gemini_fallback_models
+        if is_groq:
+            all_models = [self.settings.groq_model] + self.settings.groq_fallback_models
+        else:
+            all_models = [self.settings.gemini_model] + self.settings.gemini_fallback_models
         models_to_try = all_models[: self.max_models_to_try]
 
         for idx, model_name in enumerate(models_to_try):
@@ -376,6 +392,9 @@ class GeminiPlacementExtractor:
         if self._model is not None:
             return self._model.generate_content(prompt)
 
+        if self.settings.ai_provider == "groq":
+            return self._call_groq(prompt, model_name)
+
         if self._client is None:
             self._client = genai.Client(api_key=self.settings.gemini_api_key)
             if not self._models_discovered:
@@ -405,6 +424,53 @@ class GeminiPlacementExtractor:
                 "response_schema": PlacementExtraction,
             },
         )
+
+    def _call_groq(self, prompt: str, model_name: str) -> _TextResponse:
+        """Call Groq's OpenAI-compatible chat completions endpoint.
+
+        Returns a plain object with a ``.text`` attribute (no ``.parsed``),
+        so it falls through to the same manual JSON parse + Pydantic
+        validation path already used for the injected-fake-model test
+        Protocol (``_extract_result_from_response``) — no extra plumbing
+        needed for Groq specifically.
+        """
+        try:
+            response = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            try:
+                detail = error.response.json().get("error", {}).get("message", error.response.text)
+            except Exception:  # noqa: BLE001 - best-effort error detail
+                detail = error.response.text
+            msg = f"{error.response.status_code} Groq error: {detail}"
+            raise GeminiExtractionError(msg) from error
+        except httpx.RequestError as error:
+            raise GeminiExtractionError(f"Groq request failed: {error}") from error
+
+        try:
+            text = response.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, ValueError) as error:
+            raise GeminiExtractionError(f"Malformed Groq response: {error}") from error
+
+        return _TextResponse(text)
+
+
+class _TextResponse:
+    """Minimal stand-in for a Gemini SDK response: just a ``.text`` attribute."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.parsed = None
 
 
 def clean_email_content(

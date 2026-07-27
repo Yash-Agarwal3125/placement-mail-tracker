@@ -38,7 +38,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calendar-rebuild",
         action="store_true",
-        help="Reconcile calendar_events state against live Google Calendar events.",
+        help="Reconcile calendar_events state against live Google Calendar events. "
+        "WARNING: re-inserts any event you deleted manually on Google.",
+    )
+    parser.add_argument(
+        "--calendar-reconcile",
+        action="store_true",
+        help="Mark calendar_events rows done for events you deleted manually on "
+        "Google (opposite of --calendar-rebuild: never recreates them).",
     )
     return parser.parse_args()
 
@@ -101,6 +108,7 @@ def main() -> int:
                 cycle_report = runner.run_once(
                     calendar_dry_run=args.calendar_dry_run,
                     calendar_rebuild=args.calendar_rebuild,
+                    calendar_reconcile=args.calendar_reconcile,
                 )
                 _merge_report(report, cycle_report)
 

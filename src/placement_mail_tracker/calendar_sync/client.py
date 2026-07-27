@@ -40,6 +40,10 @@ class CalendarAuthenticationError(RuntimeError):
     """Raised when Calendar OAuth cannot be completed or the refresh token is dead."""
 
 
+class CalendarEventGoneError(RuntimeError):
+    """Raised by ``patch_event`` when the stored event id 404s (user deleted it on Google)."""
+
+
 class GoogleCalendarClient:
     """Calendar API wrapper for the "VIT Placements" calendar."""
 
@@ -200,13 +204,28 @@ class GoogleCalendarClient:
         return response["id"]
 
     def patch_event(self, calendar_id: str, event_id: str, body: dict[str, Any]) -> None:
-        """events().patch by stored id — never search-by-title."""
-        self._call_with_retry(
-            lambda: self._get_service()
-            .events()
-            .patch(calendarId=calendar_id, eventId=event_id, body=body)
-            .execute()
-        )
+        """events().patch by stored id — never search-by-title.
+
+        Raises ``CalendarEventGoneError`` on a 404 instead of the generic
+        retry-and-reraise path: the user deleting the event on Google is an
+        expected outcome (not a transient failure), and the caller needs to
+        tell it apart from a real API error so it can freeze the local state
+        instead of retrying forever.
+        """
+
+        def _call() -> None:
+            try:
+                self._get_service().events().patch(
+                    calendarId=calendar_id, eventId=event_id, body=body
+                ).execute()
+            except HttpError as error:
+                if error.resp.status == 404:
+                    raise CalendarEventGoneError(
+                        f"Event {event_id} no longer exists on Google Calendar"
+                    ) from error
+                raise
+
+        self._call_with_retry(_call)
 
     def get_event(self, calendar_id: str, event_id: str) -> dict[str, Any] | None:
         """events().get; returns None on 404 (used only by rebuild).

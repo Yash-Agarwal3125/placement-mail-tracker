@@ -47,6 +47,21 @@ class Settings(BaseSettings):
     gemini_max_models_to_try: int = Field(default=2, alias="GEMINI_MAX_MODELS_TO_TRY")
     gemini_retry_delay_seconds: float = Field(default=2.0, alias="GEMINI_RETRY_DELAY_SECONDS")
 
+    # AI extraction backend. "gemini" (default, preserves existing behavior)
+    # or "groq" — Groq's free tier is far more generous than Gemini's 20
+    # requests/day (llama-3.3-70b-versatile: 1,000 requests/day / 100k
+    # tokens/day; its fallback llama-3.1-8b-instant: 14,400 requests/day),
+    # which matters for a mailbox that can generate dozens of Gemini-needing
+    # emails a day. Uses the OpenAI-compatible chat completions endpoint via
+    # httpx (already an installed transitive dependency) — no new package.
+    ai_provider: str = Field(default="gemini", alias="AI_PROVIDER")
+    groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
+    groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    groq_fallback_models: list[str] = Field(
+        default_factory=lambda: ["llama-3.1-8b-instant"],
+        alias="GROQ_FALLBACK_MODELS",
+    )
+
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
     google_sheets_credentials_file: str = Field(
         default="config/credentials.json",
@@ -101,6 +116,12 @@ class Settings(BaseSettings):
         default=True, alias="REMINDER_ESCALATION_ENABLED"
     )
     reminder_max_per_mail: int = Field(default=20, alias="REMINDER_MAX_PER_MAIL")
+
+    # Per-drive deadline/event push alerts (<4h/<24h/<48h) fire immediately,
+    # every run, on top of the once-daily digest -- that's the inbox-bloat
+    # path. Off by default keeps only the daily digest + genuine system
+    # failure alerts; turn back on for real-time push reminders.
+    urgent_alerts_enabled: bool = Field(default=False, alias="URGENT_ALERTS_ENABLED")
 
     # Feature 1 (docs/design/10-confirmation-and-reminders.md): automatic
     # my_status writes from CDC application-confirmation mails ship OFF by
