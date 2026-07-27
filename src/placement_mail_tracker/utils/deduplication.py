@@ -644,9 +644,20 @@ def has_event_coincidence(
 
     for date_field in _EVENT_DATE_FIELDS:
         raw_a = incoming.get(date_field)
-        raw_b = candidate.get(date_field)
-        if not raw_a or not raw_b:
+        if not raw_a:
             continue
+        raw_b = candidate.get(date_field)
+        if not raw_b:
+            # The candidate has no value yet for this specific field (e.g.
+            # the very first OA notice for a drive that only had a
+            # deadline so far) -- a first-time fill can't contradict a date
+            # that doesn't exist, so it must not be blocked behind an
+            # impossible date match or a shared Gmail thread. Without this,
+            # any drive that already has ANY date populated (nearly all of
+            # them, via `deadline`) can never accept its first OA/interview
+            # date unless the notice happens to land in the same thread as
+            # the original announcement -- which VIT CDC mail rarely does.
+            return True
         dt_a = parse_datetime_flexible(raw_a)
         dt_b = parse_datetime_flexible(raw_b)
         if dt_a is None or dt_b is None:

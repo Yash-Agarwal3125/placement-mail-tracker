@@ -294,6 +294,41 @@ class TestReviewRouting:
         assert len(reviews) == 1
         assert reviews[0].candidate_id == 500
 
+    def test_first_oa_notice_fills_empty_field_without_manufactured_review(self):
+        """Regression: a drive that already has a deadline (nearly all of
+        them) but no oa_date yet must accept its first OA notice even
+        without a shared Gmail thread -- there is no existing oa_date for
+        the new one to contradict. Previously this always routed to review
+        because `deadline` being populated on the candidate made
+        `no_date_evidence` False, while the mismatched thread ids and the
+        (both-None) oa_date/interview_date fields left `coincidence` False
+        too -- the very first OA/interview email for *any* drive could
+        never be applied.
+        """
+        incoming = {
+            "id": None,
+            "company_name": "Tekion",
+            "role": None,
+            "internship_or_fulltime": None,
+            "oa_date": "2026-07-28T09:30",
+            "interview_date": None,
+            "deadline": None,
+            "source_thread_id": "thread_oa_notice",
+        }
+        candidate = {
+            "id": 89,
+            "company_name": "Tekion",
+            "role": None,
+            "internship_or_fulltime": None,
+            "oa_date": None,
+            "interview_date": None,
+            "deadline": "2026-07-24T09:00",
+            "source_thread_id": "thread_original_drive",
+        }
+        result = compare_opportunities(incoming, candidate)
+        assert result.is_duplicate is True
+        assert result.review_required is False
+
     def test_dateless_identity_match_merges_without_manufactured_review(self):
         """When neither side has any date field populated at all, there is
         nothing to contradict identity with -- must not be forced to review.
