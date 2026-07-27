@@ -278,6 +278,47 @@ class TestF3SelfGeneratedMailShortCircuit:
             "notifications@github.com",
         )
 
+    def test_digest_subject_with_content_is_short_circuited(self, db_manager, mock_settings):
+        """Regression for production opportunities.id=53 (Flender): the daily
+        digest's own subject, when it has actionable content (new drives /
+        OA-tomorrow counts), used to be built as e.g. "3 New Drives | 1 OA
+        Tomorrow" by digest_generator._build_subject -- a string that starts
+        with neither of the two self-mail prefixes runner.py checks for, so a
+        digest re-delivered to the monitored inbox slipped past
+        _is_self_generated_mail and got re-extracted as a brand-new placement
+        email. Gemini then had to invent an oa_date from the digest's own
+        "OA Tomorrow" summary text with no real drive body behind it, and
+        produced an implausible year (2023) for what should have been the
+        already-correctly-tracked 2026 Flender interview -- creating a bogus
+        duplicate drive row. digest_generator._build_subject now always
+        prefixes with "Placement Mail Tracker" (matching the existing
+        failure-streak alert convention) so this class of subject is caught
+        by the sender-independent subject-prefix fallback below.
+        """
+        from placement_mail_tracker.scheduler.digest_generator import _build_subject
+
+        now = datetime(2026, 7, 8, 8, 0, 0)
+        new_opps = [{"company_name": "Flender"}]
+        upcoming_events = [
+            {"oa_date": "2026-07-09", "interview_date": None, "next_event_date": None}
+        ]
+        subject = _build_subject([], new_opps, upcoming_events, now)
+
+        # The exact reconstructed-bug subject from production, with the fix
+        # applied, must now short-circuit before extraction -- regardless of
+        # the sender used, since a mail-forwarding rule (or historical
+        # smtp_email misconfiguration) can rewrite the sender the tracker
+        # actually sees.
+        stats, msg_id = self._process(
+            db_manager, mock_settings, subject, "someone-else@example.com",
+        )
+        assert stats["skipped"] == 1
+        row = db_manager.connection.execute(
+            "SELECT processed_status FROM processed_emails WHERE gmail_message_id = ?",
+            (msg_id,),
+        ).fetchone()
+        assert row["processed_status"] == "SELF_NOISE"
+
     def test_normal_cdc_mail_is_untouched(self, db_manager, mock_settings):
         runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
         extractor = MagicMock()
