@@ -265,6 +265,54 @@ class TestGroqProvider:
         assert captured["json"]["model"] == "llama-3.3-70b-versatile"
         assert captured["json"]["response_format"] == {"type": "json_object"}
 
+    def test_per_minute_rate_limit_waits_and_retries_same_model(
+        self, groq_settings, monkeypatch
+    ):
+        """A per-minute (TPM/RPM) 429 -- distinct from a daily-quota 429 --
+        should wait and retry the SAME model rather than immediately falling
+        through to a weaker fallback model or the rule-only result."""
+        calls = []
+        sleeps = []
+        monkeypatch.setattr(
+            "placement_mail_tracker.ai.gemini_extractor.time.sleep", sleeps.append
+        )
+
+        def fake_post(url, *, headers, json, timeout):
+            calls.append(json["model"])
+            response = MagicMock()
+            if len(calls) == 1:
+                response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                    "429", request=MagicMock(), response=MagicMock(
+                        status_code=429,
+                        json=lambda: {
+                            "error": {
+                                "message": (
+                                    "Rate limit reached ... on tokens per minute (TPM): "
+                                    "Limit 12000, Used 10865. Please try again in 5.0s."
+                                )
+                            }
+                        },
+                    ),
+                )
+                return response
+            response.raise_for_status.return_value = None
+            response.json.return_value = {
+                "choices": [{"message": {"content": '{"company_name": "Tekion"}'}}]
+            }
+            return response
+
+        monkeypatch.setattr(
+            "placement_mail_tracker.ai.gemini_extractor.httpx.post", fake_post
+        )
+        extractor = GeminiPlacementExtractor(groq_settings)
+
+        result = extractor.extract_from_text("Test email")
+
+        assert result["company_name"] == "Tekion"
+        # Retried the SAME (primary) model, not the fallback.
+        assert calls == ["llama-3.3-70b-versatile", "llama-3.3-70b-versatile"]
+        assert sleeps == [5.0]
+
     def test_daily_quota_exhaustion_detected_for_groq_wording(self, groq_settings, monkeypatch):
         """Groq's 429 body says 'requests per day (RPD)', not Gemini's
         camelCase 'PerDay' — _is_daily_quota_exhausted must catch both."""

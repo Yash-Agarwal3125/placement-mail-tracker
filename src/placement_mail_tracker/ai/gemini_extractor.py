@@ -116,6 +116,32 @@ def _is_daily_quota_exhausted(error: Exception) -> bool:
     return "429" in msg and bool(_PER_DAY_RE.search(msg))
 
 
+_STATUS_CODE_RE = re.compile(r"^(\d{3})\b")
+_RETRY_AFTER_RE = re.compile(r"(?:retry in|try again in)\s*([\d.]+)\s*s", re.IGNORECASE)
+
+
+def _http_status_code(error: Exception) -> int | None:
+    """HTTP status code regardless of provider: genai_errors.APIError.code
+    for Gemini, or the leading "NNN " our own _call_groq wraps into the
+    GeminiExtractionError message (e.g. "429 Groq error: ...")."""
+    if isinstance(error, genai_errors.APIError):
+        return error.code
+    match = _STATUS_CODE_RE.match(str(error))
+    return int(match.group(1)) if match else None
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    """Provider-suggested wait, from Gemini's "Please retry in Xs" or Groq's
+    "Please try again in Xs" — whichever the error text happens to contain."""
+    match = _RETRY_AFTER_RE.search(str(error))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def _load_health() -> dict[str, dict[str, int]]:
     try:
         if _HEALTH_FILE.exists():
@@ -319,10 +345,8 @@ class GeminiPlacementExtractor:
                     # `generate_content(prompt)`) that don't accept this kwarg
                     # keep working unchanged for the (overwhelmingly common)
                     # no-image case.
-                    response = (
-                        self._generate_content(prompt, model_name, image_parts=image_parts)
-                        if image_parts
-                        else self._generate_content(prompt, model_name)
+                    response = self._generate_content_with_rate_limit_retry(
+                        prompt, model_name, image_parts=image_parts
                     )
                     result = _extract_result_from_response(response)
                     model_succeeded = True
@@ -374,6 +398,50 @@ class GeminiPlacementExtractor:
         if last_error:
             raise GeminiExtractionError(str(last_error)) from last_error
         raise GeminiExtractionError("Unknown Gemini extraction failure")
+
+    def _generate_content_with_rate_limit_retry(
+        self,
+        prompt: str,
+        model_name: str,
+        *,
+        image_parts: list[tuple[bytes, str]] | None = None,
+    ) -> Any:
+        """Wraps ``_generate_content``: on a per-minute rate limit (a 429 that
+        is NOT a daily-quota exhaustion), wait the provider's suggested
+        retry-after (capped by ``ai_rate_limit_wait_seconds``) and retry the
+        SAME model, up to ``ai_rate_limit_max_retries`` times, instead of
+        immediately falling back to a weaker model or degrading to the
+        rule-only result. A burst of many emails processed back-to-back can
+        trip Groq's per-minute TPM/RPM cap even though the daily budget is
+        nowhere close to exhausted — waiting a bounded amount and retrying
+        keeps extraction on the AI path instead of silently losing fields.
+        """
+        rate_limit_attempts = 0
+        while True:
+            try:
+                if image_parts:
+                    return self._generate_content(prompt, model_name, image_parts=image_parts)
+                return self._generate_content(prompt, model_name)
+            except (GeminiExtractionError, genai_errors.APIError) as error:
+                is_rate_limited = (
+                    _http_status_code(error) == 429 and not _is_daily_quota_exhausted(error)
+                )
+                if (
+                    not is_rate_limited
+                    or rate_limit_attempts >= self.settings.ai_rate_limit_max_retries
+                ):
+                    raise
+                wait = min(
+                    _retry_after_seconds(error) or self.settings.ai_rate_limit_wait_seconds,
+                    self.settings.ai_rate_limit_wait_seconds,
+                )
+                rate_limit_attempts += 1
+                logger.warning(
+                    "[GEMINI] Per-minute rate limit on %s; waiting %.1fs before retrying "
+                    "the same model (attempt %s/%s)",
+                    model_name, wait, rate_limit_attempts, self.settings.ai_rate_limit_max_retries,
+                )
+                time.sleep(wait)
 
     def _generate_content(
         self,

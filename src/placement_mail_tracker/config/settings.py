@@ -61,6 +61,12 @@ class Settings(BaseSettings):
         default_factory=lambda: ["llama-3.1-8b-instant"],
         alias="GROQ_FALLBACK_MODELS",
     )
+    # A per-minute (TPM/RPM) rate limit is a "wait and retry the same model"
+    # situation, not a "give up on AI extraction" one -- unlike a genuine
+    # daily-quota exhaustion, it clears itself within a minute. Bounded so a
+    # persistently misbehaving account can't hang a run indefinitely.
+    ai_rate_limit_wait_seconds: float = Field(default=45.0, alias="AI_RATE_LIMIT_WAIT_SECONDS")
+    ai_rate_limit_max_retries: int = Field(default=2, alias="AI_RATE_LIMIT_MAX_RETRIES")
 
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
     google_sheets_credentials_file: str = Field(
