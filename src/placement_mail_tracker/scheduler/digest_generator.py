@@ -193,7 +193,20 @@ def _build_subject(
     if oa_tomorrow:
         n = oa_tomorrow
         parts.append(f"{n} OA Tomorrow")
-    return " | ".join(parts) if parts else f"Placement Summary - {now.strftime('%d %b %Y')}"
+    # Every digest subject must start with "Placement Mail Tracker" (the same
+    # marker used by the failure-streak alert) so scheduler/runner.py's
+    # _is_self_generated_mail() subject-prefix fallback recognizes it and
+    # short-circuits it before extraction if the sender-address check ever
+    # misses (e.g. smtp_email misconfigured, mail forwarded through a rule
+    # that rewrites the From header). Without this prefix, a digest whose
+    # body has actionable content (parts non-empty) carries a subject like
+    # "3 New Drives | 1 OA Tomorrow" that matches neither self-mail prefix,
+    # so the digest gets re-ingested as if it were new placement mail and can
+    # mint a bogus duplicate drive from whatever date Gemini infers out of
+    # its own summary text (see opportunities.id=53 in production data).
+    if parts:
+        return "Placement Mail Tracker: " + " | ".join(parts)
+    return f"Placement Mail Tracker: Placement Summary - {now.strftime('%d %b %Y')}"
 
 
 def _format_digest(

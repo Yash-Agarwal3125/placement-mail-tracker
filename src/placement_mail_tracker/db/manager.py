@@ -329,6 +329,7 @@ class DatabaseManager:
         source_email_id: str | None = None,
         source_thread_id: str | None = None,
         email_classification: str | None = None,
+        matched_opportunity_id: int | None = None,
     ) -> tuple[int, bool]:
         """Insert a new drive or update an existing one.
 
@@ -336,13 +337,26 @@ class DatabaseManager:
         1. Match by thread_id first (bulletproof for Gmail threads)
         2. Fallback to hash matching (company + role + package + year)
 
+        ``matched_opportunity_id`` (doc 15 §1.4-B) makes the fuzzy matcher's
+        result *authoritative*: when the caller already knows (via
+        ``utils.deduplication.find_best_match``) which existing row this
+        opportunity belongs to, pass its id here to route straight to an
+        update of that row. This bypasses the exact-hash gate, which is
+        blind to a differing ``internship_or_fulltime`` (or any other
+        hashed field) even when the fuzzy matcher correctly identified the
+        same underlying drive.
+
         Returns ``(opportunity_id, created_new_record)``.
         """
         normalized = self._normalize_opportunity(opportunity)
         existing = None
 
+        # 0. Fuzzy match already resolved identity — authoritative (§1.4-B).
+        if matched_opportunity_id is not None:
+            existing = self.fetch_opportunity_by_id(matched_opportunity_id)
+
         # 1. Match by thread ID first (Follow-up detection)
-        if source_thread_id:
+        if not existing and source_thread_id:
             existing = self.fetch_opportunity_by_thread_id(source_thread_id)
 
         # 2. Fallback to hash matching

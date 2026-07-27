@@ -419,6 +419,12 @@ class PlacementTrackerRunner:
             "rule_only": 0,
             "created": 0,
             "updated": 0,
+            # Doc 15 §1.4-D: identity matched a candidate drive but no event
+            # coincidence (shared thread / matching date) confirmed it, and
+            # no blocker ruled it out either -- routed to
+            # unmatched_confirmations for human review instead of a silent
+            # insert or a silent merge.
+            "review": 0,
         }
 
         for msg in messages:
@@ -656,6 +662,46 @@ class PlacementTrackerRunner:
             with self.connection:
                 active_opportunities = database.get_active_opportunities()
                 best_match = find_best_match(opp_data, active_opportunities)
+
+                # Doc 15 §1.4-D: identity matched but no event coincidence
+                # confirmed it, and no blocker ruled it out either. Never a
+                # silent insert, never a silent merge -- park it for human
+                # review the same way an unmatched confirmation mail is
+                # parked (docs/design/08-confirmation-audit.md C3).
+                if best_match and best_match.review_required and not best_match.is_duplicate:
+                    logger.info(
+                        "Identity match without event coincidence for %s - %s "
+                        "(Confidence: %s%%, candidate id=%s) -- routing to "
+                        "unmatched_confirmations for review",
+                        opp_data["company_name"],
+                        opp_data["role"],
+                        best_match.confidence_score,
+                        best_match.candidate_id,
+                    )
+                    database.insert_unmatched_confirmation(
+                        gmail_message_id=msg_id,
+                        extracted_text=(
+                            f"{opp_data.get('company_name')} / {opp_data.get('role')}: "
+                            f"identity matched drive id={best_match.candidate_id} "
+                            f"(confidence={best_match.confidence_score}) but no shared "
+                            "thread or matching date confirmed it as the same event."
+                        ),
+                        candidates=[dict(best_match.candidate)],
+                    )
+                    database.log_processed_email(
+                        gmail_message_id=msg_id,
+                        subject=subject,
+                        sender=sender,
+                        received_at=timestamp,
+                        filter_score=decision.score,
+                        filter_decision=asdict(decision),
+                        processed_status="unmatched_review",
+                        email_classification=classification,
+                    )
+                    stats["review"] += 1
+                    return
+
+                matched_opportunity_id: int | None = None
                 if best_match and best_match.is_duplicate:
                     logger.info(
                         "Fuzzy duplicate detected for %s - %s (Confidence: %s%%)",
@@ -663,6 +709,12 @@ class PlacementTrackerRunner:
                         opp_data["role"],
                         best_match.confidence_score,
                     )
+                    # Doc 15 §1.4-B: make the fuzzy match authoritative. Copying
+                    # display fields alone is not enough -- a differing
+                    # internship_or_fulltime (or any other hashed field) still
+                    # mints a fresh unique_hash and inserts a new row. Passing
+                    # the matched id routes straight to an update of that row.
+                    matched_opportunity_id = best_match.candidate_id
                     opp_data["company_name"] = best_match.candidate["company_name"]
                     opp_data["role"] = best_match.candidate["role"]
 
@@ -724,6 +776,7 @@ class PlacementTrackerRunner:
                     source_email_id=msg_id,
                     source_thread_id=thread_id,
                     email_classification=classification,
+                    matched_opportunity_id=matched_opportunity_id,
                 )
                 action = "inserted" if created else "updated"
                 if created:
