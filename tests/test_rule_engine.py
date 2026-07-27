@@ -267,6 +267,22 @@ class TestExtractFromEmail:
             )
             assert result.needs_gemini is True
 
+    def test_shortlist_notice_subjects_extract_company_without_gemini(self):
+        """VIT CDC shortlist notices like 'Company - [Role] shortlisted list -
+        Reg' previously extracted no company at all, forcing every one of
+        these through Gemini (and getting stuck once the free-tier daily
+        quota was exhausted). Rule-based extraction alone should now resolve
+        company + status and avoid Gemini for these."""
+        cases = [
+            ("Hindustan Unilever - Bio Tech shortlisted list - Reg", "Hindustan Unilever"),
+            ("Clayfin - Shortlisted list - Reg", "Clayfin"),
+        ]
+        for subject, expected_company in cases:
+            result = extract_from_email(subject)
+            assert result.company_name == expected_company
+            assert result.current_status == "SHORTLISTED"
+            assert result.needs_gemini is False
+
     def test_to_dict(self):
         """``to_dict`` should produce an opportunity-compatible dictionary."""
         result = RuleExtractionResult(

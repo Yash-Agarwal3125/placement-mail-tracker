@@ -244,7 +244,11 @@ class PlacementTrackerRunner:
     settings: Settings
 
     def run_once(
-        self, *, calendar_dry_run: bool = False, calendar_rebuild: bool = False
+        self,
+        *,
+        calendar_dry_run: bool = False,
+        calendar_rebuild: bool = False,
+        calendar_reconcile: bool = False,
     ) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
         run_start = datetime.now()
@@ -285,6 +289,7 @@ class PlacementTrackerRunner:
             run_start,
             calendar_dry_run=calendar_dry_run,
             calendar_rebuild=calendar_rebuild,
+            calendar_reconcile=calendar_reconcile,
         )
 
         self._finalize_report(report, stats, fetch_started_at)
@@ -1003,6 +1008,7 @@ class PlacementTrackerRunner:
         *,
         calendar_dry_run: bool = False,
         calendar_rebuild: bool = False,
+        calendar_reconcile: bool = False,
     ) -> None:
         sheets_sync_successful = False
         logger.info("[SYNC] Starting Sheet Sync")
@@ -1022,7 +1028,11 @@ class PlacementTrackerRunner:
             )
 
         self._execute_calendar_sync(
-            database, report, calendar_dry_run=calendar_dry_run, calendar_rebuild=calendar_rebuild
+            database,
+            report,
+            calendar_dry_run=calendar_dry_run,
+            calendar_rebuild=calendar_rebuild,
+            calendar_reconcile=calendar_reconcile,
         )
 
         if self.settings.urgent_alerts_enabled:
@@ -1045,6 +1055,7 @@ class PlacementTrackerRunner:
         *,
         calendar_dry_run: bool = False,
         calendar_rebuild: bool = False,
+        calendar_reconcile: bool = False,
     ) -> None:
         """Sync the "VIT Placements" Google Calendar (ADR docs/design/03-adr-calendar-sync.md).
 
@@ -1054,7 +1065,12 @@ class PlacementTrackerRunner:
         non-critical on failure — the calendar is enrichment; mail ingestion
         and the sheet must survive its death (ADR Decision 5).
         """
-        if not (self.settings.calendar_sync_enabled or calendar_dry_run or calendar_rebuild):
+        if not (
+            self.settings.calendar_sync_enabled
+            or calendar_dry_run
+            or calendar_rebuild
+            or calendar_reconcile
+        ):
             return
 
         logger.info("[SYNC] Starting Calendar Sync")
@@ -1068,7 +1084,9 @@ class PlacementTrackerRunner:
             calendar_client = GoogleCalendarClient(self.settings)
             calendar_engine = CalendarSyncEngine(database, calendar_client, self.settings)
 
-            if calendar_rebuild:
+            if calendar_reconcile:
+                result = calendar_engine.reconcile_deletions()
+            elif calendar_rebuild:
                 result = calendar_engine.rebuild()
             else:
                 result = calendar_engine.sync(dry_run=calendar_dry_run)
