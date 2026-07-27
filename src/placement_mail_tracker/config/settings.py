@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     )
     reminder_max_per_mail: int = Field(default=20, alias="REMINDER_MAX_PER_MAIL")
 
+    # Per-drive deadline/event push alerts (<4h/<24h/<48h) fire immediately,
+    # every run, on top of the once-daily digest -- that's the inbox-bloat
+    # path. Off by default keeps only the daily digest + genuine system
+    # failure alerts; turn back on for real-time push reminders.
+    urgent_alerts_enabled: bool = Field(default=False, alias="URGENT_ALERTS_ENABLED")
+
     # Feature 1 (docs/design/10-confirmation-and-reminders.md): automatic
     # my_status writes from CDC application-confirmation mails ship OFF by
     # default. "observe" runs the full detection/matching pipeline but only

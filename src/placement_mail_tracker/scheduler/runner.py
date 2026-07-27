@@ -1025,15 +1025,18 @@ class PlacementTrackerRunner:
             database, report, calendar_dry_run=calendar_dry_run, calendar_rebuild=calendar_rebuild
         )
 
-        logger.info("Checking for upcoming deadlines and events")
-        try:
-            from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
+        if self.settings.urgent_alerts_enabled:
+            logger.info("Checking for upcoming deadlines and events")
+            try:
+                from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 
-            alert_generator = AlertGenerator(database, self.settings)
-            alert_generator.check_and_send_alerts()
-        except Exception as e:
-            logger.exception("Alert generation failed: %s", e)
-            report.mark_component("notifications", False, str(e), critical=False)
+                alert_generator = AlertGenerator(database, self.settings)
+                alert_generator.check_and_send_alerts()
+            except Exception as e:
+                logger.exception("Alert generation failed: %s", e)
+                report.mark_component("notifications", False, str(e), critical=False)
+        else:
+            logger.debug("Urgent per-drive alerts disabled (URGENT_ALERTS_ENABLED=false)")
 
     def _execute_calendar_sync(
         self,
