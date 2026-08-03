@@ -329,6 +329,42 @@ class TestReviewRouting:
         assert result.is_duplicate is True
         assert result.review_required is False
 
+    def test_dateless_status_update_merges_against_dated_candidate(self):
+        """Regression: a rejection/eligibility/registration-confirmation mail
+        never carries oa_date/interview_date/deadline -- it just states a
+        status against an already-tracked company+role. Previously this was
+        forced to review whenever the *candidate* had any date populated
+        (nearly all drives do, via `deadline` from the original
+        announcement), so these status-only corrections could never actually
+        update `current_status` -- they piled up in unmatched_confirmations
+        forever, leaving stale/optimistic statuses (and their calendar
+        events) in place after a real rejection or ineligibility mail.
+        """
+        incoming = {
+            "id": None,
+            "company_name": "Zluri",
+            "role": "SDE Intern",
+            "internship_or_fulltime": "internship",
+            "oa_date": None,
+            "interview_date": None,
+            "deadline": None,
+            "current_status": "REJECTED",
+            "source_thread_id": "thread_rejection",
+        }
+        candidate = {
+            "id": 700,
+            "company_name": "Zluri",
+            "role": "SDE Intern",
+            "internship_or_fulltime": "internship",
+            "oa_date": "2026-06-01T09:00",
+            "interview_date": None,
+            "deadline": "2026-05-20T09:00",
+            "source_thread_id": "thread_original_drive",
+        }
+        result = compare_opportunities(incoming, candidate)
+        assert result.is_duplicate is True
+        assert result.review_required is False
+
     def test_dateless_identity_match_merges_without_manufactured_review(self):
         """When neither side has any date field populated at all, there is
         nothing to contradict identity with -- must not be forced to review.

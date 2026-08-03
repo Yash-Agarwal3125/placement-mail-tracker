@@ -737,14 +737,18 @@ def compare_opportunities(
 
     # Doc 15 §1.4-D stage 2: identity alone is never sufficient. Require
     # event coincidence (shared thread, or a date match/near-match) before
-    # actually merging. When neither side has *any* populated date field and
-    # there is no shared thread, there is nothing to contradict identity
-    # with either — treat that as non-blocking rather than silently refusing
-    # every dateless pair.
+    # actually merging. But this check only makes sense when the *incoming*
+    # mail actually introduces a date to contradict something with. Status-only
+    # mail (a rejection notice, an "you're eligible" confirmation, a
+    # registration confirmation) never carries oa_date/interview_date/deadline
+    # -- it just states a status against an already-known company+role. Such
+    # mail has nothing to contradict, no matter how many dates the existing
+    # drive already has (nearly all of them have at least a deadline from
+    # the original announcement). Gating on the candidate's dates here was
+    # the actual reason rejection/status-update mail got silently parked in
+    # unmatched_confirmations forever instead of updating current_status.
     coincidence = has_event_coincidence(incoming, candidate, config)
-    no_date_evidence = not _has_any_populated_date(incoming) and not _has_any_populated_date(
-        candidate
-    )
+    no_date_evidence = not _has_any_populated_date(incoming)
     coincidence_satisfied = coincidence or no_date_evidence
 
     is_dup = identity_ok and not blocked and coincidence_satisfied
