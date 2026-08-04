@@ -47,6 +47,12 @@ def _parse_args() -> argparse.Namespace:
         help="Mark calendar_events rows done for events you deleted manually on "
         "Google (opposite of --calendar-rebuild: never recreates them).",
     )
+    parser.add_argument(
+        "--reprocess-review-queue",
+        action="store_true",
+        help="One-off backfill: replay mail parked in unmatched_review through "
+        "current matching logic (run once after a matching-logic fix).",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +115,7 @@ def main() -> int:
                     calendar_dry_run=args.calendar_dry_run,
                     calendar_rebuild=args.calendar_rebuild,
                     calendar_reconcile=args.calendar_reconcile,
+                    reprocess_review_queue=args.reprocess_review_queue,
                 )
                 _merge_report(report, cycle_report)
 

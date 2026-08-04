@@ -462,6 +462,36 @@ def test_fetch_window_not_advanced_on_gmail_failure(
     assert new_state["last_successful_fetch"] == original
 
 
+def test_reprocess_review_queue_refetches_unmatched_review_messages_by_id(
+    db_manager, mock_settings
+):
+    """--reprocess-review-queue must pull parked mail by message ID (bypassing
+    the fetch-window date filter, like the PENDING_EXTRACTION retry path) so a
+    matching-logic fix can actually resolve the backlog instead of requiring
+    the mail to reappear in a fresh Gmail fetch."""
+    db_manager.log_processed_email(
+        gmail_message_id="parked_1",
+        subject="Zluri - Update",
+        processed_status="unmatched_review",
+    )
+    db_manager.log_processed_email(
+        gmail_message_id="already_done",
+        subject="Some other mail",
+        processed_status="processed",
+    )
+    runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
+    gmail_client = MagicMock()
+    gmail_client.fetch_message.return_value = {
+        "message_id": "parked_1",
+        "subject": "Zluri - Update",
+    }
+
+    messages = runner._fetch_review_queue_messages(gmail_client)
+
+    gmail_client.fetch_message.assert_called_once_with("parked_1")
+    assert messages == [{"message_id": "parked_1", "subject": "Zluri - Update"}]
+
+
 @patch("placement_mail_tracker.scheduler.runner.rule_extract")
 def test_extraction_failure_reaches_permanent_failure_at_retry_max(
     mock_rule, db_manager, mock_settings

@@ -249,6 +249,7 @@ class PlacementTrackerRunner:
         calendar_dry_run: bool = False,
         calendar_rebuild: bool = False,
         calendar_reconcile: bool = False,
+        reprocess_review_queue: bool = False,
     ) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
         run_start = datetime.now()
@@ -272,6 +273,17 @@ class PlacementTrackerRunner:
         # _finalize_report) so a transient Gmail outage never drops mail.
         fetch_started_at = utc_now_iso()
         messages = self._fetch_messages(gmail_client, report)
+
+        # One-off backfill: replay mail previously parked in the
+        # unmatched_confirmations review queue (Doc 15 §1.4-D) through the
+        # now-fixed matching logic. Not part of every cycle -- unlike the
+        # PENDING_EXTRACTION retry queue, `unmatched_review` is a deliberate
+        # "needs human judgement" outcome, not a transient failure, so
+        # replaying it automatically forever would just re-grow the same
+        # queue for genuinely ambiguous mail. Triggered explicitly via
+        # --reprocess-review-queue after a matching-logic fix.
+        if reprocess_review_queue:
+            messages.extend(self._fetch_review_queue_messages(gmail_client))
 
         stats = {
             "processed": 0, "skipped": 0, "errors": 0,
@@ -406,6 +418,25 @@ class PlacementTrackerRunner:
             return []
 
         logger.info("Fetched %s candidate messages", len(messages))
+        return messages
+
+    def _fetch_review_queue_messages(self, gmail_client: GmailClient) -> list[dict[str, Any]]:
+        """Re-fetch mail previously parked as ``unmatched_review`` by message ID,
+        bypassing the normal fetch-window date filter (mirrors the
+        PENDING_EXTRACTION retry path in :meth:`_fetch_messages`)."""
+        rows = self.connection.execute(
+            "SELECT gmail_message_id FROM processed_emails "
+            "WHERE processed_status = 'unmatched_review';"
+        ).fetchall()
+        message_ids = [row[0] for row in rows]
+        logger.info("Reprocessing %s messages parked in the review queue", len(message_ids))
+
+        messages: list[dict[str, Any]] = []
+        for message_id in message_ids:
+            try:
+                messages.append(gmail_client.fetch_message(message_id))
+            except Exception as e:
+                logger.warning("Could not fetch review-queue email %s: %s", message_id, e)
         return messages
 
     def _process_messages(
