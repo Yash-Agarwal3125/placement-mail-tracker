@@ -280,10 +280,19 @@ class PlacementTrackerRunner:
         # PENDING_EXTRACTION retry queue, `unmatched_review` is a deliberate
         # "needs human judgement" outcome, not a transient failure, so
         # replaying it automatically forever would just re-grow the same
-        # queue for genuinely ambiguous mail. Triggered explicitly via
-        # --reprocess-review-queue after a matching-logic fix.
-        if reprocess_review_queue:
+        # queue for genuinely ambiguous mail. --reprocess-review-queue forces
+        # it on demand; the marker file below makes it also self-trigger
+        # exactly once on the next unattended Task Scheduler run, so a fix
+        # to the matching logic doesn't sit waiting on someone to type the
+        # flag by hand (zero-touch operation, CLAUDE.md principle 5).
+        review_queue_marker = Path(self.settings.fetch_state_file).with_name(
+            "review_queue_backfill_done.marker"
+        )
+        run_backfill = reprocess_review_queue or not review_queue_marker.exists()
+        if run_backfill:
             messages.extend(self._fetch_review_queue_messages(gmail_client))
+            review_queue_marker.parent.mkdir(parents=True, exist_ok=True)
+            review_queue_marker.write_text(utc_now_iso())
 
         stats = {
             "processed": 0, "skipped": 0, "errors": 0,
