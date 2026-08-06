@@ -215,6 +215,56 @@ class TestActiveDrivesOnly:
         assert "OFFER_RECEIVED" not in active_statuses
 
 
+class TestExpireStaleDrives:
+    def test_ghosted_drive_past_cutoff_expires(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        opp = sample_opportunity("Zanskar", "SDE", deadline="01-Jan-2026")
+        db_manager.insert_or_update_opportunity(opp, source_email_id="ghost_1")
+
+        recent = sample_opportunity("Adobe", "SDE", deadline="20-Aug-2026")
+        db_manager.insert_or_update_opportunity(recent, source_email_id="ghost_2")
+
+        expired_count = db_manager.expire_stale_drives(cutoff_days=21)
+
+        assert expired_count == 1
+        active = db_manager.fetch_active_drives_only()
+        active_companies = {r["company_name"] for r in active}
+        assert "Zanskar" not in active_companies
+        assert "Adobe" in active_companies
+
+    def test_never_applied_past_deadline_expires_immediately(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        # Deadline was yesterday, well inside the 21-day grace period, but the
+        # user never applied -- the window is objectively closed, no need to wait.
+        opp = sample_opportunity("Absyz", "SDE", deadline="05-Aug-2026")
+        db_manager.insert_or_update_opportunity(opp, source_email_id="never_applied_1")
+
+        expired_count = db_manager.expire_stale_drives(cutoff_days=21)
+
+        assert expired_count == 1
+        active_companies = {r["company_name"] for r in db_manager.fetch_active_drives_only()}
+        assert "Absyz" not in active_companies
+
+    def test_shortlisted_drive_with_stale_deadline_but_no_oa_yet_survives_grace(
+        self, db_manager: DatabaseManager, sample_opportunity
+    ):
+        # Applied and shortlisted; deadline is old but that's expected once
+        # shortlisted -- must not be expired just because the OA date hasn't
+        # been announced yet, within the grace period.
+        opp = sample_opportunity(
+            "Nielsen", "SDE", current_status="SHORTLISTED", deadline="20-Jul-2026"
+        )
+        db_manager.insert_or_update_opportunity(opp, source_email_id="shortlisted_1")
+
+        expired_count = db_manager.expire_stale_drives(cutoff_days=21)
+
+        assert expired_count == 0
+        active_companies = {r["company_name"] for r in db_manager.fetch_active_drives_only()}
+        assert "Nielsen" in active_companies
+
+
 # ===================================================================
 # Retry Queue
 # ===================================================================

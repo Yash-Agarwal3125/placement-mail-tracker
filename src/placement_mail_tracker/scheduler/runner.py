@@ -1058,6 +1058,13 @@ class PlacementTrackerRunner:
                 critical=self.settings.is_production,
             )
 
+        try:
+            expired = database.expire_stale_drives(self.settings.drive_auto_expire_days)
+            if expired:
+                logger.info("Auto-expired %s ghosted drive(s) with no recent activity", expired)
+        except Exception as e:
+            logger.exception("Auto-expire of stale drives failed: %s", e)
+
         self._execute_calendar_sync(
             database,
             report,

@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     calendar_stale_after_hours: float = Field(
         default=48.0, alias="CALENDAR_STALE_AFTER_HOURS"
     )
+    # Drives with no rejection/not-shortlisted mail ever arriving (silent
+    # ghosting after progressing past OPEN) never get an explicit terminal
+    # current_status, so they keep re-booking calendar events forever. Used
+    # as the grace period in DatabaseManager.expire_stale_drives() — a
+    # never-applied drive past its deadline expires immediately regardless
+    # of this setting; this only covers the "ghosted after progressing" case.
+    drive_auto_expire_days: int = Field(default=21, alias="DRIVE_AUTO_EXPIRE_DAYS")
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")

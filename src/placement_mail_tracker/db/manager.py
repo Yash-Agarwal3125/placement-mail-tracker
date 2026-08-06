@@ -805,6 +805,69 @@ class DatabaseManager:
         ).fetchall()
         return [self._row_to_opportunity(row) for row in rows]
 
+    def expire_stale_drives(self, cutoff_days: int) -> int:
+        """Auto-transition dead drives to EXPIRED (VALID_STATUSES already has
+        EXPIRED; nothing previously set it automatically).
+
+        Two deterministic signals, both meaning "not for me" (a rejection/
+        not-shortlisted mail never has to arrive for either):
+
+        1. Never applied and the application deadline already passed
+           (``current_status`` still OPEN/REGISTERED, ``my_status`` still
+           NOT_APPLIED). No grace period — the window is objectively closed.
+        2. Silent ghosting after progressing further (SHORTLISTED/OA/
+           INTERVIEW/HR with no follow-up mail): the latest known date
+           (deadline/oa_date/interview_date) is more than ``cutoff_days`` in
+           the past.
+
+        Either way the drive drops out of ``fetch_active_drives_only``, so
+        the calendar sync's existing stale pass retitles/cancels its events
+        instead of leaving them "active" (and booking new ones) forever.
+        """
+        now = datetime.now()
+        grace_cutoff = now - timedelta(days=cutoff_days)
+        count = 0
+        for row in self.fetch_active_drives_only():
+            current_status = (row.get("current_status") or "OPEN").upper()
+            my_status = row.get("my_status") or "NOT_APPLIED"
+            dates = {
+                field: parse_datetime_flexible(row.get(field) or "")
+                for field in ("deadline", "oa_date", "interview_date")
+            }
+            latest = max((d for d in dates.values() if d), default=None)
+
+            never_applied_deadline_passed = (
+                current_status in ("OPEN", "REGISTERED")
+                and my_status == "NOT_APPLIED"
+                and dates["deadline"] is not None
+                and dates["deadline"] < now
+            )
+            ghosted = latest is not None and latest < grace_cutoff
+
+            if not (never_applied_deadline_passed or ghosted):
+                continue
+
+            history = row.get("status_history") or []
+            if isinstance(history, str):
+                try:
+                    history = json.loads(history)
+                except Exception:
+                    history = []
+            if not history or history[-1] != "EXPIRED":
+                history.append("EXPIRED")
+            history = history[-MAX_STATUS_HISTORY:]
+
+            self.connection.execute(
+                "UPDATE opportunities SET current_status = 'EXPIRED', "
+                "status_history = ?, updated_at = ? WHERE id = ?;",
+                (json.dumps(history), utc_now_iso(), row["id"]),
+            )
+            count += 1
+
+        if count:
+            self.connection.commit()
+        return count
+
     def fetch_updates_for_opportunity(self, opportunity_id: int) -> list[dict[str, Any]]:
         """Fetch update history for one drive."""
         rows = self.connection.execute(
