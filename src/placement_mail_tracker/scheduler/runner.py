@@ -644,6 +644,9 @@ class PlacementTrackerRunner:
             opp_data["dream_category"] = _classify_dream(
                 _parse_lpa(opp_data.get("package_or_stipend"))
             )
+            # drive_kind is rule-only (keyword classification, docs/design/16);
+            # Gemini's opp_data never carries it, so always take the rule result.
+            opp_data["drive_kind"] = rule_result.drive_kind
 
             if opp_data.get("company_name"):
                 opp_data["company_name"] = normalize_company_name(opp_data["company_name"])

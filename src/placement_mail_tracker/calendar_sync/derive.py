@@ -201,6 +201,13 @@ def derive_events(
     normalized_companies: dict[tuple[int, str], str] = {}
 
     for opp in opportunities:
+        # docs/design/16 Phase 6: only real placement drives reach the
+        # calendar. A hackathon/scholarship/workshop/research posting can be
+        # ELIGIBLE (nothing disqualified it) without being a drive at all —
+        # gating on drive_kind here covers the DEADLINE branch too, unlike
+        # calendar_sync_mode below which only ever touched OA/INTERVIEW.
+        if (opp.get("drive_kind") or "PLACEMENT") != "PLACEMENT":
+            continue
         eligibility_status = opp.get("eligibility_status") or ""
         if "NOT_ELIGIBLE" in eligibility_status:
             continue

@@ -294,6 +294,66 @@ class TestReviewRouting:
         assert len(reviews) == 1
         assert reviews[0].candidate_id == 500
 
+    def test_same_day_reminder_without_time_of_day_is_coincident(self):
+        """docs/design/16 Phase 3: real production case (BlackRock/opp 171).
+        A reminder mail restates an already-known deadline as a bare date
+        ("4 August 2026" -> parses to 00:00) while the stored value carries
+        a real time ("2026-08-04T10:00") -- a 10-hour gap, over the 6-hour
+        tolerance, even though it is plainly the same event. Same calendar
+        day must be treated as coincident regardless of time-of-day drift.
+        """
+        incoming = {
+            "id": None,
+            "company_name": "Blackrock",
+            "role": None,
+            "internship_or_fulltime": None,
+            "oa_date": None,
+            "interview_date": None,
+            "deadline": "4 August 2026",
+            "source_thread_id": None,
+        }
+        candidate = {
+            "id": 171,
+            "company_name": "Blackrock",
+            "role": "Software Engineer Intern",
+            "internship_or_fulltime": "internship",
+            "oa_date": "2026-08-08",
+            "interview_date": "2026-08-19",
+            "deadline": "2026-08-04T10:00",
+            "source_thread_id": "thread_original_announcement",
+        }
+        result = compare_opportunities(incoming, candidate)
+        assert result.is_duplicate is True
+        assert result.review_required is False
+
+    def test_different_calendar_day_still_requires_tolerance(self):
+        """The same-day relaxation must not swallow a genuine reschedule
+        that happens to fall within a day of the old date but crosses
+        midnight beyond the existing hour tolerance."""
+        incoming = {
+            "id": None,
+            "company_name": "Globex Corp",
+            "role": "Data Analyst",
+            "internship_or_fulltime": "internship",
+            "oa_date": None,
+            "interview_date": None,
+            "deadline": "2026-09-02T23:00",
+            "source_thread_id": None,
+        }
+        candidate = {
+            "id": 501,
+            "company_name": "Globex Corp",
+            "role": "Data Analyst",
+            "internship_or_fulltime": "internship",
+            "oa_date": None,
+            "interview_date": None,
+            "deadline": "2026-09-01T09:00",
+            "source_thread_id": "thread_old",
+        }
+        result = compare_opportunities(incoming, candidate)
+        assert result.is_duplicate is False
+        assert result.review_required is True
+
     def test_first_oa_notice_fills_empty_field_without_manufactured_review(self):
         """Regression: a drive that already has a deadline (nearly all of
         them) but no oa_date yet must accept its first OA notice even

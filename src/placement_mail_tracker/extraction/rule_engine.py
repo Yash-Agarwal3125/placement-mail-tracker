@@ -306,6 +306,56 @@ _STATUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Drive-kind classification (docs/design/16, Phase 2)
+# ---------------------------------------------------------------------------
+
+# Order matters: first match wins. Keyword rule, not Gemini — deterministic
+# and free, per CLAUDE.md operating principle 3.
+_DRIVE_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("HACKATHON", re.compile(
+        r"\b(hackathon|ideathon|innohack|innovation\s+challenge|"
+        r"innovation\s+hack)\b",
+        re.IGNORECASE,
+    )),
+    ("RESEARCH", re.compile(
+        r"\b(ph\.?\s*d\b|post[\-\s]?doc(?:toral)?|research\s+opportunit)",
+        re.IGNORECASE,
+    )),
+    ("SCHOLARSHIP", re.compile(r"\bscholarship", re.IGNORECASE)),
+    ("WORKSHOP", re.compile(r"\b(workshop|bootcamp)\b", re.IGNORECASE)),
+]
+
+# A mail carrying one of these classifications is, by construction, mid-way
+# through an actual placement process (an OA got scheduled, a shortlist was
+# published, ...) for whichever drive it's attached to. That is stronger
+# evidence than a keyword collision, and must win: a stray/misattributed
+# "...Hackathon..." mail landing on a real drive's row (a separate
+# company-fuzzy-match issue, docs/design/15 §1) must not silently hide that
+# drive's OA/interview/offer events from the calendar.
+_PLACEMENT_PROCESS_CLASSIFICATIONS = frozenset({
+    "OA_UPDATE", "SHORTLIST_UPDATE", "INTERVIEW_UPDATE", "OFFER_UPDATE",
+    "APPLICATION_CONFIRMATION",
+})
+
+
+def classify_drive_kind(subject: str, body: str = "", email_classification: str = "") -> str:
+    """Classify a mail as a placement drive vs. a non-drive opportunity.
+
+    ponytail: a fixed keyword list, not a learned classifier — good enough
+    to catch the hackathon/scholarship/workshop/research mail observed in
+    live data (docs/design/16). Widen the pattern list if a new non-drive
+    category shows up in NOT_ELIGIBLE-free, ELIGIBLE-marked noise.
+    """
+    if email_classification in _PLACEMENT_PROCESS_CLASSIFICATIONS:
+        return "PLACEMENT"
+    combined = f"{subject} {body[:300]}"
+    for kind, pattern in _DRIVE_KIND_PATTERNS:
+        if pattern.search(combined):
+            return kind
+    return "PLACEMENT"
+
+
 def detect_status_from_text(subject: str, body: str = "") -> str:
     """Detect placement drive status from email subject and body."""
     combined = f"{subject} {body[:500]}"
@@ -677,6 +727,7 @@ class RuleExtractionResult:
     missing_fields: list[str] = field(default_factory=list)
     degree_level: str = "UNKNOWN"
     branches_allowed: list[str] = field(default_factory=list)
+    drive_kind: str = "PLACEMENT"
 
     @property
     def needs_gemini(self) -> bool:
@@ -714,6 +765,7 @@ class RuleExtractionResult:
             "current_status": self.current_status,
             "degree_level": self.degree_level,
             "branches_allowed": self.branches_allowed if self.branches_allowed else None,
+            "drive_kind": self.drive_kind,
         }
 
 
@@ -743,6 +795,9 @@ def extract_from_email(
 
     # 2. Detect status
     result.current_status = detect_status_from_text(subject, body)
+
+    # 2b. Classify drive kind (placement vs. hackathon/scholarship/etc.)
+    result.drive_kind = classify_drive_kind(subject, body, result.email_classification)
 
     # 3. Extract company name
     ext_source = "SUBJECT"

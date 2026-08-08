@@ -137,6 +137,30 @@ def test_not_eligible_and_unknown_company_produce_zero_events(mock_settings):
     assert anomalies == []
 
 
+def test_non_placement_drive_kind_produces_zero_events(mock_settings):
+    """docs/design/16 Phase 6: a hackathon/scholarship must never reach the
+    calendar even when ELIGIBLE and even for the DEADLINE branch, which the
+    calendar_sync_mode gate below never covered."""
+    hackathon = _opp(
+        id=1, deadline="15 June 2026", drive_kind="HACKATHON", eligibility_status="ELIGIBLE"
+    )
+    scholarship = _opp(
+        id=2, deadline="16 June 2026", drive_kind="SCHOLARSHIP", eligibility_status="ELIGIBLE"
+    )
+    events, anomalies = derive_events([hackathon, scholarship], mock_settings)
+    assert events == []
+    assert anomalies == []
+
+
+def test_missing_drive_kind_defaults_to_placement(mock_settings):
+    """Legacy rows without drive_kind populated must keep working (backfill
+    default is PLACEMENT at the DB layer; derive_events mirrors that)."""
+    opp = _opp(id=1, deadline="15 June 2026")
+    opp.pop("drive_kind", None)
+    events, _ = derive_events([opp], mock_settings)
+    assert len(events) == 1
+
+
 def test_collision_guard_drops_higher_opportunity_id(mock_settings):
     opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026")
     opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026")

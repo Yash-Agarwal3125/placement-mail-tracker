@@ -199,7 +199,8 @@ class DatabaseManager:
                 priority TEXT NOT NULL DEFAULT 'MEDIUM',
                 degree_level TEXT NOT NULL DEFAULT 'UNKNOWN',
                 dream_category TEXT NOT NULL DEFAULT 'NORMAL',
-                validation_flags TEXT NOT NULL DEFAULT '[]'
+                validation_flags TEXT NOT NULL DEFAULT '[]',
+                drive_kind TEXT NOT NULL DEFAULT 'PLACEMENT'
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -1181,7 +1182,7 @@ class DatabaseManager:
                 email_received_at, drive_id, source_thread_id,
                 action_required, email_classification, my_status,
                 next_event_date, eligibility_status, applied_date, priority,
-                degree_level, dream_category, validation_flags
+                degree_level, dream_category, validation_flags, drive_kind
             )
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
@@ -1194,7 +1195,7 @@ class DatabaseManager:
                 :action_required, :email_classification, :my_status,
                 :next_event_date, :eligibility_status, :applied_date, :priority,
                 COALESCE(:degree_level, 'UNKNOWN'), COALESCE(:dream_category, 'NORMAL'),
-                :validation_flags
+                :validation_flags, COALESCE(:drive_kind, 'PLACEMENT')
             );
             """,
             values,
@@ -1265,7 +1266,8 @@ class DatabaseManager:
                 priority = COALESCE(:priority, priority),
                 degree_level = COALESCE(:degree_level, degree_level),
                 dream_category = COALESCE(:dream_category, dream_category),
-                validation_flags = :validation_flags
+                validation_flags = :validation_flags,
+                drive_kind = COALESCE(:drive_kind, drive_kind)
             WHERE id = :id;
             """,
             values,
@@ -1296,6 +1298,7 @@ class DatabaseManager:
             "degree_level": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
             "dream_category": "TEXT NOT NULL DEFAULT 'NORMAL'",
             "validation_flags": "TEXT NOT NULL DEFAULT '[]'",
+            "drive_kind": "TEXT NOT NULL DEFAULT 'PLACEMENT'",
         }
 
         for col_name, col_def in new_columns.items():
@@ -1371,7 +1374,7 @@ class DatabaseManager:
             "email_received_at", "action_required", "email_classification",
             "my_status", "next_event_date", "eligibility_status",
             "applied_date", "priority", "degree_level", "dream_category",
-            "validation_flags",
+            "validation_flags", "drive_kind",
         ):
             if fld in {"company_name", "role"}:
                 continue
@@ -1392,6 +1395,12 @@ class DatabaseManager:
             elif fld == "dream_category":
                 # None means NORMAL — SQL COALESCE preserves a better existing value.
                 normalized[fld] = value if value and value != "NORMAL" else None
+            elif fld == "drive_kind":
+                # None means PLACEMENT — SQL COALESCE preserves a non-PLACEMENT
+                # classification already on the row (e.g. a follow-up mail for
+                # an already-tagged HACKATHON that doesn't repeat the keyword
+                # must not silently reclassify it back to PLACEMENT).
+                normalized[fld] = value if value and value != "PLACEMENT" else None
             else:
                 normalized[fld] = _normalize_scalar(value)
 

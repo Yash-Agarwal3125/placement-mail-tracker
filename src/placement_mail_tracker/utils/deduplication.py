@@ -665,6 +665,15 @@ def has_event_coincidence(
         diff_hours = abs((dt_a - dt_b).total_seconds()) / 3600.0
         if diff_hours <= config.event_coincidence_tolerance_hours:
             return True
+        # docs/design/16 Phase 3: a reminder/follow-up mail restating an
+        # already-known date often drops the time-of-day (parses to
+        # midnight) while the stored value carries a real time — e.g.
+        # "4 August 2026" (-> 00:00) vs a stored "2026-08-04T10:00" is a
+        # 10-hour gap under the tolerance above, even though it is plainly
+        # the same event. Same calendar day is always coincident; a genuine
+        # reschedule lands on a different day.
+        if dt_a.date() == dt_b.date():
+            return True
 
     return False
 
