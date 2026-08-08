@@ -114,7 +114,10 @@ class CalendarSyncEngine:
         self._done_pass(states_by_key, now, dry_run, result)
 
         active_opp_ids = {row["id"] for row in rows}
-        self._null_date_pass(states_by_key, active_opp_ids, desired_keys, result)
+        rows_by_id = {row["id"]: row for row in rows}
+        self._null_date_pass(
+            states_by_key, active_opp_ids, desired_keys, rows_by_id, calendar_id, dry_run, result
+        )
 
         if stale_pass_enabled:
             self._stale_pass(states_by_key, active_opp_ids, calendar_id, dry_run, result)
@@ -424,8 +427,23 @@ class CalendarSyncEngine:
         states_by_key: dict[tuple[int, str], dict[str, Any]],
         active_opp_ids: set[int],
         desired_keys: set[tuple[int, str]],
+        rows_by_id: dict[int, dict[str, Any]],
+        calendar_id: str | None,
+        dry_run: bool,
         result: CalendarSyncResult,
     ) -> None:
+        """A still-active drive's event dropped out of the desired set.
+
+        docs/design/16 Phase 6: two different situations reach here, and only
+        one of them is safe to act on without a human. When the drive itself
+        is confidently no longer relevant — reclassified as a non-placement
+        `drive_kind`, or `eligibility_status` says NOT_ELIGIBLE — the event is
+        retitled `[?] ...` and frozen, the same non-destructive treatment the
+        stale pass already gives a vanished drive (never delete, doc 15 §5.3 /
+        ADR Decision 2). Any other cause (a genuinely missing date -- possibly
+        a temporary extraction gap that could resolve next run) keeps the
+        original "kept as-is, flagged for review" behaviour unchanged.
+        """
         for key, state in states_by_key.items():
             if state["status"] != "active":
                 continue
@@ -434,6 +452,19 @@ class CalendarSyncEngine:
                 continue  # vanished drives are the stale pass's concern
             if key in desired_keys:
                 continue  # still has a date this pass
+
+            opportunity = rows_by_id.get(opportunity_id) or {}
+            drive_kind = opportunity.get("drive_kind") or "PLACEMENT"
+            eligibility_status = opportunity.get("eligibility_status") or ""
+            confidently_excluded = (
+                drive_kind != "PLACEMENT" or "NOT_ELIGIBLE" in eligibility_status
+            )
+
+            if confidently_excluded:
+                self._retitle_and_freeze(
+                    state, opportunity_id, "excluded", calendar_id, dry_run, result
+                )
+                continue
 
             label = state.get("drive_id") or opportunity_id
             result.flagged.append(
@@ -468,55 +499,77 @@ class CalendarSyncEngine:
                 current_status = (opportunity.get("current_status") or "").upper()
             is_terminal = current_status in _TERMINAL_STATUSES
             new_status = "cancelled" if is_terminal else "stale"
-            new_title = f"[?] {state['title']}"
+            self._retitle_and_freeze(
+                state, opportunity_id, new_status, calendar_id, dry_run, result
+            )
 
-            if dry_run:
-                logger.info(
-                    "PLAN: retitle stale '%s' -> '%s' (opportunity_id=%s, status=%s)",
-                    state["title"], new_title, opportunity_id, new_status,
-                )
-                result.retitled_stale += 1
-                state["title"] = new_title
-                state["status"] = new_status
-                continue
+    def _retitle_and_freeze(
+        self,
+        state: dict[str, Any],
+        opportunity_id: int,
+        new_status: str,
+        calendar_id: str | None,
+        dry_run: bool,
+        result: CalendarSyncResult,
+    ) -> None:
+        """Retitle a Google event `[?] <old title>` and freeze its row.
 
-            gcal_event_id = state.get("gcal_event_id")
-            if not gcal_event_id:
-                continue  # nothing on Google to retitle
+        Shared by the stale pass (a drive vanished) and the null-date pass
+        (a drive is confidently no longer relevant). Never deletes the
+        Google event (doc 15 §5.3 / ADR Decision 2) -- only PATCHes the
+        title and advances the state's status so it's excluded from further
+        diffing, while remaining reversible: if the drive reappears in a
+        later `desired` set, ``sync()``'s `reactivating` check restores it.
+        """
+        new_title = f"[?] {state['title']}"
 
-            try:
-                self.client.patch_event(calendar_id, gcal_event_id, {"summary": new_title})
-            except CalendarAuthenticationError:
-                raise
-            except CalendarEventGoneError:
-                # Already deleted on Google (user cleanup) — freeze instead
-                # of retitling-forever a row that has nothing left to retitle.
-                logger.info(
-                    "Calendar event for opportunity_id=%s was deleted on Google; marking done",
-                    opportunity_id,
-                )
-                row_id = state.get("id")
-                if row_id is not None:
-                    self.database.set_calendar_event_status(row_id, "done")
-                result.marked_done += 1
-                result.flagged.append(
-                    f"{state['title']}: removed from Google Calendar — no longer tracked"
-                )
-                state["status"] = "done"
-                continue
-            except Exception as error:  # noqa: BLE001 - one bad event must not abort the pass
-                logger.warning(
-                    "Calendar stale retitle failed for opportunity_id=%s: %s", opportunity_id, error
-                )
-                self.last_error = str(error)
-                continue
-
-            row_id = state.get("id")
-            if row_id is not None:
-                self.database.set_calendar_event_status(row_id, new_status)
+        if dry_run:
+            logger.info(
+                "PLAN: retitle '%s' -> '%s' (opportunity_id=%s, status=%s)",
+                state["title"], new_title, opportunity_id, new_status,
+            )
             result.retitled_stale += 1
             state["title"] = new_title
             state["status"] = new_status
+            return
+
+        gcal_event_id = state.get("gcal_event_id")
+        if not gcal_event_id:
+            return  # nothing on Google to retitle
+
+        try:
+            self.client.patch_event(calendar_id, gcal_event_id, {"summary": new_title})
+        except CalendarAuthenticationError:
+            raise
+        except CalendarEventGoneError:
+            # Already deleted on Google (user cleanup) — freeze instead
+            # of retitling-forever a row that has nothing left to retitle.
+            logger.info(
+                "Calendar event for opportunity_id=%s was deleted on Google; marking done",
+                opportunity_id,
+            )
+            row_id = state.get("id")
+            if row_id is not None:
+                self.database.set_calendar_event_status(row_id, "done")
+            result.marked_done += 1
+            result.flagged.append(
+                f"{state['title']}: removed from Google Calendar — no longer tracked"
+            )
+            state["status"] = "done"
+            return
+        except Exception as error:  # noqa: BLE001 - one bad event must not abort the pass
+            logger.warning(
+                "Calendar retitle failed for opportunity_id=%s: %s", opportunity_id, error
+            )
+            self.last_error = str(error)
+            return
+
+        row_id = state.get("id")
+        if row_id is not None:
+            self.database.set_calendar_event_status(row_id, new_status)
+        result.retitled_stale += 1
+        state["title"] = new_title
+        state["status"] = new_status
 
     # ------------------------------------------------------------------
     # Small shared helpers

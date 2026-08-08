@@ -203,6 +203,101 @@ def test_null_date_flags_anomaly_without_touching_event(
 
 
 # ---------------------------------------------------------------------------
+# docs/design/16 Phase 6: a still-active drive reclassified as no longer
+# relevant (drive_kind or eligibility) gets retitled '[?] ...' and frozen,
+# the same non-destructive treatment as a vanished drive -- distinct from
+# the generic null-date case above, which stays untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_reclassified_non_placement_drive_retitles_and_freezes(
+    db_manager, mock_settings, sample_opportunity
+):
+    opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-hackathon")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    # Simulate a backfill reclassifying a pre-existing row as non-placement.
+    db_manager.connection.execute(
+        "UPDATE opportunities SET drive_kind = 'HACKATHON' WHERE id = ?;", (opp_id,)
+    )
+    db_manager.connection.commit()
+
+    client.patch_calls.clear()
+    result = engine.sync()
+
+    assert result.retitled_stale == 1
+    assert not result.flagged  # excluded, not merely flagged
+    assert len(client.patch_calls) == 1
+    _, _, body = client.patch_calls[0]
+    assert body["summary"].startswith("[?] ")
+
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "excluded"
+
+
+def test_not_eligible_drive_retitles_and_freezes(db_manager, mock_settings, sample_opportunity):
+    opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-noteligible")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    db_manager.connection.execute(
+        "UPDATE opportunities SET eligibility_status = 'NOT_ELIGIBLE_BRANCH' WHERE id = ?;",
+        (opp_id,),
+    )
+    db_manager.connection.commit()
+
+    result = engine.sync()
+
+    assert result.retitled_stale == 1
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "excluded"
+
+
+def test_reclassified_drive_reverts_to_placement_restores_title(
+    db_manager, mock_settings, sample_opportunity
+):
+    """A false-positive reclassification is reversible: fixing drive_kind
+    back to PLACEMENT restores the real title on Google, via the same
+    'reactivating' mechanic as a genuinely vanished drive reappearing."""
+    opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-falsepos")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    db_manager.connection.execute(
+        "UPDATE opportunities SET drive_kind = 'HACKATHON' WHERE id = ?;", (opp_id,)
+    )
+    db_manager.connection.commit()
+    engine.sync()
+
+    db_manager.connection.execute(
+        "UPDATE opportunities SET drive_kind = 'PLACEMENT' WHERE id = ?;", (opp_id,)
+    )
+    db_manager.connection.commit()
+
+    client.patch_calls.clear()
+    result = engine.sync()
+
+    assert result.patched == 1
+    _, _, body = client.patch_calls[0]
+    assert not body["summary"].startswith("[?] ")
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
 # Case 13 — past event marked done, then frozen against further changes
 # ---------------------------------------------------------------------------
 
