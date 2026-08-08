@@ -761,12 +761,24 @@ class DatabaseManager:
         being corrected) knows there is nothing left on Google to PATCH and
         must insert a fresh event instead (calendar_sync/sync.py's
         reactivation branch checks this).
+
+        Commits immediately: unlike the normal sync() pipeline (where some
+        later write in the same process happens to flush this), a one-off
+        script that calls this and nothing else would otherwise lose the
+        write when the process exits -- the Google deletion already
+        happened and is not reversible, so the local record must not
+        silently fail to follow it. (Found the hard way: the first
+        production run of delete_excluded_calendar_events.py deleted 16
+        real events but left all 16 rows still pointing at the now-gone
+        gcal_event_id, because nothing else in that script's process ever
+        committed.)
         """
         self.connection.execute(
             "UPDATE calendar_events SET status = ?, gcal_event_id = NULL, "
             "updated_at = ? WHERE id = ?;",
             (status, utc_now_iso(), row_id),
         )
+        self.connection.commit()
 
     def upsert_roster_verdict(
         self,
