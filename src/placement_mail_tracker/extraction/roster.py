@@ -1,11 +1,18 @@
 """Roster verification: is this student on this drive's shortlist/roster?
 
 docs/design/15 §3 (design), docs/design/16 Phase C (implementation). No
-sample roster ever existed in this codebase (checked scripts/eval/corpus and
-unmatched_confirmations before writing this), so the matcher checks all
+sample roster existed in this codebase when this module was first written
+(checked scripts/eval/corpus and unmatched_confirmations), so it checked all
 three signal types rather than betting on one format: an exact
 registration-number match, an exact Neo-PAT-codename match, and a fuzzy
 name match as a fallback only.
+
+Verified against 5 real production rosters fetched live from Gmail
+(Amazon, Blackrock, Honeywell, ABSYZ, Tekion): every one is a Neo-ID-only
+list -- no registration numbers, no names. That confirmed the codename path
+is the primary signal in practice, not a fallback, and exposed a real bug
+in the original "did the roster parse" check (see verify_roster's
+docstring) -- fixed here.
 """
 
 from __future__ import annotations
@@ -26,6 +33,14 @@ ROSTER_UNIQUENESS_MARGIN = 8.0
 # VIT-style registration number: two digits, 2-6 letters, 3-5 digits
 # (23BAI0011, 22MIS0565 -- both seen in real captured mail).
 _REG_NO_RE = re.compile(r"\b\d{2}[A-Z]{2,6}\d{3,5}\b")
+
+# VIT's Neo PAT codename: 4 alternating letter-digit pairs (X2A6L2T3,
+# N2Z3K8G4 -- the actual, and apparently exclusive, format of every real
+# shortlist roster this module was tested against; see verify_roster's
+# docstring). Real production rosters carry Neo IDs, not registration
+# numbers, so this -- not _REG_NO_RE -- is what usually proves a roster
+# parsed cleanly.
+_NEO_ID_RE = re.compile(r"\b(?:[A-Z]\d){4}\b")
 
 
 def _contains_id(text: str, identifier: str) -> bool:
@@ -80,9 +95,14 @@ def verify_roster(roster_text: str, profile: UserProfile) -> RosterVerdict:
 
     The hard rule (doc 15 §3.3): AMBIGUOUS must never resolve toward
     MATCHED, and NOT_MATCHED is only assertable when the roster
-    demonstrably parsed -- at least one registration number was found on it
-    somewhere. A roster that yields zero IDs proves nothing about this
-    student's absence; that is AMBIGUOUS, not NOT_MATCHED.
+    demonstrably parsed -- at least one registration number *or* Neo ID was
+    found on it somewhere. A roster that yields zero IDs of either kind
+    proves nothing about this student's absence; that is AMBIGUOUS, not
+    NOT_MATCHED. (Real VIT rosters checked while building this were
+    exclusively Neo-ID lists -- registration numbers never actually
+    appeared -- so treating only _REG_NO_RE as "the roster parsed" silently
+    downgraded every real NOT_MATCHED case to AMBIGUOUS; fixed by checking
+    both.)
     """
     if not profile.is_identity_verified():
         # Doc 15 §3.1: matching against an unverified identity could assert
@@ -104,7 +124,8 @@ def verify_roster(roster_text: str, profile: UserProfile) -> RosterVerdict:
         if best_score >= ROSTER_NAME_THRESHOLD and margin_clear:
             return RosterVerdict("MATCHED", "name_fuzzy", best_score)
 
-    if _REG_NO_RE.search(text.upper()):
+    upper_text = text.upper()
+    if _REG_NO_RE.search(upper_text) or _NEO_ID_RE.search(upper_text):
         return RosterVerdict("NOT_MATCHED", "registration_no", None)
 
     return RosterVerdict("AMBIGUOUS", "none")

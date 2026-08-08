@@ -132,3 +132,35 @@ def test_stronger_verdict_still_overwrites_an_earlier_one(
 
     verdict = db_manager.fetch_roster_verdicts()[(opp_id, "INTERVIEW")]
     assert verdict["verdict"] == "MATCHED"
+
+
+# ---------------------------------------------------------------------------
+# Regression fixtures: real production roster excerpts, fetched live from
+# Gmail while testing this module (docs/design/16). Every real roster
+# checked was a Neo-ID-only list -- no registration numbers, no names --
+# which is what the bug below was actually about.
+# ---------------------------------------------------------------------------
+
+_REAL_ABSYZ_EXCERPT = (
+    "Neo ID\nN2Z3K8G4\nT2N4C3B9\nL5A1J1J7\nJ6Q7V4V5\nP5E1D0X2\n"
+    "A2J4M5Q8\nI3B7J0W5\nB4Q0O2S9\nM2H0G6M3\nL9J3N2X3"
+)
+
+_REAL_TEKION_ADDITIONAL_EXCERPT = (
+    "NEO ID \nO5P8D1U6\nX2A6L2T3\nO4H7P1K1\nH1E5X6I3\nX6I1M4O7\nQ4Z7"
+)
+
+
+def test_real_neo_id_only_roster_absent_is_not_matched():
+    """Regression: a pure Neo-ID list with the codename absent used to
+    return AMBIGUOUS (only _REG_NO_RE was checked as "did it parse"), which
+    silently defeated the calendar garbage-collection this whole feature
+    exists for -- confirmed against 5 real production rosters."""
+    result = verify_roster(_REAL_ABSYZ_EXCERPT, _profile())
+    assert result.verdict == "NOT_MATCHED"
+
+
+def test_real_neo_id_only_roster_present_is_matched():
+    result = verify_roster(_REAL_TEKION_ADDITIONAL_EXCERPT, _profile())
+    assert result.verdict == "MATCHED"
+    assert result.method == "codename"
