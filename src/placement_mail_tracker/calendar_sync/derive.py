@@ -191,14 +191,27 @@ def _apply_collision_guard(
 def derive_events(
     opportunities: list[dict[str, Any]],
     settings: Settings,
+    roster_verdicts: dict[tuple[int, str], dict[str, Any]] | None = None,
 ) -> tuple[list[CalendarEvent], list[str]]:
     """Map each visible drive to 0-3 events; returns (events, anomalies).
 
     Implemented by the "calendar-derive" subagent per spec §3.2.
+
+    ``roster_verdicts`` (docs/design/16 Phase D, docs/design/15 §3.3):
+    keyed by (opportunity_id, event_type). A round with a stored
+    ``NOT_MATCHED`` verdict is never admitted, even if it's otherwise
+    eligible -- a roster explicitly said this student isn't on it for that
+    specific round. Any other case (no verdict row -- the round was never
+    evaluated, or ``AMBIGUOUS`` -- the roster didn't parse) is treated
+    exactly as today: admitted by the existing eligibility/kind/mode rules.
+    Doc 15's hard rule cuts both ways -- an unproven exclusion must not
+    resolve toward "hidden" any more than an unproven inclusion resolves
+    toward "shortlisted".
     """
     events: list[CalendarEvent] = []
     anomalies: list[str] = []
     normalized_companies: dict[tuple[int, str], str] = {}
+    roster_verdicts = roster_verdicts or {}
 
     for opp in opportunities:
         # docs/design/16 Phase 6: only real placement drives reach the
@@ -231,6 +244,9 @@ def derive_events(
                 ("OA", opp.get("oa_date")),
                 ("INTERVIEW", opp.get("interview_date")),
             ):
+                verdict_row = roster_verdicts.get((opp.get("id"), event_type))
+                if verdict_row is not None and verdict_row.get("verdict") == "NOT_MATCHED":
+                    continue
                 event = _derive_single_event(opp, event_type, raw_date, settings, anomalies)
                 if event is not None:
                     events.append(event)

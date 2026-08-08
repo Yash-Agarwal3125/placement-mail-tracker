@@ -210,6 +210,56 @@ def test_null_date_flags_anomaly_without_touching_event(
 # ---------------------------------------------------------------------------
 
 
+def test_not_matched_roster_verdict_retitles_and_freezes(
+    db_manager, mock_settings, sample_opportunity
+):
+    """docs/design/16 Phase D/E: a NOT_MATCHED roster verdict for a round
+    retires just that round's event, same non-destructive treatment."""
+    opp = sample_opportunity(
+        oa_date="17-Aug-2026 05:30 PM", interview_date="20-Aug-2026 10:00 AM"
+    )
+    opp_id, _ = db_manager.insert_or_update_opportunity(
+        opp, source_thread_id="thread-notmatched", email_classification="OA_UPDATE"
+    )
+    db_manager.set_my_status(
+        db_manager.fetch_opportunity_by_id(opp_id)["drive_id"], "APPLIED", source="sheet"
+    )
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    states_before = {s["event_type"]: s for s in db_manager.fetch_calendar_event_states()}
+    assert set(states_before) == {"OA", "INTERVIEW"}
+
+    db_manager.upsert_roster_verdict(opp_id, "OA", "NOT_MATCHED", method="registration_no")
+
+    client.patch_calls.clear()
+    result = engine.sync()
+
+    assert result.retitled_stale == 1
+    states_after = {s["event_type"]: s for s in db_manager.fetch_calendar_event_states()}
+    assert states_after["OA"]["status"] == "excluded"
+    assert states_after["INTERVIEW"]["status"] == "active"  # round independence
+
+
+def test_ambiguous_roster_verdict_leaves_event_untouched(
+    db_manager, mock_settings, sample_opportunity
+):
+    opp = sample_opportunity(oa_date="17-Aug-2026 05:30 PM")
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-ambiguous")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    db_manager.upsert_roster_verdict(opp_id, "OA", "AMBIGUOUS", method="none")
+
+    result = engine.sync()
+
+    assert result.retitled_stale == 0
+    state = db_manager.fetch_calendar_event_states()[0]
+    assert state["status"] == "active"
+
+
 def test_reclassified_non_placement_drive_retitles_and_freezes(
     db_manager, mock_settings, sample_opportunity
 ):

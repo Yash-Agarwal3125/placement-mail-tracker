@@ -286,6 +286,18 @@ class DatabaseManager:
                 candidates TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS roster_verdicts (
+                opportunity_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                method TEXT NOT NULL,
+                score REAL,
+                source_email_id TEXT,
+                verified_at TEXT NOT NULL,
+                PRIMARY KEY (opportunity_id, event_type),
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+            );
             """
         )
         self._migrate_existing_opportunities_table()
@@ -741,6 +753,50 @@ class DatabaseManager:
             "UPDATE calendar_events SET status = ?, updated_at = ? WHERE id = ?;",
             (status, utc_now_iso(), row_id),
         )
+
+    def upsert_roster_verdict(
+        self,
+        opportunity_id: int,
+        event_type: str,
+        verdict: str,
+        *,
+        method: str,
+        score: float | None = None,
+        source_email_id: str | None = None,
+    ) -> None:
+        """Record a per-round roster verdict (docs/design/16 Phase C).
+
+        Keyed by (opportunity_id, event_type) -- round-independent, matching
+        ``calendar_events``'s own granularity, so being MATCHED for OA carries
+        no implication for INTERVIEW. A later mail's verdict replaces the
+        stored one -- *unless* the new verdict is AMBIGUOUS, which never
+        overwrites an existing MATCHED/NOT_MATCHED. A stronger verdict (from
+        a roster that actually parsed, or a direct user assertion) must not
+        be silently erased by a later mail whose attachment didn't parse --
+        that would be the exact non-downgrade bug already fixed for
+        drive_kind and the my_status ladder, recurring here.
+        """
+        self.connection.execute(
+            """
+            INSERT INTO roster_verdicts
+                (opportunity_id, event_type, verdict, method, score, source_email_id, verified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(opportunity_id, event_type) DO UPDATE SET
+                verdict = excluded.verdict,
+                method = excluded.method,
+                score = excluded.score,
+                source_email_id = excluded.source_email_id,
+                verified_at = excluded.verified_at
+            WHERE excluded.verdict != 'AMBIGUOUS';
+            """,
+            (opportunity_id, event_type, verdict, method, score, source_email_id, utc_now_iso()),
+        )
+        self.connection.commit()
+
+    def fetch_roster_verdicts(self) -> dict[tuple[int, str], dict[str, Any]]:
+        """Return every roster verdict, keyed by (opportunity_id, event_type)."""
+        rows = self.connection.execute("SELECT * FROM roster_verdicts;").fetchall()
+        return {(row["opportunity_id"], row["event_type"]): dict(row) for row in rows}
         self.connection.commit()
 
     def find_duplicate_opportunity(self, opportunity: dict[str, Any]) -> sqlite3.Row | None:

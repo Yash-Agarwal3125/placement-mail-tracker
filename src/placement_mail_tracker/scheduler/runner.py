@@ -28,6 +28,7 @@ from placement_mail_tracker.extraction.confirmation import (
     find_confident_drive_match,
 )
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
+from placement_mail_tracker.extraction.roster import verify_roster
 from placement_mail_tracker.extraction.rule_engine import (
     classify_email,
     detect_status_from_text,
@@ -840,6 +841,10 @@ class PlacementTrackerRunner:
                     opp_data["priority"],
                 )
 
+                self._capture_roster_verdict(
+                    classification, opp_id, msg, msg_id, gmail_client, user_profile, database
+                )
+
             database.log_processed_email(
                 gmail_message_id=msg_id,
                 subject=subject,
@@ -999,14 +1004,19 @@ class PlacementTrackerRunner:
     def _prepare_attachments(
         self, gmail_client: GmailClient | None, msg: dict[str, Any]
     ) -> tuple[str, list[tuple[bytes, str]]]:
-        """Fetch and classify this mail's attachments for the Gemini call.
+        """Fetch and classify this mail's attachments.
 
-        Only invoked right before a Gemini call that is already happening
-        (see the call site in ``_process_single_message``) — never adds a
-        Gmail or Gemini call for mails Gemini would not otherwise touch.
-        Returns (attachment_text, image_parts): pre-extracted .xlsx/.pdf text
-        to append to the prompt, and raw (bytes, mime_type) pairs for
-        image attachments to route to Gemini multimodal separately.
+        Two callers: right before a Gemini call that is already happening
+        (never adds a Gmail/Gemini call for mail Gemini wouldn't otherwise
+        touch), and ``_capture_roster_verdict`` below, which does add a
+        Gmail attachment-fetch call for OA/INTERVIEW-round mail specifically
+        -- that's the one piece of data this feature needs and Gmail
+        attachment fetches don't carry the per-call cost a Gemini call does
+        (CLAUDE.md item 6 is about minimising *paid* API cost).
+        Returns (attachment_text, image_parts): pre-extracted .xlsx/.pdf text,
+        and raw (bytes, mime_type) pairs for image attachments -- a scanned/
+        image roster is flagged AMBIGUOUS by ``verify_roster``, never OCR'd
+        (doc 15 §2.4).
         """
         attachments = msg.get("attachments") or []
         if not attachments or gmail_client is None:
@@ -1041,6 +1051,63 @@ class PlacementTrackerRunner:
                 text_chunks.append(f"--- Attachment: {filename} ---\n{text}")
 
         return "\n\n".join(text_chunks), image_parts
+
+    # Which calendar_events round a mail's classification carries evidence
+    # for. SHORTLIST_UPDATE is deliberately excluded -- it's ambiguous which
+    # specific round it refers to, and a wrong round mapping here would be
+    # worse than skipping (doc 15 §3.3's hard rule about false claims).
+    _ROSTER_EVENT_TYPE_BY_CLASSIFICATION = {
+        "OA_UPDATE": "OA",
+        "INTERVIEW_UPDATE": "INTERVIEW",
+    }
+
+    def _capture_roster_verdict(
+        self,
+        classification: str,
+        opportunity_id: int | None,
+        msg: dict[str, Any],
+        msg_id: str,
+        gmail_client: GmailClient | None,
+        user_profile: UserProfile,
+        database: DatabaseManager,
+    ) -> None:
+        """docs/design/16 Phase B: check an OA/INTERVIEW-round mail's
+        attachment for this student's roster verdict.
+
+        No sample roster exists anywhere in this codebase to validate the
+        matcher's assumptions against (checked before building it -- see
+        extraction/roster.py's docstring), so this is best-effort: it fetches
+        whatever attachment the mail carries and lets ``verify_roster``
+        degrade to AMBIGUOUS on anything it can't confidently read. Never
+        raises -- one bad attachment must not fail the whole email.
+        """
+        if opportunity_id is None:
+            return
+        event_type = self._ROSTER_EVENT_TYPE_BY_CLASSIFICATION.get(classification)
+        if event_type is None:
+            return
+        if not user_profile.is_identity_verified():
+            return  # doc 15 §3.1: no reg-no/codename to match against, refuse.
+        if not msg.get("attachments"):
+            return
+
+        try:
+            attachment_text, _images = self._prepare_attachments(gmail_client, msg)
+        except Exception as error:  # noqa: BLE001 - one bad email must not abort the run
+            logger.warning("Roster attachment fetch failed for %s: %s", msg_id, error)
+            return
+        if not attachment_text:
+            return
+
+        result = verify_roster(attachment_text, user_profile)
+        logger.info(
+            "[ROSTER] opportunity_id=%s round=%s verdict=%s method=%s",
+            opportunity_id, event_type, result.verdict, result.method,
+        )
+        database.upsert_roster_verdict(
+            opportunity_id, event_type, result.verdict,
+            method=result.method, score=result.score, source_email_id=msg_id,
+        )
 
     def _execute_sync_pipelines(
         self,

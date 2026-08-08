@@ -161,6 +161,36 @@ def test_missing_drive_kind_defaults_to_placement(mock_settings):
     assert len(events) == 1
 
 
+def test_not_matched_roster_verdict_excludes_only_that_round(mock_settings):
+    """docs/design/16 Phase D: NOT_MATCHED for OA must not also hide
+    INTERVIEW -- round independence is the whole point."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", interview_date="20-Jun-2026", my_status="APPLIED")
+    verdicts = {
+        (1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"},
+    }
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    types = {e.event_type for e in events}
+    assert "OA" not in types
+    assert "INTERVIEW" in types
+    assert "DEADLINE" not in types  # no deadline set on this fixture
+
+
+def test_ambiguous_roster_verdict_does_not_exclude(mock_settings):
+    """An AMBIGUOUS verdict (roster didn't parse) must not hide the round --
+    unproven exclusion is not the same as proven exclusion (doc 15 §3.3)."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    verdicts = {(1, "OA"): {"verdict": "AMBIGUOUS", "method": "none"}}
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    assert any(e.event_type == "OA" for e in events)
+
+
+def test_no_roster_verdict_at_all_does_not_exclude(mock_settings):
+    """Never-evaluated (no row) behaves exactly as it does today."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    events, _ = derive_events([opp], mock_settings, {})
+    assert any(e.event_type == "OA" for e in events)
+
+
 def test_collision_guard_drops_higher_opportunity_id(mock_settings):
     opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026")
     opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026")

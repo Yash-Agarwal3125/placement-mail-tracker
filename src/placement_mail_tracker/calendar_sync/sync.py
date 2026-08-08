@@ -75,7 +75,8 @@ class CalendarSyncEngine:
         # still derive/diff whatever the (empty) row set produces.
         stale_pass_enabled = bool(rows)
 
-        desired, anomalies = derive_events(rows, self.settings)
+        roster_verdicts = self.database.fetch_roster_verdicts()
+        desired, anomalies = derive_events(rows, self.settings, roster_verdicts)
         result.flagged.extend(anomalies)
 
         calendar_id: str | None = None
@@ -116,7 +117,8 @@ class CalendarSyncEngine:
         active_opp_ids = {row["id"] for row in rows}
         rows_by_id = {row["id"]: row for row in rows}
         self._null_date_pass(
-            states_by_key, active_opp_ids, desired_keys, rows_by_id, calendar_id, dry_run, result
+            states_by_key, active_opp_ids, desired_keys, rows_by_id, roster_verdicts,
+            calendar_id, dry_run, result,
         )
 
         if stale_pass_enabled:
@@ -428,21 +430,26 @@ class CalendarSyncEngine:
         active_opp_ids: set[int],
         desired_keys: set[tuple[int, str]],
         rows_by_id: dict[int, dict[str, Any]],
+        roster_verdicts: dict[tuple[int, str], dict[str, Any]],
         calendar_id: str | None,
         dry_run: bool,
         result: CalendarSyncResult,
     ) -> None:
         """A still-active drive's event dropped out of the desired set.
 
-        docs/design/16 Phase 6: two different situations reach here, and only
-        one of them is safe to act on without a human. When the drive itself
-        is confidently no longer relevant — reclassified as a non-placement
-        `drive_kind`, or `eligibility_status` says NOT_ELIGIBLE — the event is
-        retitled `[?] ...` and frozen, the same non-destructive treatment the
-        stale pass already gives a vanished drive (never delete, doc 15 §5.3 /
-        ADR Decision 2). Any other cause (a genuinely missing date -- possibly
-        a temporary extraction gap that could resolve next run) keeps the
-        original "kept as-is, flagged for review" behaviour unchanged.
+        docs/design/16 Phase 6/D: several different situations reach here,
+        and only some of them are safe to act on without a human. When the
+        round is confidently no longer relevant -- the drive was
+        reclassified as a non-placement `drive_kind`, `eligibility_status`
+        says NOT_ELIGIBLE, or a roster explicitly returned `NOT_MATCHED` for
+        this specific round -- the event is retitled `[?] ...` and frozen,
+        the same non-destructive treatment the stale pass already gives a
+        vanished drive (never delete, doc 15 §5.3 / ADR Decision 2). Any
+        other cause (a genuinely missing date, an AMBIGUOUS roster verdict,
+        or no verdict at all -- the round was never evaluated) keeps the
+        original "kept as-is, flagged for review" behaviour unchanged. An
+        unproven exclusion must not resolve toward "hidden" any more than an
+        unproven inclusion resolves toward "shortlisted" (doc 15 §3.3).
         """
         for key, state in states_by_key.items():
             if state["status"] != "active":
@@ -456,8 +463,12 @@ class CalendarSyncEngine:
             opportunity = rows_by_id.get(opportunity_id) or {}
             drive_kind = opportunity.get("drive_kind") or "PLACEMENT"
             eligibility_status = opportunity.get("eligibility_status") or ""
+            verdict_row = roster_verdicts.get(key)
+            not_matched = verdict_row is not None and verdict_row.get("verdict") == "NOT_MATCHED"
             confidently_excluded = (
-                drive_kind != "PLACEMENT" or "NOT_ELIGIBLE" in eligibility_status
+                drive_kind != "PLACEMENT"
+                or "NOT_ELIGIBLE" in eligibility_status
+                or not_matched
             )
 
             if confidently_excluded:
