@@ -125,7 +125,9 @@ def verify_roster(roster_text: str, profile: UserProfile) -> RosterVerdict:
             return RosterVerdict("MATCHED", "name_fuzzy", best_score)
 
     upper_text = text.upper()
-    if _REG_NO_RE.search(upper_text) or _NEO_ID_RE.search(upper_text):
+    if _REG_NO_RE.search(upper_text):
         return RosterVerdict("NOT_MATCHED", "registration_no", None)
+    if _NEO_ID_RE.search(upper_text):
+        return RosterVerdict("NOT_MATCHED", "codename", None)
 
     return RosterVerdict("AMBIGUOUS", "none")

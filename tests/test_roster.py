@@ -158,6 +158,7 @@ def test_real_neo_id_only_roster_absent_is_not_matched():
     exists for -- confirmed against 5 real production rosters."""
     result = verify_roster(_REAL_ABSYZ_EXCERPT, _profile())
     assert result.verdict == "NOT_MATCHED"
+    assert result.method == "codename"
 
 
 def test_real_neo_id_only_roster_present_is_matched():
