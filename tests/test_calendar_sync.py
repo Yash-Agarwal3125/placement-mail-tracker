@@ -18,7 +18,7 @@ from placement_mail_tracker.calendar_sync.sync import CalendarSyncEngine
 
 
 class FakeCalendarClient:
-    """Minimal stand-in for GoogleCalendarClient (no delete method exists at all)."""
+    """Minimal stand-in for GoogleCalendarClient."""
 
     def __init__(self) -> None:
         self.calendar_id = "cal-vit-placements"
@@ -26,6 +26,7 @@ class FakeCalendarClient:
         self.insert_calls: list[tuple[str, dict[str, Any]]] = []
         self.patch_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.get_calls: list[tuple[str, str]] = []
+        self.delete_calls: list[tuple[str, str]] = []
         self._events: dict[str, dict[str, Any]] = {}
         self._next_id = 1
         self.last_error: str | None = None
@@ -48,6 +49,10 @@ class FakeCalendarClient:
     def get_event(self, calendar_id: str, event_id: str) -> dict[str, Any] | None:
         self.get_calls.append((calendar_id, event_id))
         return self._events.get(event_id)
+
+    def delete_event(self, calendar_id: str, event_id: str) -> None:
+        self.delete_calls.append((calendar_id, event_id))
+        self._events.pop(event_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +238,13 @@ def test_not_matched_roster_verdict_retitles_and_freezes(
 
     db_manager.upsert_roster_verdict(opp_id, "OA", "NOT_MATCHED", method="registration_no")
 
-    client.patch_calls.clear()
     result = engine.sync()
 
-    assert result.retitled_stale == 1
+    assert result.deleted == 1
+    assert len(client.delete_calls) == 1
     states_after = {s["event_type"]: s for s in db_manager.fetch_calendar_event_states()}
     assert states_after["OA"]["status"] == "excluded"
+    assert states_after["OA"]["gcal_event_id"] is None
     assert states_after["INTERVIEW"]["status"] == "active"  # round independence
 
 
@@ -260,14 +266,18 @@ def test_ambiguous_roster_verdict_leaves_event_untouched(
     assert state["status"] == "active"
 
 
-def test_reclassified_non_placement_drive_retitles_and_freezes(
+def test_reclassified_non_placement_drive_deletes_event(
     db_manager, mock_settings, sample_opportunity
 ):
+    """docs/design/16, by explicit user choice: a confidently-excluded
+    round's Google event is actually deleted, not just retitled."""
     opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-hackathon")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
     engine.sync()
+    stored = db_manager.fetch_calendar_event_states()[0]
+    assert stored["gcal_event_id"] is not None
 
     # Simulate a backfill reclassifying a pre-existing row as non-placement.
     db_manager.connection.execute(
@@ -275,22 +285,21 @@ def test_reclassified_non_placement_drive_retitles_and_freezes(
     )
     db_manager.connection.commit()
 
-    client.patch_calls.clear()
     result = engine.sync()
 
-    assert result.retitled_stale == 1
+    assert result.deleted == 1
     assert not result.flagged  # excluded, not merely flagged
-    assert len(client.patch_calls) == 1
-    _, _, body = client.patch_calls[0]
-    assert body["summary"].startswith("[?] ")
+    assert len(client.delete_calls) == 1
+    assert client.delete_calls[0][1] == stored["gcal_event_id"]
 
     state = next(
         s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
     )
     assert state["status"] == "excluded"
+    assert state["gcal_event_id"] is None
 
 
-def test_not_eligible_drive_retitles_and_freezes(db_manager, mock_settings, sample_opportunity):
+def test_not_eligible_drive_deletes_event(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-noteligible")
     client = FakeCalendarClient()
@@ -305,46 +314,50 @@ def test_not_eligible_drive_retitles_and_freezes(db_manager, mock_settings, samp
 
     result = engine.sync()
 
-    assert result.retitled_stale == 1
+    assert result.deleted == 1
     state = next(
         s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
     )
     assert state["status"] == "excluded"
+    assert state["gcal_event_id"] is None
 
 
-def test_reclassified_drive_reverts_to_placement_restores_title(
+def test_reclassified_drive_reverts_to_placement_reinserts_fresh_event(
     db_manager, mock_settings, sample_opportunity
 ):
     """A false-positive reclassification is reversible: fixing drive_kind
-    back to PLACEMENT restores the real title on Google, via the same
-    'reactivating' mechanic as a genuinely vanished drive reappearing."""
+    back to PLACEMENT re-adds the event to Google. Deletion (unlike the old
+    retitle-freeze) leaves nothing to PATCH, so this must go through
+    ``_handle_insert``, not ``_handle_patch``."""
     opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-falsepos")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
     engine.sync()
+    original_event_id = db_manager.fetch_calendar_event_states()[0]["gcal_event_id"]
 
     db_manager.connection.execute(
         "UPDATE opportunities SET drive_kind = 'HACKATHON' WHERE id = ?;", (opp_id,)
     )
     db_manager.connection.commit()
     engine.sync()
+    assert db_manager.fetch_calendar_event_states()[0]["gcal_event_id"] is None
 
     db_manager.connection.execute(
         "UPDATE opportunities SET drive_kind = 'PLACEMENT' WHERE id = ?;", (opp_id,)
     )
     db_manager.connection.commit()
 
-    client.patch_calls.clear()
     result = engine.sync()
 
-    assert result.patched == 1
-    _, _, body = client.patch_calls[0]
-    assert not body["summary"].startswith("[?] ")
+    assert result.inserted == 1
+    assert result.patched == 0
     state = next(
         s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
     )
     assert state["status"] == "active"
+    assert state["gcal_event_id"] is not None
+    assert state["gcal_event_id"] != original_event_id  # a genuinely new Google event
 
 
 # ---------------------------------------------------------------------------
@@ -425,9 +438,10 @@ def test_terminal_drive_grace_period_then_retitle_cancelled(
     )
     assert state["status"] == "cancelled"  # REJECTED is a terminal current_status
 
-    # The client has no delete method at all -- assert it's never been given one.
-    assert not hasattr(client, "delete_event")
-    assert not hasattr(client, "delete")
+    # The stale pass (a vanished/terminal drive) still only retitles -- real
+    # deletion is scoped to the null-date pass's confidently-excluded
+    # branch only (docs/design/16), by explicit user choice.
+    assert client.delete_calls == []
 
 
 def test_reactivated_stale_drive_restores_google_title(

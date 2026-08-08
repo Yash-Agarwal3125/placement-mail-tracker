@@ -227,6 +227,30 @@ class GoogleCalendarClient:
 
         self._call_with_retry(_call)
 
+    def delete_event(self, calendar_id: str, event_id: str) -> None:
+        """events().delete by stored id.
+
+        docs/design/16: added specifically for confidently-excluded rounds
+        (a roster explicitly proves the student isn't on it), by explicit
+        user choice, overriding this module's original never-delete design
+        (ADR Decision 2) -- see calendar_sync/sync.py's ``_delete_and_freeze``
+        for the reactivation handling this requires. A 404 means the event
+        is already gone (the user deleted it themselves, or a retry after a
+        prior success) -- that's the goal already achieved, not an error.
+        """
+
+        def _call() -> None:
+            try:
+                self._get_service().events().delete(
+                    calendarId=calendar_id, eventId=event_id
+                ).execute()
+            except HttpError as error:
+                if error.resp.status in (404, 410):
+                    return
+                raise
+
+        self._call_with_retry(_call)
+
     def get_event(self, calendar_id: str, event_id: str) -> dict[str, Any] | None:
         """events().get; returns None on 404 (used only by rebuild).
 

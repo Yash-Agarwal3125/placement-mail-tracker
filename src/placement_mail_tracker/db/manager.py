@@ -754,6 +754,20 @@ class DatabaseManager:
             (status, utc_now_iso(), row_id),
         )
 
+    def mark_calendar_event_deleted(self, row_id: int, status: str) -> None:
+        """Record that a row's Google event was actually deleted.
+
+        Clears ``gcal_event_id`` so a later reactivation (the exclusion
+        being corrected) knows there is nothing left on Google to PATCH and
+        must insert a fresh event instead (calendar_sync/sync.py's
+        reactivation branch checks this).
+        """
+        self.connection.execute(
+            "UPDATE calendar_events SET status = ?, gcal_event_id = NULL, "
+            "updated_at = ? WHERE id = ?;",
+            (status, utc_now_iso(), row_id),
+        )
+
     def upsert_roster_verdict(
         self,
         opportunity_id: int,

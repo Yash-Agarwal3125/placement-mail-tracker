@@ -10,7 +10,6 @@ fixture lives here only.
 
 from __future__ import annotations
 
-import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -186,13 +185,34 @@ class TestRetryHelper:
         assert sleep_calls == []
 
 
-class TestNoDeleteCapability:
-    """ADR Decision 2: disappearance is handled by retitling, never deletion."""
+class TestScopedDeleteCapability:
+    """ADR Decision 2 said disappearance is handled by retitling, never
+    deletion. docs/design/16 narrowly overrides that, by explicit user
+    choice, for confidently-excluded rounds only (a roster explicitly
+    proves the student isn't shortlisted) -- calendar_sync/sync.py's
+    ``_delete_and_freeze``. The stale pass (a vanished/terminal drive) is
+    unaffected and still only retitles; see
+    test_calendar_sync.py::test_terminal_drive_grace_period_then_retitle_cancelled
+    for that half of the guard.
+    """
 
-    def test_no_delete_event_method(self):
-        assert not hasattr(GoogleCalendarClient, "delete_event")
-        assert not hasattr(GoogleCalendarClient, "delete")
+    def test_deletes_by_exact_event_id_not_search(self, calendar_client, fake_calendar_service):
+        calendar_client.delete_event("cal_vit", "evt_stored_id")
 
-    def test_no_method_body_calls_dot_delete(self):
-        source = inspect.getsource(calendar_client_module)
-        assert ".delete(" not in source
+        fake_calendar_service.events().list.assert_not_called()
+        fake_calendar_service.events().search.assert_not_called()
+        _, kwargs = fake_calendar_service.events().delete.call_args
+        assert kwargs["calendarId"] == "cal_vit"
+        assert kwargs["eventId"] == "evt_stored_id"
+
+    @pytest.mark.parametrize("status", [404, 410])
+    def test_treats_404_and_410_as_success(
+        self, calendar_client, fake_calendar_service, status
+    ):
+        """A 404/410 on delete means the goal is already achieved (the user
+        deleted it themselves, or a retry after a prior success) -- not an
+        error to surface or retry."""
+        fake_calendar_service.events().delete().execute.side_effect = _http_error(status)
+
+        calendar_client.delete_event("cal_vit", "evt_missing")  # must not raise
+        assert calendar_client.last_error is None

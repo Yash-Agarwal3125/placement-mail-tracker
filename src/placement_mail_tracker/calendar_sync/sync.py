@@ -42,6 +42,7 @@ class CalendarSyncResult:
     unchanged: int = 0
     marked_done: int = 0
     retitled_stale: int = 0
+    deleted: int = 0
     flagged: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -109,6 +110,12 @@ class CalendarSyncEngine:
             reactivating = existing["status"] != "active"
             if not reactivating and existing["content_hash"] == event.content_hash():
                 self._handle_unchanged(event, existing, calendar_id, dry_run, result, states_by_key)
+            elif reactivating and not existing.get("gcal_event_id"):
+                # A confidently-excluded round whose event was actually
+                # deleted (_delete_and_freeze) reappearing -- nothing on
+                # Google to PATCH, so this must insert a fresh event, not
+                # attempt to patch an id that no longer exists.
+                self._handle_insert(event, calendar_id, dry_run, result, states_by_key)
             else:
                 self._handle_patch(event, existing, calendar_id, dry_run, result, states_by_key)
 
@@ -442,14 +449,15 @@ class CalendarSyncEngine:
         round is confidently no longer relevant -- the drive was
         reclassified as a non-placement `drive_kind`, `eligibility_status`
         says NOT_ELIGIBLE, or a roster explicitly returned `NOT_MATCHED` for
-        this specific round -- the event is retitled `[?] ...` and frozen,
-        the same non-destructive treatment the stale pass already gives a
-        vanished drive (never delete, doc 15 §5.3 / ADR Decision 2). Any
-        other cause (a genuinely missing date, an AMBIGUOUS roster verdict,
-        or no verdict at all -- the round was never evaluated) keeps the
-        original "kept as-is, flagged for review" behaviour unchanged. An
-        unproven exclusion must not resolve toward "hidden" any more than an
-        unproven inclusion resolves toward "shortlisted" (doc 15 §3.3).
+        this specific round -- the Google event is actually deleted (by
+        explicit user choice; this overrides the module's original
+        never-delete stance, ADR Decision 2 / doc 15 §5.3 -- see
+        ``_delete_and_freeze``). Any other cause (a genuinely missing date,
+        an AMBIGUOUS roster verdict, or no verdict at all -- the round was
+        never evaluated) keeps the original "kept as-is, flagged for
+        review" behaviour unchanged. An unproven exclusion must not resolve
+        toward "hidden" any more than an unproven inclusion resolves toward
+        "shortlisted" (doc 15 §3.3).
         """
         for key, state in states_by_key.items():
             if state["status"] != "active":
@@ -472,9 +480,7 @@ class CalendarSyncEngine:
             )
 
             if confidently_excluded:
-                self._retitle_and_freeze(
-                    state, opportunity_id, "excluded", calendar_id, dry_run, result
-                )
+                self._delete_and_freeze(state, opportunity_id, calendar_id, dry_run, result)
                 continue
 
             label = state.get("drive_id") or opportunity_id
@@ -581,6 +587,60 @@ class CalendarSyncEngine:
         result.retitled_stale += 1
         state["title"] = new_title
         state["status"] = new_status
+
+    def _delete_and_freeze(
+        self,
+        state: dict[str, Any],
+        opportunity_id: int,
+        calendar_id: str | None,
+        dry_run: bool,
+        result: CalendarSyncResult,
+    ) -> None:
+        """Actually delete a confidently-excluded round's Google event.
+
+        docs/design/16: by explicit user choice, overriding this module's
+        original never-delete stance (ADR Decision 2 / doc 15 §5.3) for
+        confidently-excluded rounds specifically -- NOT for the stale pass
+        (a vanished/terminal drive), which still only retitles
+        (``_retitle_and_freeze``). Clears ``gcal_event_id`` on success so a
+        later reactivation (the exclusion being corrected -- e.g. a roster
+        false positive fixed, or a later "additional shortlist" adds the
+        student) knows to INSERT a fresh event rather than PATCH one that no
+        longer exists; ``sync()``'s reactivation branch checks this.
+        """
+        if dry_run:
+            logger.info(
+                "PLAN: delete '%s' (opportunity_id=%s)", state["title"], opportunity_id,
+            )
+            result.deleted += 1
+            state["status"] = "excluded"
+            state["gcal_event_id"] = None
+            return
+
+        gcal_event_id = state.get("gcal_event_id")
+        row_id = state.get("id")
+        if not gcal_event_id:
+            if row_id is not None:
+                self.database.mark_calendar_event_deleted(row_id, "excluded")
+            state["status"] = "excluded"
+            return
+
+        try:
+            self.client.delete_event(calendar_id, gcal_event_id)
+        except CalendarAuthenticationError:
+            raise
+        except Exception as error:  # noqa: BLE001 - one bad event must not abort the pass
+            logger.warning(
+                "Calendar delete failed for opportunity_id=%s: %s", opportunity_id, error
+            )
+            self.last_error = str(error)
+            return
+
+        if row_id is not None:
+            self.database.mark_calendar_event_deleted(row_id, "excluded")
+        result.deleted += 1
+        state["status"] = "excluded"
+        state["gcal_event_id"] = None
 
     # ------------------------------------------------------------------
     # Small shared helpers
