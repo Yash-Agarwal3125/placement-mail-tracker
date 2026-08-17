@@ -981,7 +981,7 @@ class DatabaseManager:
                 score = excluded.score,
                 source_email_id = excluded.source_email_id,
                 verified_at = excluded.verified_at
-            WHERE excluded.verdict != 'AMBIGUOUS';
+            WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER');
             """,
             (opportunity_id, event_type, verdict, method, score, source_email_id, utc_now_iso()),
         )
@@ -1594,6 +1594,16 @@ class DatabaseManager:
         if _normalize_scalar(company_val) is None:
             company_val = "Unknown Company"
         company_name = normalize_company_name(company_val)
+        if company_name is None:
+            # normalize_company_name rejects junk tokens (e.g. "Location",
+            # harvested from "@Own Location") and returns None even for a
+            # truthy input -- company_name is NOT NULL, so falling through
+            # would crash the insert. Route to the same "couldn't identify
+            # a company" sentinel used for a blank value; callers that care
+            # about distinguishing "junk extraction" from "genuinely blank"
+            # should check email_classification/attachments upstream and
+            # divert to unmatched_confirmations before reaching here.
+            company_name = "Unknown Company"
 
         role_val = opportunity.get("role")
         if _normalize_scalar(role_val) is None:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.roster import verify_roster
@@ -190,26 +188,11 @@ def test_real_neo_id_only_roster_present_is_matched():
 # docs/design/16 Cause 3: NO_ROSTER precedence.
 #
 # The full MATCHED > NOT_MATCHED > AMBIGUOUS > NO_ROSTER non-downgrade
-# ladder is enforced in db.manager.upsert_roster_verdict, which this task
-# does not own/edit. Today that function's guard is
-# ``WHERE excluded.verdict != 'AMBIGUOUS'`` -- upserting NO_ROSTER over an
-# existing NOT_MATCHED/MATCHED currently *would* incorrectly downgrade it.
-# The required fix (for the other agent to apply) is:
-#
-#     WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER');
-#
-# This test is xfail until that lands -- it documents the requirement
-# without turning the suite red.
+# ladder is enforced in db.manager.upsert_roster_verdict's guard:
+# ``WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER')``.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="db.manager.upsert_roster_verdict's non-downgrade guard does not "
-    "yet cover NO_ROSTER (needs `WHERE excluded.verdict NOT IN "
-    "('AMBIGUOUS', 'NO_ROSTER')`) -- pending change in db/manager.py, out "
-    "of this task's scope.",
-    strict=False,
-)
 def test_no_roster_verdict_never_downgrades_an_existing_stronger_verdict(
     db_manager: DatabaseManager, sample_opportunity
 ):

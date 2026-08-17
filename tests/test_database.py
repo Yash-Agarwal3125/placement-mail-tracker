@@ -357,3 +357,23 @@ class TestEdgeCases:
         events = db_manager.fetch_updates_for_opportunity(opp_id)
         assert len(events) >= 1  # At least the "created" event
         assert any(e["update_type"] == "created" for e in events)
+
+
+def test_insert_with_junk_company_name_does_not_crash(db_manager):
+    """docs/design/16 Cause 6, found while reconciling the two agents: once
+    normalize_company_name() rejects junk tokens ("Location", harvested from
+    "@Own Location" in a real Honeywell mail) it returns None for a truthy
+    input -- and company_name is NOT NULL. Reproduced pre-fix as
+    sqlite3.IntegrityError; _normalize_opportunity must fall back to the same
+    "Unknown Company" sentinel used for a genuinely blank value."""
+    opp = {
+        "company_name": "Location",
+        "role": "Intern",
+        "internship_or_fulltime": "internship",
+    }
+    opp_id, created = db_manager.insert_or_update_opportunity(opp, source_email_id="junk1")
+    assert opp_id is not None
+    row = db_manager.connection.execute(
+        "SELECT company_name FROM opportunities WHERE id = ?;", (opp_id,)
+    ).fetchone()
+    assert row["company_name"] != "Location"
