@@ -116,8 +116,39 @@ _CANONICAL_NAMES: dict[str, str] = {
 }
 
 
-def normalize_company_name(raw: str | None) -> str:
+# Body-text tokens that extraction sometimes harvests in place of a real
+# company name -- e.g. "@Own Location" yielding company="Location". None of
+# these is ever itself a real company name, but they DO appear as
+# substrings/words inside real multi-word names, so the guard below rejects
+# a candidate only when *every* one of its words is one of these tokens
+# (docs/design/16 Cause 6). Deliberately NOT length-based: UBS, TCS, KLA, ZF,
+# Q2, WSP, SES and IPR are all real companies in production data.
+#
+# NOTE: docs/design/16's proposed list also includes "Unknown". Deliberately
+# omitted here: "Unknown"/"Unknown Company" is an existing, deliberate
+# sentinel value this codebase already stores as a literal company_name
+# (scheduler.runner._UNIDENTIFIED_COMPANIES, db.manager._normalize_opportunity's
+# "Unknown Company" fallback, both outside this module's edit scope) --
+# rejecting it here turns that sentinel into a NOT NULL constraint violation
+# instead. See this task's final report for the follow-up this implies.
+_REJECTED_COMPANY_TOKENS = frozenset({
+    "location", "selection", "own", "online", "test", "com",
+    "details", "shortlisted",
+})
+
+
+def _is_rejected_company_candidate(name: str) -> bool:
+    """True when every word of ``name`` is a known non-company token."""
+    tokens = [t.casefold() for t in re.findall(r"[A-Za-z0-9]+", name)]
+    return bool(tokens) and all(t in _REJECTED_COMPANY_TOKENS for t in tokens)
+
+
+def normalize_company_name(raw: str | None) -> str | None:
     """Normalize a company name to a canonical form.
+
+    Returns ``None`` (not ``""``) when the cleaned candidate is composed
+    entirely of rejected junk tokens (docs/design/16 Cause 6) -- distinct
+    from the blank-input case, which returns ``""`` as before.
 
     Examples
     --------
@@ -133,6 +164,8 @@ def normalize_company_name(raw: str | None) -> str:
     'Cisco'
     >>> normalize_company_name("Clayfin Regular")
     'Clayfin'
+    >>> normalize_company_name("Own Location") is None
+    True
     """
     if not raw:
         return ""
@@ -154,6 +187,9 @@ def normalize_company_name(raw: str | None) -> str:
     if not cleaned:
         return ""
 
+    if _is_rejected_company_candidate(cleaned):
+        return None
+
     # Canonical lookup before suffix stripping
     lookup_key = cleaned.casefold()
     if lookup_key in _CANONICAL_NAMES:
@@ -163,6 +199,15 @@ def normalize_company_name(raw: str | None) -> str:
     stripped = _STRIP_SUFFIXES.sub("", cleaned).strip()
     stripped = re.sub(r"[\s:\-–—|]+$", "", stripped)
     stripped = " ".join(stripped.split())
+
+    # Deliberately NOT re-checking _is_rejected_company_candidate on
+    # ``stripped``: every documented junk case (Location, Own Location,
+    # Online Test, Selection, Shortlisted, Details, Com) is already caught
+    # above, before suffix-stripping -- none of them carries a legal-entity
+    # suffix word that stripping would reveal. A second check here would
+    # only fire on inputs that *become* all-rejected-tokens purely as a
+    # side effect of suffix removal (e.g. "Test Company" -> "Test"), which
+    # risks rejecting real names for reasons no caller asked for.
 
     # Canonical lookup after suffix stripping
     if stripped:
@@ -324,6 +369,18 @@ _DRIVE_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     )),
     ("SCHOLARSHIP", re.compile(r"\bscholarship", re.IGNORECASE)),
     ("WORKSHOP", re.compile(r"\b(workshop|bootcamp)\b", re.IGNORECASE)),
+    # Learning-series / info-session mail that is not a hiring drive at all
+    # (docs/design/16 Cause 4) -- e.g. "Deloitte US-India's BRIDGE Campus
+    # Learning Series | Registrations now open" was slipping through as
+    # PLACEMENT and minting a phantom OA. "bootcamp" deliberately stays in
+    # WORKSHOP above (already there, matched first) rather than duplicated
+    # here, to avoid silently reclassifying existing WORKSHOP history.
+    ("WEBINAR", re.compile(
+        r"\b(learning\s+series|campus\s+connect|webinar|"
+        r"info(?:rmation)?\s*session|tech\s*talk|masterclass|"
+        r"awareness\s+session)\b",
+        re.IGNORECASE,
+    )),
 ]
 
 # A mail carrying one of these classifications is, by construction, mid-way
@@ -412,6 +469,33 @@ _DEADLINE_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+# OA-date pattern for the standard VIT CDC phrasing "DD-MM-YYYY By H.MMPm"
+# (e.g. "18-08-2026 By 2.30Pm", "on 05-08-2026 by 1.30pm") -- previously
+# unparsed (docs/design/16 Cause 6). Built deterministically from the regex
+# groups rather than via the fuzzy dateutil parser: "2.30Pm" is exactly the
+# kind of ambiguous fragment that parser accepts unreliably.
+_OA_DATE_RE = re.compile(
+    r"\b(\d{1,2})-(\d{1,2})-(\d{4})\s+by\s+(\d{1,2})[.:](\d{2})\s*([AaPp][Mm])\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_oa_date(text: str) -> str | None:
+    """Return ``YYYY-MM-DDTHH:MM`` for the CDC "DD-MM-YYYY By H.MMPm" phrasing."""
+    match = _OA_DATE_RE.search(text)
+    if not match:
+        return None
+    day, month, year, hour, minute, meridiem = match.groups()
+    day, month, year, hour, minute = int(day), int(month), int(year), int(hour), int(minute)
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 1 <= hour <= 12 and 0 <= minute < 60):
+        return None
+    if meridiem.lower() == "pm" and hour != 12:
+        hour += 12
+    elif meridiem.lower() == "am" and hour == 12:
+        hour = 0
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}"
+
 
 # Location patterns
 _LOCATION_PATTERNS = [
@@ -719,6 +803,7 @@ class RuleExtractionResult:
     ctc: str | None = None
     stipend: str | None = None
     deadline: str | None = None
+    oa_date: str | None = None
     location: str | None = None
     registration_link: str | None = None
     current_status: str = "OPEN"
@@ -760,6 +845,7 @@ class RuleExtractionResult:
             "internship_or_fulltime": self.category,
             "package_or_stipend": self.ctc or self.stipend,
             "deadline": self.deadline,
+            "oa_date": self.oa_date,
             "work_location": self.location,
             "registration_link": self.registration_link,
             "current_status": self.current_status,
@@ -827,6 +913,11 @@ def extract_from_email(
 
     # 8. Extract deadline
     result.deadline = _first_match(_DEADLINE_PATTERNS, combined)
+
+    # 8b. Extract OA date ("DD-MM-YYYY By H.MMPm" -- the standard VIT CDC
+    # phrasing; docs/design/16 Cause 6). Independent of email_classification:
+    # this is a narrow, deterministic date format, not a generic date guess.
+    result.oa_date = _extract_oa_date(combined)
 
     # 9. Extract location
     result.location = _first_match(_LOCATION_PATTERNS, combined)

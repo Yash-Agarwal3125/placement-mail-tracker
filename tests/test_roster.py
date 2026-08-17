@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.roster import verify_roster
@@ -57,23 +59,40 @@ def test_registration_present_but_not_users_is_not_matched():
     assert result.verdict == "NOT_MATCHED"
 
 
-def test_empty_roster_is_ambiguous_not_not_matched():
-    """Zero registration numbers found proves nothing -- doc 15 §3.3."""
+def test_empty_roster_is_no_roster_not_not_matched():
+    """Zero registration numbers found proves nothing -- doc 15 §3.3. Nothing
+    roster-shaped was found at all, so this is NO_ROSTER, not AMBIGUOUS
+    (docs/design/16 Cause 3)."""
     result = verify_roster("", _profile())
-    assert result.verdict == "AMBIGUOUS"
+    assert result.verdict == "NO_ROSTER"
+    assert result.method == "none"
 
 
-def test_unparseable_roster_text_is_ambiguous():
+def test_unparseable_roster_text_is_no_roster():
     result = verify_roster("[image could not be extracted]", _profile())
-    assert result.verdict == "AMBIGUOUS"
+    assert result.verdict == "NO_ROSTER"
 
 
-def test_similar_but_not_matching_name_without_reg_numbers_is_ambiguous():
-    """No reg-nos anywhere and the name doesn't clear the margin -> AMBIGUOUS,
-    never NOT_MATCHED (roster didn't demonstrably parse)."""
+def test_similar_but_not_matching_name_without_reg_numbers_is_no_roster():
+    """No reg-nos anywhere and the name doesn't come close to clearing the
+    threshold -> NO_ROSTER (nothing roster-shaped found), never NOT_MATCHED
+    (roster didn't demonstrably parse) and never AMBIGUOUS (that's reserved
+    for a name that cleared the score threshold but not the uniqueness
+    margin -- docs/design/16 Cause 3)."""
     roster = "Shortlisted candidates:\nYash Agarwal\nRohan Sharma"
     result = verify_roster(roster, _profile(full_name="Rohan Agarwal"))
+    assert result.verdict == "NO_ROSTER"
+
+
+def test_borderline_name_match_without_margin_is_ambiguous_not_no_roster():
+    """A name that clears ROSTER_NAME_THRESHOLD but not the uniqueness
+    margin (two similarly-named candidates) is a genuine "might be you"
+    ambiguity -- the roster parsed, unlike NO_ROSTER (docs/design/16
+    Cause 3)."""
+    roster = "Shortlisted candidates:\nYash Agarwals\nYashh Agarwal"
+    result = verify_roster(roster, _profile())
     assert result.verdict == "AMBIGUOUS"
+    assert result.method == "name_fuzzy"
 
 
 def test_unverified_identity_refuses_to_match():
@@ -165,3 +184,41 @@ def test_real_neo_id_only_roster_present_is_matched():
     result = verify_roster(_REAL_TEKION_ADDITIONAL_EXCERPT, _profile())
     assert result.verdict == "MATCHED"
     assert result.method == "codename"
+
+
+# ---------------------------------------------------------------------------
+# docs/design/16 Cause 3: NO_ROSTER precedence.
+#
+# The full MATCHED > NOT_MATCHED > AMBIGUOUS > NO_ROSTER non-downgrade
+# ladder is enforced in db.manager.upsert_roster_verdict, which this task
+# does not own/edit. Today that function's guard is
+# ``WHERE excluded.verdict != 'AMBIGUOUS'`` -- upserting NO_ROSTER over an
+# existing NOT_MATCHED/MATCHED currently *would* incorrectly downgrade it.
+# The required fix (for the other agent to apply) is:
+#
+#     WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER');
+#
+# This test is xfail until that lands -- it documents the requirement
+# without turning the suite red.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="db.manager.upsert_roster_verdict's non-downgrade guard does not "
+    "yet cover NO_ROSTER (needs `WHERE excluded.verdict NOT IN "
+    "('AMBIGUOUS', 'NO_ROSTER')`) -- pending change in db/manager.py, out "
+    "of this task's scope.",
+    strict=False,
+)
+def test_no_roster_verdict_never_downgrades_an_existing_stronger_verdict(
+    db_manager: DatabaseManager, sample_opportunity
+):
+    opp_id, _ = db_manager.insert_or_update_opportunity(
+        sample_opportunity("Blackrock", "SDE Intern"), source_email_id="b1"
+    )
+    db_manager.upsert_roster_verdict(opp_id, "OA", "NOT_MATCHED", method="registration_no")
+
+    db_manager.upsert_roster_verdict(opp_id, "OA", "NO_ROSTER", method="none")
+
+    verdict = db_manager.fetch_roster_verdicts()[(opp_id, "OA")]
+    assert verdict["verdict"] == "NOT_MATCHED"
