@@ -667,6 +667,87 @@ def test_rebuild_reinserts_missing_and_patches_drifted(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7 (calendar-drift remediation plan, Cause 5): an already-existing
+# DEADLINE event's drive loses interest/HIGH priority -- the Google event
+# must actually be deleted (Spense's acceptance criterion), not merely
+# flagged forever as "date became empty" (the deadline itself never went
+# null here -- only the gate did).
+# ---------------------------------------------------------------------------
+
+
+def test_deadline_gated_out_after_creation_actually_deletes_event(
+    db_manager, mock_settings, sample_opportunity
+):
+    opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "HIGH"
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-p7-1")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+
+    states_before = db_manager.fetch_calendar_event_states()
+    assert len(states_before) == 1
+    assert states_before[0]["status"] == "active"
+
+    # Interest/priority drops -- still MEDIUM/NOT_APPLIED, deadline itself
+    # is untouched (still non-null).
+    db_manager.connection.execute(
+        "UPDATE opportunities SET priority = 'MEDIUM' WHERE id = ?;", (opp_id,)
+    )
+    db_manager.connection.commit()
+
+    result = engine.sync()
+
+    assert result.deleted == 1
+    assert result.flagged == []  # actually deleted, not merely flagged forever
+    assert len(client.delete_calls) == 1
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "excluded"
+    assert state["gcal_event_id"] is None
+
+    # Flicker guard: a third sync pass with the same (still-gated) drive must
+    # be a pure no-op -- derive_events() and _null_date_pass share the same
+    # is_deadline_gated_out resolver, so nothing gets re-created only to be
+    # deleted again.
+    client.insert_calls.clear()
+    client.delete_calls.clear()
+    result2 = engine.sync()
+    assert result2.inserted == 0
+    assert result2.deleted == 0
+    assert client.insert_calls == []
+    assert client.delete_calls == []
+
+
+def test_regaining_interest_reinserts_deadline_event(
+    db_manager, mock_settings, sample_opportunity
+):
+    """The other direction: my_status advancing past NOT_APPLIED after the
+    deadline event was gated out must bring it back (reactivation path)."""
+    opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "MEDIUM"  # my_status stays NOT_APPLIED (DB default)
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-p7-2")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+    assert db_manager.fetch_calendar_event_states() == []  # gated out from the start
+
+    db_manager.set_my_status(
+        db_manager.fetch_opportunity_by_id(opp_id)["drive_id"], "APPLIED", source="sheet"
+    )
+
+    result = engine.sync()
+
+    assert result.inserted == 1
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "active"
+    assert state["gcal_event_id"] is not None
+
+
+# ---------------------------------------------------------------------------
 # Case 18 — auth-dead propagates uncaught
 # ---------------------------------------------------------------------------
 

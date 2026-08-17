@@ -110,6 +110,34 @@ def is_round_excluded(
     return False
 
 
+def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
+    """Cause 5 / Phase 7 (calendar-drift remediation plan): True when a
+    DEADLINE event for ``opp`` must NOT be admitted.
+
+    A DEADLINE event is only useful once there's a reason to care about this
+    specific drive -- otherwise nearly every ELIGIBLE posting mints an
+    "Apply by" entry regardless of interest (over half the calendar in the
+    observed case). Gate on demonstrated interest (any ``my_status`` other
+    than NOT_APPLIED -- APPLIED/SHORTLISTED/SELECTED/REJECTED all mean the
+    user actually engaged) OR HIGH priority. Everything else is still
+    covered by the digest mail, just not the calendar.
+
+    Shared by ``derive_events`` (new events) and ``calendar_sync/sync.py``'s
+    ``_null_date_pass`` (an already-existing event whose drive later loses
+    interest/priority) so the two never disagree -- disagreement here would
+    mean a gated-out DEADLINE's Google event is never actually deleted, only
+    flagged forever as "date became empty" (the same class of flicker/
+    permanent-anomaly bug ``is_round_excluded`` exists to prevent for OA/
+    INTERVIEW). Deliberately does not touch OA/INTERVIEW gating -- those stay
+    governed purely by the existing roster/eligibility logic from Phases 3-4.
+    """
+    demonstrated_interest = (opp.get("my_status") or "NOT_APPLIED") not in (
+        "NOT_APPLIED", "", None,
+    )
+    priority_high = (opp.get("priority") or "").upper() == "HIGH"
+    return not (demonstrated_interest or priority_high)
+
+
 def _is_identifiable_company(name: str | None) -> bool:
     """Return True when ``name`` is a real company (not blank/Unknown)."""
     return bool(name) and str(name).strip().casefold() not in _UNIDENTIFIED_COMPANIES
@@ -285,30 +313,15 @@ def derive_events(
 
         norm_company = normalize_company_name(opp.get("company_name"))
 
-        # Cause 5 / Phase 7 (calendar-drift remediation plan): a DEADLINE
-        # event is only useful once there's a reason to care about this
-        # specific drive -- otherwise nearly every ELIGIBLE posting mints an
-        # "Apply by" entry regardless of interest (over half the calendar in
-        # the observed case). Gate on demonstrated interest (any my_status
-        # other than NOT_APPLIED -- APPLIED/SHORTLISTED/SELECTED/REJECTED all
-        # mean the user actually engaged) OR HIGH priority. Everything else
-        # is still covered by the digest mail, just not the calendar.
-        # Deliberately does not touch OA/INTERVIEW gating (`include_oa_
-        # interview` below) -- those stay governed purely by the existing
-        # roster/eligibility logic from Phases 3-4.
-        demonstrated_interest = (opp.get("my_status") or "NOT_APPLIED") not in (
-            "NOT_APPLIED", "", None,
-        )
-        include_deadline = demonstrated_interest or (opp.get("priority") or "").upper() == "HIGH"
-
-        # Still run the parse (and record any anomaly) regardless of the
+        # Cause 5 / Phase 7: see is_deadline_gated_out's docstring. Still
+        # run the parse (and record any anomaly) regardless of the
         # interest gate -- an unparseable deadline is a data-quality issue
         # worth surfacing whether or not the resulting event would be shown;
         # only the *event* itself is gated on demonstrated interest/priority.
         deadline_event = _derive_single_event(
             opp, "DEADLINE", opp.get("deadline"), settings, anomalies
         )
-        if deadline_event is not None and include_deadline:
+        if deadline_event is not None and not is_deadline_gated_out(opp):
             events.append(deadline_event)
             normalized_companies[(deadline_event.opportunity_id, "DEADLINE")] = norm_company
 
