@@ -14,6 +14,7 @@ import pytest
 
 from placement_mail_tracker.extraction.rule_engine import (
     RuleExtractionResult,
+    classify_drive_kind,
     classify_email,
     detect_status_from_text,
     extract_from_email,
@@ -377,3 +378,167 @@ class TestDeadlineExtraction:
             assert expected_contains in result.deadline
         else:
             assert result.deadline is None
+
+
+# ===================================================================
+# docs/design/16 Cause 6: rejected junk company names
+# ===================================================================
+
+
+class TestRejectedCompanyTokens:
+    """A rejection list of body-text tokens that are never company names,
+    applied in normalize_company_name(). Must never be length-based --
+    UBS, TCS, KLA, ZF, Q2, WSP, SES and IPR are all real companies."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param("Location", id="location"),
+            pytest.param("Own Location", id="own_location"),
+            pytest.param("Online Test", id="online_test"),
+            pytest.param("Selection", id="selection"),
+            pytest.param("Shortlisted", id="shortlisted"),
+            pytest.param("Details", id="details"),
+            pytest.param("Com", id="com"),
+        ],
+    )
+    def test_rejected_tokens_return_none(self, raw):
+        assert normalize_company_name(raw) is None
+
+    def test_unknown_is_deliberately_not_rejected(self):
+        """docs/design/16 lists "Unknown" as a rejected token, but "Unknown"/
+        "Unknown Company" is an existing sentinel value this codebase
+        already stores as a literal company_name
+        (scheduler.runner._UNIDENTIFIED_COMPANIES,
+        db.manager._normalize_opportunity's own "Unknown Company" fallback)
+        -- rejecting it here would turn that sentinel into a NOT NULL
+        constraint violation. See the task report for this conflict."""
+        assert normalize_company_name("Unknown") == "Unknown"
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["UBS", "TCS", "KLA", "ZF", "Q2", "WSP", "SES", "IPR"],
+    )
+    def test_real_short_company_names_survive(self, raw):
+        """No length-based gate: these real 2-3 letter companies must not
+        be rejected merely for being short."""
+        result = normalize_company_name(raw)
+        assert result is not None
+        assert result != ""
+
+    def test_blank_input_still_returns_empty_string_not_none(self):
+        """Rejected-token None is distinct from the pre-existing blank-input
+        '' case -- callers that check `if not company_name` still work for
+        both, but only the rejected-token case is `is None`."""
+        assert normalize_company_name("") == ""
+        assert normalize_company_name(None) == ""
+
+
+# ===================================================================
+# docs/design/16 Cause 6: DD-MM-YYYY By H.MMPm date extraction
+# ===================================================================
+
+
+class TestOaDateExtraction:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            pytest.param(
+                "Online Test Is Scheduled On 18-08-2026 By 2.30Pm @PRP 717.",
+                "2026-08-18T14:30",
+                id="by_2_30pm",
+            ),
+            pytest.param(
+                "The OA is on 05-08-2026 by 1.30pm sharp.",
+                "2026-08-05T13:30",
+                id="lowercase_by_1_30pm",
+            ),
+            pytest.param(
+                "Scheduled 01-01-2027 By 12.30Pm noon-ish.",
+                "2027-01-01T12:30",
+                id="noon_edge_12_30pm",
+            ),
+            pytest.param(
+                "Scheduled 01-01-2027 By 12.15Am midnight-ish.",
+                "2027-01-01T00:15",
+                id="midnight_edge_12_15am",
+            ),
+            pytest.param("No date here at all.", None, id="no_match"),
+        ],
+    )
+    def test_oa_date_pattern(self, text, expected):
+        result = extract_from_email("Subject", text)
+        assert result.oa_date == expected
+
+    def test_honeywell_regression_company_none_and_oa_date_parsed(self):
+        """docs/design/16 Cause 6 regression: this exact production subject
+        must yield company_name=None (not "Location") and the correct
+        oa_date, both via rule-based extraction alone."""
+        subject = (
+            "Honeywell Aerospace PPT (12Noon @Own Location) & Online Test "
+            "Is Scheduled On 18-08-2026 By 2.30Pm @PRP 717."
+        )
+        result = extract_from_email(subject)
+        assert result.company_name is None
+        assert result.oa_date == "2026-08-18T14:30"
+
+    def test_to_dict_carries_oa_date(self):
+        result = RuleExtractionResult(oa_date="2026-08-18T14:30")
+        assert result.to_dict()["oa_date"] == "2026-08-18T14:30"
+
+
+# ===================================================================
+# docs/design/16 Cause 4: WEBINAR drive kind
+# ===================================================================
+
+
+class TestWebinarDriveKind:
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            pytest.param(
+                "Deloitte US-India's BRIDGE Campus Learning Series | "
+                "Registrations now open",
+                id="deloitte_learning_series",
+            ),
+            pytest.param("Join our Webinar on Cloud Careers", id="webinar"),
+            pytest.param("Tech Talk: Building at Scale", id="tech_talk"),
+            pytest.param("Info Session for Interested Students", id="info_session"),
+            pytest.param("Masterclass on System Design", id="masterclass"),
+            pytest.param("Awareness Session on Data Privacy", id="awareness_session"),
+        ],
+    )
+    def test_webinar_wording_classifies_as_webinar(self, subject):
+        assert classify_drive_kind(subject) == "WEBINAR"
+
+    def test_deloitte_subject_through_full_extraction_is_webinar(self):
+        """Pin the classify_email interaction too: 'Registrations now open'
+        does not match the NEW_DRIVE classifier's 'registration open'
+        pattern, so classification falls through to IRRELEVANT and WEBINAR
+        still wins on drive_kind."""
+        subject = (
+            "Deloitte US-India's BRIDGE Campus Learning Series | "
+            "Registrations now open"
+        )
+        result = extract_from_email(subject)
+        assert result.drive_kind == "WEBINAR"
+
+    def test_placement_process_classification_still_wins_over_webinar_wording(self):
+        """The existing _PLACEMENT_PROCESS_CLASSIFICATIONS override must
+        keep winning: a mail classified OA_UPDATE is a real process mail
+        regardless of webinar-sounding subject wording (this guard already
+        saved a real Honeywell drive from being misfiled as a hackathon)."""
+        result = classify_drive_kind(
+            "Webinar Learning Series", email_classification="OA_UPDATE",
+        )
+        assert result == "PLACEMENT"
+
+    def test_campus_connect_hackathon_stays_hackathon(self):
+        """HACKATHON must keep matching before WEBINAR's 'campus connect'
+        pattern -- a real Honeywell drive is literally named this."""
+        assert classify_drive_kind("Honeywell Campus Connect Hackathon") == "HACKATHON"
+
+    def test_bootcamp_stays_workshop_not_webinar(self):
+        """bootcamp is already claimed by WORKSHOP; it must not be
+        duplicated into WEBINAR (would silently reclassify history)."""
+        assert classify_drive_kind("Summer Bootcamp Registrations") == "WORKSHOP"
