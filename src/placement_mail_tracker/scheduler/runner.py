@@ -827,6 +827,32 @@ class PlacementTrackerRunner:
                     email_classification=classification,
                     matched_opportunity_id=matched_opportunity_id,
                 )
+
+                # Cause 1 / Phase 1: a process mail (OA/SHORTLIST/INTERVIEW/
+                # OFFER update or confirmation) that matched two or more
+                # active same-company drives for the year attaches to none
+                # of them -- insert_or_update_opportunity already routed it
+                # to unmatched_confirmations and returns opp_id=None here.
+                if opp_id is None:
+                    logger.info(
+                        "Process mail for %s - %s was ambiguous across multiple "
+                        "active drives; routed to unmatched_confirmations",
+                        opp_data["company_name"],
+                        opp_data["role"],
+                    )
+                    database.log_processed_email(
+                        gmail_message_id=msg_id,
+                        subject=subject,
+                        sender=sender,
+                        received_at=timestamp,
+                        filter_score=decision.score,
+                        filter_decision=asdict(decision),
+                        processed_status="unmatched_review",
+                        email_classification=classification,
+                    )
+                    stats["review"] += 1
+                    return
+
                 action = "inserted" if created else "updated"
                 if created:
                     stats["created"] += 1

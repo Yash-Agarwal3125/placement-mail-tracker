@@ -161,9 +161,12 @@ def test_missing_drive_kind_defaults_to_placement(mock_settings):
     assert len(events) == 1
 
 
-def test_not_matched_roster_verdict_excludes_only_that_round(mock_settings):
-    """docs/design/16 Phase D: NOT_MATCHED for OA must not also hide
-    INTERVIEW -- round independence is the whole point."""
+def test_not_matched_roster_verdict_cascades_to_later_round(mock_settings):
+    """Cause 2 / Phase 3: selection is a ladder -- a NOT_MATCHED verdict at
+    OA now cascades forward and also suppresses INTERVIEW, since you cannot
+    reach round n+1 of a drive you were cut from at round n (this replaces
+    the old "round independence" behaviour, which was itself the Flipkart
+    opp 22 bug: OA excluded but INTERVIEW still derived)."""
     opp = _opp(oa_date="17-Jun-2026 05:30 PM", interview_date="20-Jun-2026", my_status="APPLIED")
     verdicts = {
         (1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"},
@@ -171,8 +174,32 @@ def test_not_matched_roster_verdict_excludes_only_that_round(mock_settings):
     events, _ = derive_events([opp], mock_settings, verdicts)
     types = {e.event_type for e in events}
     assert "OA" not in types
-    assert "INTERVIEW" in types
+    assert "INTERVIEW" not in types
     assert "DEADLINE" not in types  # no deadline set on this fixture
+
+
+def test_direct_matched_at_later_round_overrides_inherited_exclusion(mock_settings):
+    """The "shortlisted after all" correction path: a direct MATCHED at
+    INTERVIEW wins over an inherited NOT_MATCHED-at-OA exclusion."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", interview_date="20-Jun-2026", my_status="APPLIED")
+    verdicts = {
+        (1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"},
+        (1, "INTERVIEW"): {"verdict": "MATCHED", "method": "registration_no"},
+    }
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    types = {e.event_type for e in events}
+    assert "OA" not in types
+    assert "INTERVIEW" in types
+
+
+def test_not_matched_at_oa_does_not_exclude_oa_itself_twice_or_error(mock_settings):
+    """A NOT_MATCHED verdict on the earliest round only has itself to
+    exclude directly -- no earlier round exists, so the cascade loop is a
+    no-op and this must not raise."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    verdicts = {(1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"}}
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    assert not any(e.event_type == "OA" for e in events)
 
 
 def test_ambiguous_roster_verdict_does_not_exclude(mock_settings):

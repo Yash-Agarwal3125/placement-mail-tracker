@@ -252,9 +252,12 @@ class TestExpireStaleDrives:
     ):
         # Applied and shortlisted; deadline is old but that's expected once
         # shortlisted -- must not be expired just because the OA date hasn't
-        # been announced yet, within the grace period.
+        # been announced yet, within the grace period. Computed relative to
+        # "now" (not a hardcoded date) so this stays true regardless of when
+        # the suite runs.
+        stale_deadline = (datetime.now() - timedelta(days=10)).strftime("%d-%b-%Y")
         opp = sample_opportunity(
-            "Nielsen", "SDE", current_status="SHORTLISTED", deadline="20-Jul-2026"
+            "Nielsen", "SDE", current_status="SHORTLISTED", deadline=stale_deadline
         )
         db_manager.insert_or_update_opportunity(opp, source_email_id="shortlisted_1")
 

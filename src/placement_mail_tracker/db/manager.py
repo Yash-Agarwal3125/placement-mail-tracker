@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from placement_mail_tracker.db.connection import get_connection
-from placement_mail_tracker.extraction.rule_engine import normalize_company_name
+from placement_mail_tracker.extraction.rule_engine import (
+    _PLACEMENT_PROCESS_CLASSIFICATIONS,
+    normalize_company_name,
+)
 from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
 
 if TYPE_CHECKING:
@@ -59,6 +62,19 @@ VALID_STATUSES = (
 
 # Cap on stored status-history entries per drive (prevents unbounded growth).
 MAX_STATUS_HISTORY = 20
+
+# current_status values that mean "this drive is still live" -- shared by
+# fetch_active_drives_only and the Phase 1 process-mail resolver below so the
+# two never quietly disagree on what "active" means.
+ACTIVE_CURRENT_STATUSES = (
+    "OPEN",
+    "REGISTERED",
+    "SHORTLISTED",
+    "OA",
+    "INTERVIEW",
+    "HR",
+    "SELECTED",
+)
 
 
 def _get_year_from_opportunity(opportunity: dict[str, Any]) -> str:
@@ -343,7 +359,7 @@ class DatabaseManager:
         source_thread_id: str | None = None,
         email_classification: str | None = None,
         matched_opportunity_id: int | None = None,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         """Insert a new drive or update an existing one.
 
         Follow-up detection (Phase 2):
@@ -359,7 +375,23 @@ class DatabaseManager:
         hashed field) even when the fuzzy matcher correctly identified the
         same underlying drive.
 
-        Returns ``(opportunity_id, created_new_record)``.
+        Cause 1 (calendar-drift remediation, Phase 1): a mail classified as
+        one of ``_PLACEMENT_PROCESS_CLASSIFICATIONS`` (OA_UPDATE,
+        SHORTLIST_UPDATE, INTERVIEW_UPDATE, OFFER_UPDATE,
+        APPLICATION_CONFIRMATION) is by definition about a drive that
+        already exists -- ``role`` is re-extracted per mail and is too
+        unstable to hash on (see ``generate_unique_hash``), so a process
+        mail that doesn't already match by thread/hash/fuzzy match falls
+        through to :meth:`_resolve_process_mail_target` before any insert
+        is considered. When that resolves to more than one live candidate,
+        this method attaches to **none of them** -- it logs a warning with
+        every candidate id and (when ``source_email_id`` is available)
+        writes an ``unmatched_confirmations`` row, returning
+        ``(None, False)``. Silent mis-attachment is worse than a missing
+        event.
+
+        Returns ``(opportunity_id, created_new_record)``, or ``(None,
+        False)`` when a process mail was ambiguous and routed to review.
         """
         normalized = self._normalize_opportunity(opportunity)
         existing = None
@@ -375,6 +407,47 @@ class DatabaseManager:
         # 2. Fallback to hash matching
         if not existing:
             existing = self.find_duplicate_opportunity(normalized)
+
+        # 3/4. Process mails attach to an existing drive, never create one
+        # (Cause 1). Only reached once thread/hash/fuzzy match all missed.
+        ambiguous_candidates: list[sqlite3.Row] = []
+        if not existing and email_classification in _PLACEMENT_PROCESS_CLASSIFICATIONS:
+            resolved, ambiguous_candidates = self._resolve_process_mail_target(normalized)
+            if resolved is not None:
+                existing = resolved
+                logger.info(
+                    "Process mail (%s) for %r attached to existing drive id=%s (%r / %r)",
+                    email_classification,
+                    normalized.get("company_name"),
+                    resolved["id"],
+                    resolved["company_name"],
+                    resolved["role"],
+                )
+
+        if existing is None and ambiguous_candidates:
+            candidate_ids = [c["id"] for c in ambiguous_candidates]
+            logger.warning(
+                "Process mail (%s) for %r / %r matched %d active candidates "
+                "%s for the year -- not attaching to any, routing to "
+                "unmatched_confirmations",
+                email_classification,
+                normalized.get("company_name"),
+                normalized.get("role"),
+                len(ambiguous_candidates),
+                candidate_ids,
+            )
+            if source_email_id:
+                self.insert_unmatched_confirmation(
+                    gmail_message_id=source_email_id,
+                    extracted_text=(
+                        f"{normalized.get('company_name')} / {normalized.get('role')}: "
+                        f"process mail ({email_classification}) matched "
+                        f"{len(candidate_ids)} active candidates {candidate_ids} for "
+                        "the year -- ambiguous, not attached to any."
+                    ),
+                    candidates=[dict(c) for c in ambiguous_candidates],
+                )
+            return None, False
 
         # Merge status history
         new_status = (normalized.get("current_status") or "OPEN").upper()
@@ -484,6 +557,83 @@ class DatabaseManager:
             )
 
     # ------------------------------------------------------------------
+    # Process-mail attach resolution (Cause 1 / Phase 1)
+    # ------------------------------------------------------------------
+
+    def _resolve_process_mail_target(
+        self, normalized: dict[str, Any]
+    ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
+        """Resolve a process-classification mail to an existing drive.
+
+        Only called once thread_id/hash/fuzzy match have all missed. Tie-
+        break order: exactly one active same-normalised-company candidate
+        for the year -> compatible program name. Returns
+        ``(resolved_row_or_None, candidates_considered)`` -- the second
+        element is populated only when resolution failed with two or more
+        surviving candidates, so the caller can log/route them for review.
+        Never guesses when more than one candidate remains after both
+        steps (a Flipkart mail has already been mis-filed under ProcDNA in
+        production this way).
+        """
+        company = normalized.get("company_name")
+        norm_company = normalize_company_name(company) if company else ""
+        if not norm_company:
+            return None, []
+
+        year = _get_year_from_opportunity(normalized)
+        placeholders = ", ".join("?" for _ in ACTIVE_CURRENT_STATUSES)
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM opportunities
+            WHERE status = 'active' AND current_status IN ({placeholders});
+            """,
+            ACTIVE_CURRENT_STATUSES,
+        ).fetchall()
+
+        candidates = [
+            row
+            for row in rows
+            if normalize_company_name(row["company_name"]) == norm_company
+            and _get_year_from_opportunity(dict(row)) == year
+        ]
+
+        if not candidates:
+            return None, []
+        if len(candidates) == 1:
+            return candidates[0], []
+
+        narrowed = self._filter_by_compatible_program(candidates, normalized.get("role"))
+        if len(narrowed) == 1:
+            return narrowed[0], []
+
+        return None, narrowed
+
+    @staticmethod
+    def _filter_by_compatible_program(
+        candidates: list[sqlite3.Row], incoming_role: str | None
+    ) -> list[sqlite3.Row]:
+        """Program-name tie-breaker: the simplest rule that discriminates.
+
+        Substring containment on the normalised role text, either
+        direction ("Super Dream Internship" vs "Super Dream PPO" does NOT
+        contain either way and stays ambiguous; "Online Test is scheduled"
+        style role text that happens to *repeat* an existing program name
+        does). Deliberately not a fuzzy/token-overlap scorer: an
+        under-matching rule fails safe (falls through to the review
+        queue); an over-matching one risks exactly the silent mis-attach
+        this phase exists to prevent.
+        """
+        incoming_norm = _normalize_key(incoming_role)
+        if not incoming_norm:
+            return candidates
+        compatible = []
+        for row in candidates:
+            row_norm = _normalize_key(row["role"])
+            if row_norm and (row_norm in incoming_norm or incoming_norm in row_norm):
+                compatible.append(row)
+        return compatible or candidates
+
+    # ------------------------------------------------------------------
     # Action Required Engine
     # ------------------------------------------------------------------
 
@@ -591,25 +741,36 @@ class DatabaseManager:
         drive already at or above the target rank is a no-op. This is what
         makes a duplicate or late confirmation mail idempotent for free (D6).
 
+        Targets a single row (the most recently updated one sharing
+        ``drive_id``), never every row matching ``drive_id``. ``drive_id``
+        has no UNIQUE constraint, and Phase 1 (Cause 1) removed the
+        ``_insert_opportunity`` suffix logic that used to force it unique --
+        two genuinely distinct new drives can now share a generated
+        ``drive_id`` (same company/first-3-role-words/year). An unscoped
+        ``WHERE drive_id = ?`` would silently write ``my_status`` onto both.
+
         Returns True if a row was actually changed, False on any no-op.
         """
         if not drive_id or not my_status:
             return False
 
+        target = self.connection.execute(
+            "SELECT id, my_status FROM opportunities WHERE drive_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1;",
+            (drive_id,),
+        ).fetchone()
+        if target is None:
+            return False
+
         if source == "automation":
-            row = self.connection.execute(
-                "SELECT my_status FROM opportunities WHERE drive_id = ?;", (drive_id,)
-            ).fetchone()
-            if row is None:
-                return False
-            current_rank = self.MY_STATUS_LADDER.get(row["my_status"] or "NOT_APPLIED", 0)
+            current_rank = self.MY_STATUS_LADDER.get(target["my_status"] or "NOT_APPLIED", 0)
             target_rank = self.MY_STATUS_LADDER.get(my_status, 0)
             if target_rank <= current_rank:
                 return False
 
         cursor = self.connection.execute(
-            "UPDATE opportunities SET my_status = ? WHERE drive_id = ? AND my_status != ?;",
-            (my_status, drive_id, my_status),
+            "UPDATE opportunities SET my_status = ? WHERE id = ? AND my_status != ?;",
+            (my_status, target["id"], my_status),
         )
         if cursor.rowcount:
             self.connection.commit()
@@ -792,9 +953,16 @@ class DatabaseManager:
     ) -> None:
         """Record a per-round roster verdict (docs/design/16 Phase C).
 
-        Keyed by (opportunity_id, event_type) -- round-independent, matching
-        ``calendar_events``'s own granularity, so being MATCHED for OA carries
-        no implication for INTERVIEW. A later mail's verdict replaces the
+        Keyed by (opportunity_id, event_type), matching ``calendar_events``'s
+        own granularity, so being MATCHED for OA carries no implication for
+        INTERVIEW -- a direct MATCHED verdict is only ever evidence for its
+        own round. Cause 2 / Phase 3 (calendar-drift remediation plan) made
+        the *storage* here still strictly per-round, but NOT_MATCHED is no
+        longer read back as round-independent: ``calendar_sync.derive.
+        is_round_excluded`` cascades a stored NOT_MATCHED forward to every
+        later round of the same drive (OA -> INTERVIEW -> OFFER) unless that
+        later round has its own direct MATCHED verdict. A later mail's
+        verdict replaces the
         stored one -- *unless* the new verdict is AMBIGUOUS, which never
         overwrites an existing MATCHED/NOT_MATCHED. A stronger verdict (from
         a roster that actually parsed, or a direct user assertion) must not
@@ -866,16 +1034,7 @@ class DatabaseManager:
 
     def fetch_active_drives_only(self) -> list[dict[str, Any]]:
         """Return only drives with active statuses."""
-        active_statuses = (
-            "OPEN",
-            "REGISTERED",
-            "SHORTLISTED",
-            "OA",
-            "INTERVIEW",
-            "HR",
-            "SELECTED",
-        )
-        placeholders = ", ".join("?" for _ in active_statuses)
+        placeholders = ", ".join("?" for _ in ACTIVE_CURRENT_STATUSES)
         rows = self.connection.execute(
             f"""
             SELECT *
@@ -884,7 +1043,7 @@ class DatabaseManager:
               AND current_status IN ({placeholders})
             ORDER BY updated_at DESC;
             """,
-            active_statuses,
+            ACTIVE_CURRENT_STATUSES,
         ).fetchall()
         return [self._row_to_opportunity(row) for row in rows]
 
@@ -1222,14 +1381,6 @@ class DatabaseManager:
             category=opportunity.get("internship_or_fulltime"),
             year=_get_year_from_opportunity(opportunity)
         )
-
-        # Ensure uniqueness by appending sequence
-        existing_count = self.connection.execute(
-            "SELECT COUNT(*) FROM opportunities WHERE drive_id LIKE ?",
-            (f"{drive_id}%",),
-        ).fetchone()[0]
-        if existing_count > 0:
-            drive_id = f"{drive_id}_{existing_count + 1:02d}"
 
         target_hash = generate_unique_hash(opportunity)
         existing_id = self.connection.execute(
