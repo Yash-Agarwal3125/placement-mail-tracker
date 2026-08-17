@@ -237,6 +237,132 @@ class TestConfirmationRunnerIntegration:
         assert row["email_classification"] == "APPLICATION_CONFIRMATION"
 
 
+class TestPhase6SubjectResolvedConfirmations:
+    """Phase 6 (calendar-drift remediation plan, Cause 7): when the body-
+    fuzzy/reference-id match finds nothing, extract the company from the
+    real, formulaic VIT CDC confirmation subject and resolve it through the
+    same order Phase 1 built (exact hash -> thread_id -> single active
+    same-company candidate for the year -> compatible program name), MAY
+    create a new drive when none matches at all (unlike a stage-update
+    mail), and sets my_status = APPLIED."""
+
+    def test_creates_a_new_drive_when_none_matches(self, db_manager, mock_settings):
+        settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+        extractor.extract_from_email.side_effect = AssertionError("Gemini must not be called")
+
+        before = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+        msg = _confirmation_msg(
+            "conf_p6_1",
+            "Congratulations! You're Eligible for Honeywell Aerospace Placement Drive",
+            "",
+        )
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+        after = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+
+        assert after == before + 1
+        row = db_manager.connection.execute(
+            "SELECT * FROM opportunities WHERE company_name = 'Honeywell Aerospace';"
+        ).fetchone()
+        assert row is not None
+        assert row["my_status"] == "APPLIED"
+        assert row["email_classification"] == "APPLICATION_CONFIRMATION"
+
+    def test_observe_mode_creates_drive_but_never_writes_status(self, db_manager, mock_settings):
+        settings = mock_settings.model_copy(update={"confirmation_mode": "observe"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+
+        msg = _confirmation_msg(
+            "conf_p6_2", "Confirmed: Your Registration for Accenture Placement Drive", "",
+        )
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+
+        row = db_manager.connection.execute(
+            "SELECT * FROM opportunities WHERE company_name = 'Accenture';"
+        ).fetchone()
+        assert row is not None
+        assert row["my_status"] == "NOT_APPLIED"
+        lines = pop_pending_confirmation_lines()
+        assert any("would have marked Accenture APPLIED" in line for line in lines)
+
+    def test_attaches_to_existing_single_active_candidate_not_creates(
+        self, db_manager, mock_settings, sample_opportunity
+    ):
+        opp_id, _ = db_manager.insert_or_update_opportunity(
+            sample_opportunity("Honeywell", "Aerospace Placement Drive"),
+            source_email_id="seed_honeywell_aero",
+        )
+        settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+
+        before = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+        msg = _confirmation_msg(
+            "conf_p6_3", "Important: Date Change for Honeywell Placement Drive", "",
+        )
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+        after = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+
+        assert after == before
+        row = db_manager.fetch_opportunity_by_id(opp_id)
+        assert row["my_status"] == "APPLIED"
+
+    def test_two_active_candidates_routes_to_unmatched_confirmations(
+        self, db_manager, mock_settings, sample_opportunity
+    ):
+        id_a, _ = db_manager.insert_or_update_opportunity(
+            sample_opportunity("Honeywell", "Super Dream Internship"),
+            source_email_id="seed_honeywell_a",
+        )
+        id_b, _ = db_manager.insert_or_update_opportunity(
+            sample_opportunity("Honeywell", "Aerospace Placement Drive"),
+            source_email_id="seed_honeywell_b",
+        )
+        assert id_a != id_b
+        settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+
+        before = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+        msg = _confirmation_msg(
+            "conf_p6_4", "Confirmed: Your Registration for Honeywell", "",
+        )
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+        after = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+
+        assert after == before  # attached to neither, created nothing
+        assert db_manager.fetch_opportunity_by_id(id_a)["my_status"] == "NOT_APPLIED"
+        assert db_manager.fetch_opportunity_by_id(id_b)["my_status"] == "NOT_APPLIED"
+        unmatched = db_manager.fetch_unmatched_confirmations()
+        assert len(unmatched) == 1
+
+    def test_unrecognized_subject_still_routes_to_unmatched_confirmations(
+        self, db_manager, mock_settings
+    ):
+        """A mail with no fuzzy body match AND no recognized subject phrase
+        must fall back to the pre-Phase-6 behaviour, not create a drive."""
+        settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+
+        before = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+        msg = _confirmation_msg("conf_p6_5", "Application Confirmation", "")
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+        after = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+
+        assert after == before
+        unmatched = db_manager.fetch_unmatched_confirmations()
+        assert len(unmatched) == 1
+        assert unmatched[0]["gmail_message_id"] == "conf_p6_5"
+
+
 class TestConfirmationSenderFilterAllowRule:
     """D2: an explicit allow rule, not reliance on the relaxed/trusted paths."""
 

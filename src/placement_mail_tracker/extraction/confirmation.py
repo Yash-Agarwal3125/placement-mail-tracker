@@ -32,6 +32,7 @@ __all__ = [
     "find_confident_drive_match",
     "FUZZY_MATCH_THRESHOLD",
     "FUZZY_UNIQUENESS_MARGIN",
+    "extract_company_from_confirmation_subject",
 ]
 
 
@@ -225,3 +226,57 @@ def find_confident_drive_match(
         opportunity=best_opp, method="fuzzy_company", score=scored[0]["score"]
     )
     return match, scored
+
+
+# Phase 6 (calendar-drift remediation plan, Cause 7): the VIT CDC portal's own
+# confirmation subjects are formulaic and name the company right in the
+# subject line -- but none of them contain the CONFIRMED_PATTERN_FAMILIES
+# verbs ("successfully applied", "application received", ...), so
+# find_confident_drive_match's body-fuzzy-match was the only path that could
+# ever attach them, and it only works when a candidate drive already exists
+# and is phrased close enough in the mail body. These four patterns are the
+# real live-Gmail phrasings (docs/design/16 Cause 7):
+#   "Congratulations! You're Eligible for X Placement Drive"
+#   "Confirmed: Your Registration for X Placement Drive" / "... for X"
+#   "Important: Date Change for X Placement Drive"
+#   "Updated Optional Form Available - X Drive"
+# Each pattern anchors on the fixed phrase and non-greedily captures
+# everything up to an optional trailing "Placement Drive"/"Drive" and the
+# end of the subject line.
+_SUBJECT_COMPANY_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"eligible\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE),
+    re.compile(
+        r"registration\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE
+    ),
+    re.compile(
+        r"date\s+change\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE
+    ),
+    re.compile(
+        r"(?:optional\s+form|form)\s+available\s*[-–:]\s*(?P<company>.+?)(?:\s+drive)?\s*$",
+        re.IGNORECASE,
+    ),
+]
+
+
+def extract_company_from_confirmation_subject(subject: str) -> str | None:
+    """Best-effort company extraction from a formulaic VIT CDC subject line.
+
+    Returns ``None`` when no pattern matches, or when the matched candidate
+    normalizes to a rejected junk token (``normalize_company_name``) -- the
+    caller must treat both cases identically: route to
+    ``unmatched_confirmations`` rather than guessing or minting a drive named
+    after a rejected token.
+    """
+    if not subject:
+        return None
+    for pattern in _SUBJECT_COMPANY_PATTERNS:
+        match = pattern.search(subject)
+        if not match:
+            continue
+        candidate = match.group("company").strip(" :-|")
+        if not candidate:
+            continue
+        normalized = normalize_company_name(candidate)
+        if normalized:
+            return normalized
+    return None

@@ -62,6 +62,7 @@ class FakeCalendarClient:
 
 def test_new_drive_inserts_once(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-9")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -93,6 +94,7 @@ def test_new_drive_inserts_once(db_manager, mock_settings, sample_opportunity):
 
 def test_all_day_event_body_has_exclusive_end_date(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17 August 2026")  # date-only -> all-day
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-alldayfix")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -111,6 +113,7 @@ def test_all_day_event_body_has_exclusive_end_date(db_manager, mock_settings, sa
 
 def test_second_sync_nothing_changed_is_a_noop(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-10")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -175,6 +178,7 @@ def test_null_date_flags_anomaly_without_touching_event(
     db_manager, mock_settings, sample_opportunity
 ):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-12")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -323,6 +327,7 @@ def test_reclassified_non_placement_drive_deletes_event(
     """docs/design/16, by explicit user choice: a confidently-excluded
     round's Google event is actually deleted, not just retitled."""
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-hackathon")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -352,6 +357,7 @@ def test_reclassified_non_placement_drive_deletes_event(
 
 def test_not_eligible_drive_deletes_event(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-noteligible")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -381,6 +387,7 @@ def test_reclassified_drive_reverts_to_placement_reinserts_fresh_event(
     retitle-freeze) leaves nothing to PATCH, so this must go through
     ``_handle_insert``, not ``_handle_patch``."""
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-falsepos")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -418,6 +425,7 @@ def test_reclassified_drive_reverts_to_placement_reinserts_fresh_event(
 
 def test_past_event_marked_done_and_frozen(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="15 June 2020")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-13")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -430,6 +438,7 @@ def test_past_event_marked_done_and_frozen(db_manager, mock_settings, sample_opp
 
     # A title-changing update arrives, but the row is frozen -- no patch.
     changed = sample_opportunity(company_name="Microsoft Renamed", deadline="15 June 2020")
+    changed["priority"] = "HIGH"
     db_manager.insert_or_update_opportunity(changed, source_thread_id="thread-13")
 
     client.patch_calls.clear()
@@ -450,10 +459,12 @@ def test_terminal_drive_grace_period_then_retitle_cancelled(
     db_manager, mock_settings, sample_opportunity
 ):
     opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-14")
     # A decoy keeps fetch_active_drives_only() non-empty once `opp` turns
     # terminal, so the partial-fetch guard doesn't also suppress this pass.
     decoy = sample_opportunity(company_name="Decoy Co", deadline="17 June 2030")
+    decoy["priority"] = "HIGH"
     db_manager.insert_or_update_opportunity(decoy, source_thread_id="thread-14-decoy")
 
     client = FakeCalendarClient()
@@ -505,6 +516,7 @@ def test_reactivated_stale_drive_restores_google_title(
     pre-'[?]' title and a naive hash-equality check would wrongly call this
     "unchanged" and leave the stale-looking title on Google forever."""
     opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-14b")
     decoy = sample_opportunity(company_name="Decoy Co", deadline="17 June 2030")
     db_manager.insert_or_update_opportunity(decoy, source_thread_id="thread-14b-decoy")
@@ -558,6 +570,7 @@ def test_reactivated_stale_drive_restores_google_title(
 
 def test_partial_fetch_guard_skips_stale_pass(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-15")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -593,6 +606,7 @@ def test_partial_fetch_guard_skips_stale_pass(db_manager, mock_settings, sample_
 
 def test_dry_run_counts_but_writes_and_calls_nothing(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2026 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-16")
     client = FakeCalendarClient()
     engine = CalendarSyncEngine(db_manager, client, mock_settings)
@@ -617,8 +631,10 @@ def test_rebuild_reinserts_missing_and_patches_drifted(
     db_manager, mock_settings, sample_opportunity
 ):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
     db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-17a")
     other = sample_opportunity(company_name="Other Co", deadline="20-Aug-2027 05:30 PM")
+    other["priority"] = "HIGH"
     db_manager.insert_or_update_opportunity(other, source_thread_id="thread-17b")
 
     client = FakeCalendarClient()

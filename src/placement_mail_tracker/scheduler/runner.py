@@ -24,6 +24,7 @@ from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.confirmation import (
     detect_confirmation_tier,
+    extract_company_from_confirmation_subject,
     extract_reference_id,
     find_confident_drive_match,
 )
@@ -534,7 +535,7 @@ class PlacementTrackerRunner:
 
         if classification == "APPLICATION_CONFIRMATION":
             self._handle_confirmation_mail(
-                msg_id, subject, sender, body, timestamp, database, stats
+                msg_id, subject, sender, body, timestamp, thread_id, database, stats
             )
             return
 
@@ -953,16 +954,48 @@ class PlacementTrackerRunner:
         sender: str,
         body: str,
         timestamp: str | None,
+        thread_id: str | None,
         database: DatabaseManager,
         stats: dict[str, int],
     ) -> None:
-        """Feature 1 (docs/design/10-confirmation-and-reminders.md): CDC
-        application-confirmation mails bypass the normal extraction/insert
-        pipeline entirely (D3 — this feature writes my_status ONLY; it must
-        never create a drive, touch current_status, or run through Gemini).
+        """Feature 1 (docs/design/10-confirmation-and-reminders.md) + Phase 6
+        (calendar-drift remediation plan, Cause 7): CDC application-
+        confirmation mails bypass the normal extraction pipeline entirely
+        (D3 — never runs through Gemini).
+
+        Two ways a confirmation mail resolves to a drive:
+
+        1. The original body-fuzzy/reference-id match against already-known
+           active drives (``find_confident_drive_match``) — unchanged, and
+           still never creates a drive (D3's original guarantee for this
+           path: it can only confirm a drive that already independently
+           exists in the system for another reason).
+        2. Phase 6: when that path finds no match, the VIT CDC portal's
+           confirmation subjects are formulaic enough to name the company
+           directly ("You're Eligible for X", "Confirmed: Your Registration
+           for X", "Date Change for X Drive", "Optional Form Available - X
+           Drive") — extract it and resolve through the SAME order Phase 1
+           built for process mails (``insert_or_update_opportunity``: exact
+           hash -> thread_id -> single active same-company candidate for the
+           year -> compatible program name; 2+ candidates -> routed to
+           ``unmatched_confirmations`` by that method itself). Unlike a
+           stage-update mail, a confirmation is direct proof the drive is
+           real and that you registered for it, so — unlike Phase 1's
+           process mails — this path MAY create a new drive when none
+           matches at all.
         """
         tier, pattern_family = detect_confirmation_tier(subject, body)
         reference_id = extract_reference_id(subject, body)
+        # Phase 6 (Cause 7): computed unconditionally, not only on a fuzzy-
+        # match miss — the VIT CDC's real subject phrasings ("Date Change
+        # for X Placement Drive", ...) name the company right in the
+        # subject, which routinely ALSO makes find_confident_drive_match's
+        # body-fuzzy check succeed against an existing same-company drive.
+        # Without this, that fuzzy hit would fall through to the tier=UNKNOWN
+        # escape valve below (none of these subjects match the original
+        # CONFIRMED_PATTERN_FAMILIES) and never write anything.
+        extracted_company = extract_company_from_confirmation_subject(subject)
+        recognized = tier == "CONFIRMED" or extracted_company is not None
         active_opportunities = database.get_active_opportunities()
         match, candidates = find_confident_drive_match(
             subject, body, active_opportunities, reference_id=reference_id
@@ -982,20 +1015,12 @@ class PlacementTrackerRunner:
         digest_lines: list[str] = []
         opportunity_id = None
 
-        if match is None:
-            database.insert_unmatched_confirmation(
-                gmail_message_id=msg_id, extracted_text=subject, candidates=candidates,
-            )
-            digest_lines.append(
-                f"confirmation received for '{subject}' — no confident drive match, "
-                "review needed."
-            )
-        else:
+        if match is not None:
             opportunity_id = match.opportunity.get("id")
             company = match.opportunity.get("company_name")
             drive_id = match.opportunity.get("drive_id")
 
-            if tier == "UNKNOWN":
+            if not recognized:
                 # Escape valve (feature_1_spec): sender-confirmed, but no
                 # named pattern family matched — never writes status, even
                 # in enforce mode.
@@ -1013,6 +1038,64 @@ class PlacementTrackerRunner:
                     )
             else:
                 digest_lines.append(f"would have marked {company} APPLIED (observe mode).")
+        else:
+            # Phase 6 (Cause 7): the fuzzy/reference match found nothing --
+            # try resolving (or creating) a drive from the subject's company
+            # name (already extracted above) before giving up on this mail.
+            if not extracted_company:
+                database.insert_unmatched_confirmation(
+                    gmail_message_id=msg_id, extracted_text=subject, candidates=candidates,
+                )
+                digest_lines.append(
+                    f"confirmation received for '{subject}' — no confident drive match, "
+                    "review needed."
+                )
+            else:
+                opp_data = {
+                    "company_name": extracted_company,
+                    "role": "Unknown Role",
+                    "current_status": "REGISTERED",
+                }
+                opp_id, created = database.insert_or_update_opportunity(
+                    opp_data,
+                    source_email_id=msg_id,
+                    source_thread_id=thread_id,
+                    email_classification="APPLICATION_CONFIRMATION",
+                )
+                if opp_id is None:
+                    # Two or more active candidates for that company/year --
+                    # insert_or_update_opportunity already routed this to
+                    # unmatched_confirmations itself; never guess.
+                    digest_lines.append(
+                        f"confirmation received for '{extracted_company}' — ambiguous "
+                        "drive match, review needed."
+                    )
+                else:
+                    opportunity_id = opp_id
+                    resolved = database.fetch_opportunity_by_id(opp_id)
+                    company = resolved["company_name"]
+                    drive_id = resolved["drive_id"]
+                    origin = "new drive" if created else "existing drive"
+
+                    if self.settings.confirmation_mode == "enforce":
+                        changed = database.set_my_status(
+                            drive_id, "APPLIED", source="automation"
+                        )
+                        if changed:
+                            digest_lines.append(
+                                f"marked {company} APPLIED (confirmation mail, "
+                                f"subject-resolved {origin})."
+                            )
+                        else:
+                            digest_lines.append(
+                                f"{company} confirmation received — already APPLIED "
+                                "or beyond, no-op."
+                            )
+                    else:
+                        digest_lines.append(
+                            f"would have marked {company} APPLIED (observe mode, "
+                            f"subject-resolved {origin})."
+                        )
 
         append_confirmation_lines(digest_lines)
 
