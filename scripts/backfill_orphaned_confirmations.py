@@ -64,7 +64,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from placement_mail_tracker.db.manager import (  # noqa: E402
-    ACTIVE_CURRENT_STATUSES,
+    RESOLVER_CANDIDATE_STATUSES,
     DatabaseManager,
 )
 from placement_mail_tracker.extraction.confirmation import (  # noqa: E402
@@ -99,13 +99,13 @@ def _active_candidates(
 ) -> list[dict[str, Any]]:
     """Read-only mirror of ``db.manager._resolve_process_mail_target``'s
     candidate lookup, used only to build the dry-run plan (never mutates)."""
-    placeholders = ", ".join("?" for _ in ACTIVE_CURRENT_STATUSES)
+    placeholders = ", ".join("?" for _ in RESOLVER_CANDIDATE_STATUSES)
     rows = database.connection.execute(
         f"""
         SELECT * FROM opportunities
         WHERE status = 'active' AND current_status IN ({placeholders});
         """,
-        ACTIVE_CURRENT_STATUSES,
+        RESOLVER_CANDIDATE_STATUSES,
     ).fetchall()
     return [
         dict(row)

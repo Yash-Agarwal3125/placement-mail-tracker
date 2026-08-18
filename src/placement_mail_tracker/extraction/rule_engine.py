@@ -392,7 +392,7 @@ _DRIVE_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 # drive's OA/interview/offer events from the calendar.
 _PLACEMENT_PROCESS_CLASSIFICATIONS = frozenset({
     "OA_UPDATE", "SHORTLIST_UPDATE", "INTERVIEW_UPDATE", "OFFER_UPDATE",
-    "APPLICATION_CONFIRMATION",
+    "APPLICATION_CONFIRMATION", "DRIVE_UPDATE",
 })
 
 

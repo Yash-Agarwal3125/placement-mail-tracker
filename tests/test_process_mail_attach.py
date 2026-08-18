@@ -282,3 +282,56 @@ class TestDriveIdSuffixRemoved:
             "set_my_status must scope its write to a single row even when "
             f"drive_id collides; got {statuses}"
         )
+
+
+class TestExpiredDriveStillResolvable:
+    """docs/design/16 Cause 1 follow-up, found while dry-running the Phase 6
+    confirmations backfill against live data: current_status=EXPIRED means
+    the registration *window* closed, not that the drive's process ended.
+    97 of 215 live opportunities sat at EXPIRED, and every one was invisible
+    to the old ACTIVE_CURRENT_STATUSES-scoped resolver -- Accenture alone
+    would have minted 11 phantom duplicate rows from 11 confirmation mails
+    for a drive (id=243) that already existed. The resolver must use
+    RESOLVER_CANDIDATE_STATUSES (ACTIVE_CURRENT_STATUSES + EXPIRED), while
+    fetch_active_drives_only (dashboard display) keeps excluding EXPIRED."""
+
+    def test_confirmation_mail_attaches_to_expired_drive_not_creates(self, db_manager):
+        seeded_id = _seed(
+            db_manager, company_name="Accenture", current_status="OPEN"
+        )
+        db_manager.connection.execute(
+            "UPDATE opportunities SET current_status = 'EXPIRED' WHERE id = ?;",
+            (seeded_id,),
+        )
+        db_manager.connection.commit()
+        before = db_manager.connection.execute(
+            "SELECT COUNT(*) FROM opportunities"
+        ).fetchone()[0]
+
+        incoming = {"company_name": "Accenture", "role": ""}
+        opp_id, created = db_manager.insert_or_update_opportunity(
+            incoming,
+            source_email_id="accenture_confirmation",
+            email_classification="APPLICATION_CONFIRMATION",
+        )
+
+        after = db_manager.connection.execute(
+            "SELECT COUNT(*) FROM opportunities"
+        ).fetchone()[0]
+
+        assert opp_id == seeded_id
+        assert created is False
+        assert after == before
+
+    def test_selected_and_open_candidates_still_both_win_over_nothing(self, db_manager):
+        """Sanity: the widened pool doesn't change behaviour for drives that
+        were already resolvable -- only EXPIRED is newly included."""
+        seeded_id = _seed(db_manager, company_name="Foodhub", current_status="OA")
+        incoming = {"company_name": "Foodhub", "role": ""}
+        opp_id, created = db_manager.insert_or_update_opportunity(
+            incoming,
+            source_email_id="foodhub_confirmation",
+            email_classification="APPLICATION_CONFIRMATION",
+        )
+        assert opp_id == seeded_id
+        assert created is False

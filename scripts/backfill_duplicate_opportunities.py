@@ -346,15 +346,27 @@ def main() -> int:
         plans, review_pairs = plan_merges(database)
         _print_plan(plans, review_pairs)
         print(f"\nDRY RUN: {len(plans)} cluster(s) would be merged. Re-run with --apply to write.")
+        print(
+            "\nWARNING: superseded by scripts/backfill_drive_identity_merge.py "
+            "(docs/design/16 Phase 2). This script's loser-row DELETE predates "
+            "the roster_verdicts table -- that table also has ON DELETE CASCADE "
+            "on opportunity_id, so --apply here would silently destroy any "
+            "shortlist/exclusion evidence on a merged-away row with no "
+            "re-pointing, no warning. Do not run --apply.",
+            file=sys.stderr,
+        )
         return 0
 
-    stats = apply_merges(database)
     print(
-        f"Applied: {stats['clusters_merged']} cluster(s) merged, "
-        f"{stats['rows_absorbed']} duplicate row(s) absorbed and deleted. "
-        f"{stats['review_pairs']} pair(s) left for manual review (not merged)."
+        "REFUSING: this script's --apply predates the roster_verdicts table "
+        "and would silently delete roster verdicts (exclusion/shortlist "
+        "evidence) on merged-away rows via FK cascade, with no re-pointing. "
+        "Use scripts/backfill_drive_identity_merge.py instead -- it re-points "
+        "every foreign key (roster_verdicts, calendar_events, updates, "
+        "processed_emails) before deleting a loser row.",
+        file=sys.stderr,
     )
-    return 0
+    return 1
 
 
 if __name__ == "__main__":

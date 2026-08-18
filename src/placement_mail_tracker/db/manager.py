@@ -63,9 +63,9 @@ VALID_STATUSES = (
 # Cap on stored status-history entries per drive (prevents unbounded growth).
 MAX_STATUS_HISTORY = 20
 
-# current_status values that mean "this drive is still live" -- shared by
-# fetch_active_drives_only and the Phase 1 process-mail resolver below so the
-# two never quietly disagree on what "active" means.
+# current_status values that mean "this drive is still live" -- used by
+# fetch_active_drives_only (dashboard/sheet display: "should this show as an
+# open opportunity").
 ACTIVE_CURRENT_STATUSES = (
     "OPEN",
     "REGISTERED",
@@ -75,6 +75,23 @@ ACTIVE_CURRENT_STATUSES = (
     "HR",
     "SELECTED",
 )
+
+# current_status values a process/confirmation mail may legitimately attach
+# to (docs/design/16 Cause 1 follow-up). Deliberately wider than
+# ACTIVE_CURRENT_STATUSES by one value: EXPIRED means the *registration
+# window* closed, not that the drive's selection process ended -- a
+# confirmation or stage-update mail routinely arrives weeks after
+# registration closes, while OA/interview rounds are still running. Found
+# empirically: 97 of 215 live opportunities sit at EXPIRED, and every one of
+# them was invisible to the resolver, so process mail that didn't happen to
+# match by thread_id/hash silently minted a duplicate row instead of
+# attaching (Accenture: 11 confirmation mails, 11 phantom duplicate drives,
+# despite opportunity id=243 already existing). Kept as a separate constant
+# rather than widening ACTIVE_CURRENT_STATUSES itself, since that constant's
+# other consumer (fetch_active_drives_only) means something different --
+# "is this still worth showing as an open opportunity" -- where EXPIRED
+# correctly stays excluded.
+RESOLVER_CANDIDATE_STATUSES = ACTIVE_CURRENT_STATUSES + ("EXPIRED",)
 
 
 def _get_year_from_opportunity(opportunity: dict[str, Any]) -> str:
@@ -565,7 +582,11 @@ class DatabaseManager:
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
         """Resolve a process-classification mail to an existing drive.
 
-        Only called once thread_id/hash/fuzzy match have all missed. Tie-
+        Only called once thread_id/hash/fuzzy match have all missed.
+        Candidate pool is RESOLVER_CANDIDATE_STATUSES, not
+        ACTIVE_CURRENT_STATUSES -- a process/confirmation mail routinely
+        arrives after a drive's registration window (current_status=EXPIRED)
+        has closed, while its OA/interview rounds are still running. Tie-
         break order: exactly one active same-normalised-company candidate
         for the year -> compatible program name. Returns
         ``(resolved_row_or_None, candidates_considered)`` -- the second
@@ -581,13 +602,13 @@ class DatabaseManager:
             return None, []
 
         year = _get_year_from_opportunity(normalized)
-        placeholders = ", ".join("?" for _ in ACTIVE_CURRENT_STATUSES)
+        placeholders = ", ".join("?" for _ in RESOLVER_CANDIDATE_STATUSES)
         rows = self.connection.execute(
             f"""
             SELECT * FROM opportunities
             WHERE status = 'active' AND current_status IN ({placeholders});
             """,
-            ACTIVE_CURRENT_STATUSES,
+            RESOLVER_CANDIDATE_STATUSES,
         ).fetchall()
 
         candidates = [
