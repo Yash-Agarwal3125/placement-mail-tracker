@@ -13,12 +13,20 @@ from placement_mail_tracker.scheduler.calendar_flags_store import pop_pending_ca
 from placement_mail_tracker.scheduler.confirmation_digest_store import (
     pop_pending_confirmation_lines,
 )
+from placement_mail_tracker.scheduler.duplicate_drive_store import (
+    pop_pending_duplicate_drive_lines,
+)
 from placement_mail_tracker.scheduler.unattributed_mail_store import (
     pop_pending_unattributed_mail,
 )
 from placement_mail_tracker.utils.time import parse_datetime_flexible
 
 logger = logging.getLogger(__name__)
+
+# Safety-nets plan Phase 1: cap on how many unresolved unmatched_confirmations
+# rows appear in one digest -- an uncapped list of 265+ historical rows is
+# the same as no list at all (unreadable, trained to be ignored).
+_UNMATCHED_CONFIRMATIONS_DIGEST_CAP = 10
 
 
 class DailyDigestGenerator:
@@ -108,6 +116,16 @@ class DailyDigestGenerator:
         unattributed_mail = pop_pending_unattributed_mail()
         confirmation_lines = pop_pending_confirmation_lines()
 
+        # Safety-nets plan Phase 1: unmatched_confirmations is a persistent
+        # DB-backed queue (distinct from the transient per-run JSON stores
+        # above) -- read directly rather than via a pop-store, and only the
+        # unresolved rows, so the 265+ historical rows don't all resurface
+        # on every run forever.
+        unresolved_confirmations = self.database.fetch_unmatched_confirmations(
+            unresolved_only=True
+        )
+        duplicate_drive_lines = pop_pending_duplicate_drive_lines()
+
         if not (
             action_required
             or upcoming_events
@@ -119,6 +137,8 @@ class DailyDigestGenerator:
             or today_events
             or confirmation_lines
             or flagged_deadlines
+            or unresolved_confirmations
+            or duplicate_drive_lines
         ):
             logger.info("No significant updates for the daily digest.")
             self._record_digest_sent()
@@ -136,6 +156,8 @@ class DailyDigestGenerator:
             confirmation_lines,
             flagged_deadlines,
             quota_deferred_count,
+            unresolved_confirmations=unresolved_confirmations,
+            duplicate_drive_lines=duplicate_drive_lines,
         )
 
         # Build a descriptive subject line
@@ -221,6 +243,8 @@ def _format_digest(
     confirmation_lines: list[str] | None = None,
     flagged_deadlines: list[dict[str, Any]] | None = None,
     quota_deferred_count: int = 0,
+    unresolved_confirmations: list[dict[str, Any]] | None = None,
+    duplicate_drive_lines: list[str] | None = None,
 ) -> str:
     lines = ["PLACEMENT SUMMARY", ""]
 
@@ -303,6 +327,23 @@ def _format_digest(
         for opp in flagged_deadlines:
             company = opp.get("company_name") or "?"
             lines.append(f"* {company}: {opp.get('deadline')} — check manually")
+        lines.append("")
+
+    if unresolved_confirmations:
+        lines.append("UNMATCHED CONFIRMATIONS — NEEDS REVIEW")
+        shown = unresolved_confirmations[:_UNMATCHED_CONFIRMATIONS_DIGEST_CAP]
+        for row in shown:
+            text = row.get("extracted_text") or row.get("gmail_message_id") or "?"
+            lines.append(f"* {text}")
+        remaining = len(unresolved_confirmations) - len(shown)
+        if remaining > 0:
+            lines.append(f"...and {remaining} more")
+        lines.append("")
+
+    if duplicate_drive_lines:
+        lines.append("DUPLICATE DRIVE WARNING")
+        for line in duplicate_drive_lines:
+            lines.append(f"* {line}")
         lines.append("")
 
     return "\n".join(lines)

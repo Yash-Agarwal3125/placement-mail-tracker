@@ -375,13 +375,32 @@ _DRIVE_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # PLACEMENT and minting a phantom OA. "bootcamp" deliberately stays in
     # WORKSHOP above (already there, matched first) rather than duplicated
     # here, to avoid silently reclassifying existing WORKSHOP history.
+    # "campus connect" is deliberately NOT in this list -- see
+    # _CAMPUS_CONNECT_RE below (safety-nets plan, Phase 5).
     ("WEBINAR", re.compile(
-        r"\b(learning\s+series|campus\s+connect|webinar|"
+        r"\b(learning\s+series|webinar|"
         r"info(?:rmation)?\s*session|tech\s*talk|masterclass|"
         r"awareness\s+session)\b",
         re.IGNORECASE,
     )),
 ]
+
+# "campus connect" is company-branding language, not a mail-type phrase like
+# the others above -- Honeywell names both its hackathon AND its genuine
+# placement drives this way. Unlike the unambiguous phrases in
+# _DRIVE_KIND_PATTERNS, it is only a WEBINAR signal in the ABSENCE of
+# ordinary hiring-drive vocabulary; a real drive that happens to brand
+# itself "Campus Connect" (package, CGPA cutoff, registration deadline, ...)
+# must still classify as PLACEMENT and reach the calendar (safety-nets plan,
+# Phase 5 -- this is the "watch" item that motivated the change: currently
+# harmless only because the one production mail using this phrase is
+# Honeywell's hackathon, which HACKATHON matches first in the loop above).
+_CAMPUS_CONNECT_RE = re.compile(r"\bcampus\s+connect\b", re.IGNORECASE)
+_DRIVE_VOCAB_RE = re.compile(
+    r"(registration\s+deadline|\bctc\b|\bstipend\b|\bpackage\b|"
+    r"\blpa\b|\blakhs?\b|\bcgpa\b|eligibility\s+criteria|selection\s+process)",
+    re.IGNORECASE,
+)
 
 # A mail carrying one of these classifications is, by construction, mid-way
 # through an actual placement process (an OA got scheduled, a shortlist was
@@ -410,6 +429,8 @@ def classify_drive_kind(subject: str, body: str = "", email_classification: str 
     for kind, pattern in _DRIVE_KIND_PATTERNS:
         if pattern.search(combined):
             return kind
+    if _CAMPUS_CONNECT_RE.search(combined) and not _DRIVE_VOCAB_RE.search(combined):
+        return "WEBINAR"
     return "PLACEMENT"
 
 

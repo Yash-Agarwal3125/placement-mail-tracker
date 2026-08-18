@@ -1274,6 +1274,35 @@ class PlacementTrackerRunner:
         else:
             logger.debug("Urgent per-drive alerts disabled (URGENT_ALERTS_ENABLED=false)")
 
+        self._detect_duplicate_drives(database)
+
+    def _detect_duplicate_drives(self, database: DatabaseManager) -> None:
+        """Safety-nets plan Phase 3: end-of-run duplicate-drive warning.
+
+        Detection only, never merges anything -- runs every cycle regardless
+        of calendar_sync_enabled, so it stays a signal even for an
+        installation that never turns calendar sync on.
+        """
+        try:
+            from placement_mail_tracker.scheduler.duplicate_drive_store import (
+                append_duplicate_drive_lines,
+            )
+            from placement_mail_tracker.utils.duplicate_drive_detection import (
+                find_duplicate_drive_groups,
+                format_duplicate_drive_warnings,
+            )
+
+            rows = database.fetch_active_drives_only()
+            groups = find_duplicate_drive_groups(rows)
+            if not groups:
+                return
+            lines = format_duplicate_drive_warnings(groups)
+            for line in lines:
+                logger.warning("[DUPLICATE DRIVE] %s", line)
+            append_duplicate_drive_lines(lines)
+        except Exception as e:
+            logger.exception("Duplicate-drive detection failed: %s", e)
+
     def _execute_calendar_sync(
         self,
         database: DatabaseManager,

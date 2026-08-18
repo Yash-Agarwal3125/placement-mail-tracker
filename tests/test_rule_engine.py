@@ -542,3 +542,34 @@ class TestWebinarDriveKind:
         """bootcamp is already claimed by WORKSHOP; it must not be
         duplicated into WEBINAR (would silently reclassify history)."""
         assert classify_drive_kind("Summer Bootcamp Registrations") == "WORKSHOP"
+
+    def test_campus_connect_with_no_drive_vocabulary_is_webinar(self):
+        """'Campus Connect' alone (no package/CGPA/deadline language) is a
+        company-branding phrase, not evidence of a hiring drive."""
+        assert classify_drive_kind("Acme Campus Connect Session") == "WEBINAR"
+
+    def test_campus_connect_with_drive_vocabulary_is_placement(self):
+        """Safety-nets plan Phase 5 acceptance example: a real hiring drive
+        that happens to brand itself 'Campus Connect' must not be hidden
+        from the calendar just because of that phrase."""
+        subject = (
+            "Acme Campus Connect Drive — 12 LPA, 7.0 CGPA, register by 20 Aug"
+        )
+        assert classify_drive_kind(subject) == "PLACEMENT"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "registration deadline is 20 Aug",
+            "CTC of 12 LPA",
+            "stipend of 50k per month",
+            "package offered is attractive",
+            "12 LPA package",
+            "5 Lakhs per annum",
+            "CGPA 7.0 required",
+            "eligibility criteria: 7.0 CGPA",
+            "selection process will have 3 rounds",
+        ],
+    )
+    def test_campus_connect_excluded_by_each_drive_vocab_phrase(self, phrase):
+        assert classify_drive_kind(f"Campus Connect — {phrase}") == "PLACEMENT"

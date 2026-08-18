@@ -317,7 +317,9 @@ class DatabaseManager:
                 gmail_message_id TEXT NOT NULL,
                 extracted_text TEXT,
                 candidates TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                resolved_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS roster_verdicts (
@@ -510,6 +512,8 @@ class DatabaseManager:
             )
             self._update_company_stats(normalized["company_name"])
             logger.info("Inserted drive %s (id=%s)", normalized.get("drive_id"), opportunity_id)
+            if source_email_id:
+                self.resolve_unmatched_confirmations_for_message(source_email_id)
             return opportunity_id, True
 
         opportunity_id = int(existing["id"])
@@ -538,6 +542,8 @@ class DatabaseManager:
             )
             logger.info("Follow-up for drive %s had no changes", existing["drive_id"])
 
+        if source_email_id:
+            self.resolve_unmatched_confirmations_for_message(source_email_id)
         return opportunity_id, False
 
     def update_opportunity(
@@ -838,10 +844,20 @@ class DatabaseManager:
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def fetch_unmatched_confirmations(self) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT * FROM unmatched_confirmations ORDER BY created_at DESC;"
-        ).fetchall()
+    def fetch_unmatched_confirmations(
+        self, *, unresolved_only: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return unmatched_confirmations rows (safety-nets plan Phase 1).
+
+        ``unresolved_only=True`` is what the daily digest uses -- otherwise
+        every historical row (265+ in production) would resurface on every
+        run forever, training a reader to ignore the section.
+        """
+        query = "SELECT * FROM unmatched_confirmations"
+        if unresolved_only:
+            query += " WHERE resolved = 0"
+        query += " ORDER BY created_at DESC;"
+        rows = self.connection.execute(query).fetchall()
         results = []
         for row in rows:
             item = dict(row)
@@ -851,6 +867,27 @@ class DatabaseManager:
                 item["candidates"] = []
             results.append(item)
         return results
+
+    def resolve_unmatched_confirmations_for_message(self, gmail_message_id: str) -> int:
+        """Mark any unresolved unmatched_confirmations row(s) for this
+        Gmail message as resolved (safety-nets plan Phase 1).
+
+        Called when ``insert_or_update_opportunity`` successfully attaches
+        (or creates) a drive for ``source_email_id`` -- most of the
+        historical unmatched rows are superseded once the same mail is
+        later reprocessed (e.g. by a backfill) and resolves cleanly.
+        Returns the number of rows changed.
+        """
+        if not gmail_message_id:
+            return 0
+        cursor = self.connection.execute(
+            "UPDATE unmatched_confirmations SET resolved = 1, resolved_at = ? "
+            "WHERE gmail_message_id = ? AND resolved = 0;",
+            (utc_now_iso(), gmail_message_id),
+        )
+        if cursor.rowcount:
+            self.connection.commit()
+        return cursor.rowcount
 
     # ------------------------------------------------------------------
     # Calendar Sync state (docs/design/04-integration-spec.md §3.3)
@@ -1604,6 +1641,32 @@ class DatabaseManager:
             try:
                 self.connection.execute(
                     "ALTER TABLE processed_emails ADD COLUMN last_retry_at TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        # Safety-nets plan Phase 1: unmatched_confirmations had no way to be
+        # emptied -- add resolved/resolved_at so a row can be marked handled
+        # (auto-resolved when a later mail attaches the same
+        # gmail_message_id to a drive) and dropped from the digest.
+        uc_columns = {
+            row["name"]
+            for row in self.connection.execute(
+                "PRAGMA table_info(unmatched_confirmations);"
+            ).fetchall()
+        }
+        if "resolved" not in uc_columns:
+            try:
+                self.connection.execute(
+                    "ALTER TABLE unmatched_confirmations "
+                    "ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0;"
+                )
+            except sqlite3.OperationalError:
+                pass
+        if "resolved_at" not in uc_columns:
+            try:
+                self.connection.execute(
+                    "ALTER TABLE unmatched_confirmations ADD COLUMN resolved_at TEXT;"
                 )
             except sqlite3.OperationalError:
                 pass
