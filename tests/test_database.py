@@ -222,7 +222,7 @@ class TestExpireStaleDrives:
         opp = sample_opportunity("Zanskar", "SDE", deadline="01-Jan-2026")
         db_manager.insert_or_update_opportunity(opp, source_email_id="ghost_1")
 
-        recent = sample_opportunity("Adobe", "SDE", deadline="20-Aug-2026")
+        recent = sample_opportunity("Adobe", "SDE", deadline="20-Aug-2027")
         db_manager.insert_or_update_opportunity(recent, source_email_id="ghost_2")
 
         expired_count = db_manager.expire_stale_drives(cutoff_days=21)

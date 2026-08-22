@@ -237,12 +237,30 @@ EMAIL_CLASSIFICATIONS = (
 _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("OA_UPDATE", re.compile(
         r"(online\s*(assessment|test)|oa\s*(scheduled|date|link|update)|"
-        r"hackerrank|coding\s*test|assessment\s*(scheduled|link))",
+        r"hackerrank|coding\s*test|assessment\s*(scheduled|link)|"
+        # "X PPT is scheduled on ..." / "X pre placement talk is scheduled" --
+        # real, recurring CDC phrasing found live (Blackrock, Accenture) that
+        # the bare "ppt\s*(announcement|scheduled...)" alternative in
+        # NEW_DRIVE below cannot reach because of the intervening "is".
+        # Blackrock's version only ever worked by accident, via a thread_id
+        # match to an already-established drive; a PPT mail starting its own
+        # thread (Accenture's did) fell through to IRRELEVANT, which is
+        # outside _PLACEMENT_PROCESS_CLASSIFICATIONS -- so the Phase 1
+        # safe-attach resolver never ran and it silently minted a duplicate
+        # drive with no extracted date (docs/design/16 follow-up, 2026-08-22).
+        r"(?:pre[\-\s]?placement\s*talk|\bppt\b)\s*(?:is\s*)?"
+        r"(?:scheduled|announcement|notification|date))",
         re.IGNORECASE,
     )),
     ("SHORTLIST_UPDATE", re.compile(
         r"(shortlist|short\s*list|shortlisted\s*students?|"
-        r"selected\s*for\s*(next|further)|qualified)",
+        r"selected\s*for\s*(next|further)|qualified|"
+        # "Kind Attn: X Applied Students - Assignment Submission" -- an
+        # assignment mail implies the student is already past the shortlist
+        # stage. Found live: this exact phrasing classified IRRELEVANT and
+        # created a junk-named drive ("Kind Attn") instead of attaching to
+        # the real one (docs/design/16 follow-up, 2026-08-22).
+        r"assignment\s*(?:submission|deadline|round))",
         re.IGNORECASE,
     )),
     ("INTERVIEW_UPDATE", re.compile(

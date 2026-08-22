@@ -89,6 +89,39 @@ class TestClassifyEmail:
         assert classify_email("", "") == "IRRELEVANT"
 
 
+class TestPptAndAssignmentClassification:
+    """docs/design/16 follow-up (2026-08-22): a PPT/pre-placement-talk
+    announcement or an assignment-submission mail that starts its own Gmail
+    thread (rather than replying in the drive's original registration
+    thread) has no thread_id to fall back on -- classify_email() is the only
+    thing standing between it and IRRELEVANT, which sits outside
+    _PLACEMENT_PROCESS_CLASSIFICATIONS and so never reaches the Phase 1
+    safe-attach resolver. Found live: Accenture's real PPT mail and
+    Unthinkable's real assignment mail both classified IRRELEVANT and each
+    minted a duplicate/junk-named drive instead of attaching to the real
+    one. Every subject below is verbatim from production mail."""
+
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            "Blackrock PPT is scheduled on 06.08.2026 by 5:00 pm",
+            "Accenture pre placement talk is scheduled on 24.08.2026 by "
+            "11:30 am at the respective venues",
+            "UBS Pre-Placement Talk is scheduled on 17th August 2026 4.45 "
+            "pm - Virtual mode (Own location)",
+            "Amazon Internship - PPT is scheduled on August 24, 2026 at "
+            "17:00 (IST)",
+            "ZS Associates PPT is scheduled on 30/07/2026 - Join immediately",
+        ],
+    )
+    def test_ppt_scheduled_mail_classifies_as_oa_update(self, subject: str):
+        assert classify_email(subject, "") == "OA_UPDATE"
+
+    def test_assignment_submission_mail_classifies_as_shortlist_update(self):
+        subject = "Kind Attn: Unthinkable Applied Students - Assignment Submission"
+        assert classify_email(subject, "") == "SHORTLIST_UPDATE"
+
+
 # ===================================================================
 # Phase 2: detect_status_from_text
 # ===================================================================
