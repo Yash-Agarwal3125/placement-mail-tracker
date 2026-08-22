@@ -238,18 +238,25 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("OA_UPDATE", re.compile(
         r"(online\s*(assessment|test)|oa\s*(scheduled|date|link|update)|"
         r"hackerrank|coding\s*test|assessment\s*(scheduled|link)|"
-        # "X PPT is scheduled on ..." / "X pre placement talk is scheduled" --
-        # real, recurring CDC phrasing found live (Blackrock, Accenture) that
+        # "X PPT is scheduled on ..." / "X pre placement talk is scheduled" /
+        # "X - Pre-Placement Talk - 20th August" -- real, recurring CDC
+        # phrasing found live (Blackrock, Accenture, American Express) that
         # the bare "ppt\s*(announcement|scheduled...)" alternative in
-        # NEW_DRIVE below cannot reach because of the intervening "is".
-        # Blackrock's version only ever worked by accident, via a thread_id
-        # match to an already-established drive; a PPT mail starting its own
-        # thread (Accenture's did) fell through to IRRELEVANT, which is
-        # outside _PLACEMENT_PROCESS_CLASSIFICATIONS -- so the Phase 1
-        # safe-attach resolver never ran and it silently minted a duplicate
-        # drive with no extracted date (docs/design/16 follow-up, 2026-08-22).
-        r"(?:pre[\-\s]?placement\s*talk|\bppt\b)\s*(?:is\s*)?"
-        r"(?:scheduled|announcement|notification|date))",
+        # NEW_DRIVE below cannot reach: it requires PPT/the phrase to be
+        # directly followed by a specific keyword, but a subject can equally
+        # follow it with " - <date>" or nothing at all. The spelled-out
+        # phrase "pre-placement talk" is unambiguous on its own and needs no
+        # trailing qualifier; the 3-letter abbreviation "ppt" alone is kept
+        # gated behind one, since it's short enough to risk an unrelated
+        # false match without it. A PPT mail starting its own new Gmail
+        # thread (not a reply on an already-tracked drive) has no thread_id
+        # to fall back on -- classify_email() alone decides whether it
+        # reaches the Phase 1 safe-attach resolver, and IRRELEVANT sits
+        # outside _PLACEMENT_PROCESS_CLASSIFICATIONS, so it silently minted
+        # a duplicate drive with no extracted date (docs/design/16
+        # follow-up, 2026-08-18 and 2026-08-22).
+        r"pre[\-\s]?placement\s*talk|"
+        r"\bppt\b\s*(?:is\s*)?(?:scheduled|announcement|notification|date))",
         re.IGNORECASE,
     )),
     ("SHORTLIST_UPDATE", re.compile(
@@ -276,7 +283,21 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     )),
     ("REMINDER", re.compile(
         r"(reminder|last\s*date|deadline\s*(extended|approaching|tomorrow)|"
-        r"urgent\s*(update|reminder)|final\s*call)",
+        r"urgent\s*(update|reminder)|final\s*call|"
+        # Bare "Deadline : <weekday>, <date>" with none of the qualifier
+        # words above -- real, live CDC phrasing (American Express:
+        # "Applications Lines - Deadline : Friday, 21st Aug, 2:00pm").
+        # Deliberately anchored on the weekday name, not just "deadline:" --
+        # a NEW_DRIVE posting's own structured body routinely has its own
+        # "Deadline: 5 June 2027" field with no weekday, and that must keep
+        # classifying NEW_DRIVE, not get reclassified as a reminder. Found
+        # the same day as the PPT gap above and by the same mechanism: it
+        # classified IRRELEVANT, which sits outside
+        # _PLACEMENT_PROCESS_CLASSIFICATIONS, so it never reached the
+        # Phase 1 safe-attach resolver and minted a duplicate drive instead
+        # of attaching to the real one.
+        r"deadline\s*:\s*"
+        r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))",
         re.IGNORECASE,
     )),
     ("DRIVE_UPDATE", re.compile(
@@ -429,7 +450,7 @@ _DRIVE_VOCAB_RE = re.compile(
 # drive's OA/interview/offer events from the calendar.
 _PLACEMENT_PROCESS_CLASSIFICATIONS = frozenset({
     "OA_UPDATE", "SHORTLIST_UPDATE", "INTERVIEW_UPDATE", "OFFER_UPDATE",
-    "APPLICATION_CONFIRMATION", "DRIVE_UPDATE",
+    "APPLICATION_CONFIRMATION", "DRIVE_UPDATE", "REMINDER",
 })
 
 

@@ -121,6 +121,36 @@ class TestPptAndAssignmentClassification:
         subject = "Kind Attn: Unthinkable Applied Students - Assignment Submission"
         assert classify_email(subject, "") == "SHORTLIST_UPDATE"
 
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            "American Express - VIT || Pre-Placement Talk - 20th August,2026 "
+            "| 05:00 PM to 06:00 PM",
+            "EY Global Delivery Services - Campus Hiring - Pre Placement Talk "
+            "- 07 Aug 2026",
+        ],
+    )
+    def test_spelled_out_pre_placement_talk_needs_no_trailing_keyword(
+        self, subject: str
+    ):
+        """Found live, same day as the original PPT gap fix: the spelled-out
+        phrase alone (no trailing "is scheduled"/"date" etc.) still needs to
+        classify as OA_UPDATE -- American Express's mail followed it with
+        "- 20th August,2026 | ..." instead, and fell through to IRRELEVANT,
+        creating a duplicate drive (docs/design/16 follow-up, 2026-08-22)."""
+        assert classify_email(subject, "") == "OA_UPDATE"
+
+    def test_bare_deadline_with_colon_classifies_as_reminder(self):
+        """Real live subject: "Deadline : Friday, 21st Aug, 2:00pm" has none
+        of REMINDER's existing qualifier words (extended/approaching/
+        tomorrow) -- found alongside the PPT gap, same mechanism, same
+        company (American Express)."""
+        subject = (
+            "American Express - VIT || Full Time with 24 weeks Apprenticeship "
+            "- Applications Lines - Deadline : Friday, 21st Aug, 2:00pm"
+        )
+        assert classify_email(subject, "") == "REMINDER"
+
 
 # ===================================================================
 # Phase 2: detect_status_from_text
