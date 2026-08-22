@@ -20,7 +20,6 @@ from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
-from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 from placement_mail_tracker.scheduler.runner import (
     _RETRY_MAX,
     PlacementTrackerRunner,
@@ -375,26 +374,6 @@ class TestIdentifiableCompany:
 
 
 class TestUnidentifiableDriveHandling:
-    def test_alert_generator_skips_unknown_company(
-        self, db_manager: DatabaseManager, mock_settings
-    ):
-        # A drive with no real company and a deadline tomorrow.
-        tomorrow = (datetime.now() + timedelta(days=1)).isoformat()
-        db_manager.insert_or_update_opportunity(
-            {
-                "company_name": "Unknown",
-                "role": "Unknown Role",
-                "deadline": tomorrow,
-                "current_status": "OPEN",
-                "eligibility_status": "ELIGIBLE",
-            },
-            source_email_id="unknown_alert",
-        )
-        gen = AlertGenerator(db_manager, mock_settings)
-        gen.notifier = MagicMock()  # never touch real SMTP
-        gen.check_and_send_alerts()
-        gen.notifier.send_email.assert_not_called()
-
     def test_runner_does_not_create_drive_without_company(
         self, db_manager: DatabaseManager, mock_settings
     ):
@@ -438,9 +417,8 @@ class TestUnidentifiableDriveHandling:
 @patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
 @patch("placement_mail_tracker.scheduler.runner.GmailClient")
 @patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
-@patch("placement_mail_tracker.scheduler.runner.SheetsClient")
 def test_fetch_window_not_advanced_on_gmail_failure(
-    mock_sheets, mock_gemini, mock_gmail, mock_db, runner_settings
+    mock_gemini, mock_gmail, mock_db, runner_settings
 ):
     original = "2026-06-01T12:00:00Z"
     state_file = Path(runner_settings.fetch_state_file)
@@ -529,9 +507,8 @@ def test_extraction_failure_reaches_permanent_failure_at_retry_max(
 @patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
 @patch("placement_mail_tracker.scheduler.runner.GmailClient")
 @patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
-@patch("placement_mail_tracker.scheduler.runner.SheetsClient")
 def test_fetch_window_not_advanced_on_suppressed_gmail_error(
-    mock_sheets, mock_gemini, mock_gmail, mock_db, runner_settings
+    mock_gemini, mock_gmail, mock_db, runner_settings
 ):
     # In non-production env the Gmail client swallows HttpError/auth failures
     # and returns [] while recording last_error. That empty list must NOT look

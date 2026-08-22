@@ -137,7 +137,6 @@ class FailureAlertManager:
             "Component status:",
             f"- Database OK: {report.database_ok}",
             f"- Gmail OK: {report.gmail_ok}",
-            f"- Sheets OK: {report.sheets_ok}",
             f"- Notifications OK: {report.notifications_ok}",
             f"- Calendar OK: {report.calendar_ok}",
         ]

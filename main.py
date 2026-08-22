@@ -4,8 +4,7 @@ This script executes a single synchronization cycle:
 1. Checks Gmail for new unread/relevant placement emails.
 2. Uses Gemini AI to parse structured fields.
 3. Automatically deduplicates records against SQLite.
-4. Synchronizes active opportunities with Google Sheets.
-5. Dispatches SMTP email notifications for new openings or deadline updates.
+4. Synchronizes active opportunities to Google Calendar.
 """
 
 from __future__ import annotations
@@ -132,7 +131,7 @@ def main() -> int:
 
 def _apply_validation_results(report: RunReport, validator: ConfigValidator) -> None:
     """Apply startup validation errors and warnings to a run report."""
-    tracked_components = {"database", "gmail", "sheets", "notifications", "calendar"}
+    tracked_components = {"database", "gmail", "notifications", "calendar"}
     for result in validator.results:
         if result.status == "PASS":
             continue
@@ -155,7 +154,6 @@ def _merge_report(target: RunReport, source: RunReport) -> None:
     """Merge a cycle report into the top-level report."""
     target.database_ok = target.database_ok and source.database_ok
     target.gmail_ok = target.gmail_ok and source.gmail_ok
-    target.sheets_ok = target.sheets_ok and source.sheets_ok
     target.notifications_ok = target.notifications_ok and source.notifications_ok
     target.calendar_ok = target.calendar_ok and source.calendar_ok
     target.critical_failure = target.critical_failure or source.critical_failure

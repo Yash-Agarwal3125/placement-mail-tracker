@@ -23,7 +23,6 @@ from placement_mail_tracker.extraction.rule_engine import (
     extract_from_email,
     normalize_company_name,
 )
-from placement_mail_tracker.sheets.sheets_sync import opportunity_to_sheet_row
 
 # ===================================================================
 # Realistic VIT CDC email corpus (20+ emails)
@@ -427,22 +426,6 @@ class TestEndToEnd:
         for opp in all_opps:
             assert opp["drive_id"], f"Drive for {opp['company_name']} has no drive_id"
             assert len(opp["drive_id"]) > 5
-
-    def test_gmail_link_generation(self, db_manager: DatabaseManager):
-        """Sheet rows should build without error; drives with IDs have source traceable."""
-        for email in CDC_EMAILS:
-            _process_email(db_manager, email)
-
-        from placement_mail_tracker.sheets.sheets_sync import _gmail_link
-
-        all_opps = db_manager.fetch_active_opportunities()
-        for opp in all_opps:
-            row = opportunity_to_sheet_row(opp)
-            assert len(row) > 0  # row built without error
-            # Verify Gmail link helper works for opps that have source IDs
-            if opp.get("source_thread_id") or opp.get("source_email_id"):
-                link = _gmail_link(opp)
-                assert "HYPERLINK" in link or link == ""
 
     def test_classification_stored(self, db_manager: DatabaseManager):
         """Email classification should be stored with each drive."""

@@ -30,7 +30,6 @@ from placement_mail_tracker.extraction.confirmation import (
     extract_reference_id,
     find_confident_drive_match,
 )
-from placement_mail_tracker.scheduler.confirmation_digest_store import append_confirmation_lines
 from placement_mail_tracker.utils.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -55,7 +54,6 @@ def backfill(database: DatabaseManager, *, dry_run: bool = False) -> dict[str, i
         return stats
 
     active_opportunities = database.get_active_opportunities()
-    digest_lines: list[str] = []
 
     for path in sorted(CORPUS_DIR.glob("*.json")):
         try:
@@ -93,12 +91,10 @@ def backfill(database: DatabaseManager, *, dry_run: bool = False) -> dict[str, i
         changed = database.set_my_status(drive_id, "APPLIED", source="automation")
         if changed:
             stats["applied"] += 1
-            digest_lines.append(f"backfill: marked {company} APPLIED (confirmation mail).")
+            logger.info("backfill: marked %s APPLIED (confirmation mail).", company)
         else:
             stats["already_applied"] += 1
 
-    if digest_lines:
-        append_confirmation_lines(digest_lines)
     return stats
 
 

@@ -2,8 +2,9 @@
 reader and a way to be emptied.
 
 Covers the migration idiom (resolved/resolved_at columns on an
-already-existing table), the ``unresolved_only`` filter, auto-resolution on
-a later successful attach, and the digest section.
+already-existing table), the ``unresolved_only`` filter, and auto-resolution
+on a later successful attach. (The digest-section formatting these fed used
+to be tested here too, before the digest feature was removed.)
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import sqlite3
 
 from placement_mail_tracker.db.manager import DatabaseManager
-from placement_mail_tracker.scheduler.digest_generator import _format_digest
 
 
 class TestMigrationAddsResolvedColumns:
@@ -186,59 +186,3 @@ class TestAutoResolveOnAttach:
         assert len(unresolved) == 2
 
 
-class TestDigestSection:
-    def test_unresolved_confirmations_section_capped_at_ten(self):
-        rows = [
-            {"gmail_message_id": f"m{i}", "extracted_text": f"Row {i}"}
-            for i in range(13)
-        ]
-        output = _format_digest(
-            [], [], [], __import__("datetime").datetime.now(),
-            unresolved_confirmations=rows,
-        )
-        assert "UNMATCHED CONFIRMATIONS" in output
-        assert "Row 0" in output
-        assert "Row 9" in output
-        assert "Row 10" not in output
-        assert "...and 3 more" in output
-
-    def test_unresolved_confirmations_section_omitted_when_empty(self):
-        output = _format_digest(
-            [], [], [], __import__("datetime").datetime.now(),
-            unresolved_confirmations=[],
-        )
-        assert "UNMATCHED CONFIRMATIONS" not in output
-
-    def test_unresolved_confirmations_section_omitted_when_none(self):
-        output = _format_digest([], [], [], __import__("datetime").datetime.now())
-        assert "UNMATCHED CONFIRMATIONS" not in output
-
-    def test_digest_sends_when_unresolved_confirmations_are_only_content(
-        self, db_manager, mock_settings
-    ):
-        """A run with only unresolved unmatched_confirmations rows must
-        still produce and send a digest -- not silently return False."""
-        from datetime import datetime, timedelta
-        from unittest.mock import patch
-
-        from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
-
-        db_manager.insert_unmatched_confirmation(
-            gmail_message_id="msg-1", extracted_text="Needs review", candidates=[]
-        )
-        mock_settings.digest_send_time = "00:00"
-
-        generator = DailyDigestGenerator(db_manager, mock_settings)
-        now = datetime.now()
-        if now.hour == 0 and now.minute < 1:
-            # Avoid flaky edge case at exactly midnight.
-            now = now + timedelta(minutes=2)
-
-        with patch.object(generator.notifier, "send_email", return_value=True) as mock_send:
-            sent = generator.generate_and_send()
-
-        assert sent is True
-        assert mock_send.called
-        body = mock_send.call_args.kwargs.get("body") or mock_send.call_args[0][1]
-        assert "UNMATCHED CONFIRMATIONS" in body
-        assert "Needs review" in body

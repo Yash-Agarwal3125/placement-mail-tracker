@@ -43,9 +43,6 @@ from placement_mail_tracker.gmail.filters import is_placement_mail
 from placement_mail_tracker.gmail.gmail_client import GmailClient
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
 from placement_mail_tracker.scheduler.confirmation_corpus import capture_confirmation_fixture
-from placement_mail_tracker.scheduler.confirmation_digest_store import append_confirmation_lines
-from placement_mail_tracker.scheduler.unattributed_mail_store import append_unattributed_mail
-from placement_mail_tracker.sheets.client import SheetsClient
 from placement_mail_tracker.utils.deduplication import find_best_match
 from placement_mail_tracker.utils.scoring import compute_priority
 from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
@@ -254,7 +251,6 @@ class PlacementTrackerRunner:
         reprocess_review_queue: bool = False,
     ) -> RunReport:
         """Run one sync cycle: fetch, filter, extract (rule+AI), store, sync, notify."""
-        run_start = datetime.now()
         report = RunReport(environment=self.settings.environment)
 
         database = self._init_database(report)
@@ -264,10 +260,7 @@ class PlacementTrackerRunner:
         logger.info("Initializing API clients")
         gmail_client = GmailClient(self.settings)
         extractor = GeminiExtractor(self.settings)
-        sheets_client = SheetsClient(self.settings)
         user_profile = UserProfile.load()
-
-        self._run_daily_digest(database)
 
         # Capture the fetch-window boundary BEFORE fetching. Any email that
         # arrives after this instant is picked up on the next run, and the
@@ -307,9 +300,7 @@ class PlacementTrackerRunner:
 
         self._execute_sync_pipelines(
             database,
-            sheets_client,
             report,
-            run_start,
             calendar_dry_run=calendar_dry_run,
             calendar_rebuild=calendar_rebuild,
             calendar_reconcile=calendar_reconcile,
@@ -332,16 +323,6 @@ class PlacementTrackerRunner:
             logger.exception("Database initialization failed: %s", database_error)
             report.mark_component("database", False, str(database_error), critical=True)
             return None
-
-    def _run_daily_digest(self, database: DatabaseManager) -> None:
-        try:
-            from placement_mail_tracker.scheduler.digest_generator import DailyDigestGenerator
-
-            if datetime.now().hour >= 8:
-                digest_gen = DailyDigestGenerator(database, self.settings)
-                digest_gen.generate_and_send()
-        except Exception as e:
-            logger.debug("Daily digest skipped: %s", e)
 
     def _fetch_messages(self, gmail_client: GmailClient, report: RunReport) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -673,10 +654,6 @@ class PlacementTrackerRunner:
                     if not opp_data.get("role"):
                         opp_data["role"] = rescue_match.get("role")
                 else:
-                    if any(
-                        opp_data.get(f) for f in ("deadline", "oa_date", "interview_date")
-                    ):
-                        append_unattributed_mail([f"unattributed mail: {subject}"])
                     logger.info(
                         "Email %s has no identifiable company; not creating a drive", msg_id
                     )
@@ -1097,8 +1074,6 @@ class PlacementTrackerRunner:
                             f"subject-resolved {origin})."
                         )
 
-        append_confirmation_lines(digest_lines)
-
         database.log_processed_email(
             gmail_message_id=msg_id,
             subject=subject,
@@ -1221,31 +1196,12 @@ class PlacementTrackerRunner:
     def _execute_sync_pipelines(
         self,
         database: DatabaseManager,
-        sheets_client: SheetsClient,
         report: RunReport,
-        run_start: datetime | None = None,
         *,
         calendar_dry_run: bool = False,
         calendar_rebuild: bool = False,
         calendar_reconcile: bool = False,
     ) -> None:
-        sheets_sync_successful = False
-        logger.info("[SYNC] Starting Sheet Sync")
-        try:
-            sheets_client.sync.sync_active_opportunities(database, run_start=run_start)
-            sheets_sync_successful = True
-            logger.info("[SYNC] Google Sheets Write Success")
-        except Exception as e:
-            logger.exception("[SYNC] Google Sheets Write FAILED: %s", e)
-
-        if not sheets_sync_successful:
-            report.mark_component(
-                "google_sheets",
-                False,
-                sheets_client.sync.last_error,
-                critical=self.settings.is_production,
-            )
-
         try:
             expired = database.expire_stale_drives(self.settings.drive_auto_expire_days)
             if expired:
@@ -1261,19 +1217,6 @@ class PlacementTrackerRunner:
             calendar_reconcile=calendar_reconcile,
         )
 
-        if self.settings.urgent_alerts_enabled:
-            logger.info("Checking for upcoming deadlines and events")
-            try:
-                from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
-
-                alert_generator = AlertGenerator(database, self.settings)
-                alert_generator.check_and_send_alerts()
-            except Exception as e:
-                logger.exception("Alert generation failed: %s", e)
-                report.mark_component("notifications", False, str(e), critical=False)
-        else:
-            logger.debug("Urgent per-drive alerts disabled (URGENT_ALERTS_ENABLED=false)")
-
         self._detect_duplicate_drives(database)
 
     def _detect_duplicate_drives(self, database: DatabaseManager) -> None:
@@ -1284,9 +1227,6 @@ class PlacementTrackerRunner:
         installation that never turns calendar sync on.
         """
         try:
-            from placement_mail_tracker.scheduler.duplicate_drive_store import (
-                append_duplicate_drive_lines,
-            )
             from placement_mail_tracker.utils.duplicate_drive_detection import (
                 find_duplicate_drive_groups,
                 format_duplicate_drive_warnings,
@@ -1299,7 +1239,6 @@ class PlacementTrackerRunner:
             lines = format_duplicate_drive_warnings(groups)
             for line in lines:
                 logger.warning("[DUPLICATE DRIVE] %s", line)
-            append_duplicate_drive_lines(lines)
         except Exception as e:
             logger.exception("Duplicate-drive detection failed: %s", e)
 

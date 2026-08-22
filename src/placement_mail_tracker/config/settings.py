@@ -68,20 +68,10 @@ class Settings(BaseSettings):
     ai_rate_limit_wait_seconds: float = Field(default=45.0, alias="AI_RATE_LIMIT_WAIT_SECONDS")
     ai_rate_limit_max_retries: int = Field(default=2, alias="AI_RATE_LIMIT_MAX_RETRIES")
 
-    google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
-    google_sheets_credentials_file: str = Field(
-        default="config/credentials.json",
-        alias="GOOGLE_SHEETS_CREDENTIALS_FILE",
-    )
-    google_sheets_token_file: str = Field(
-        default="config/sheets_token.json",
-        alias="GOOGLE_SHEETS_TOKEN_FILE",
-    )
-
-    # Calendar sync (ADR docs/design/03-adr-calendar-sync.md, D4/D6): a third,
+    # Calendar sync (ADR docs/design/03-adr-calendar-sync.md, D4/D6): a second,
     # Calendar-scope-only OAuth stack. Credentials file is intentionally NOT a
-    # new setting — it reuses gmail_credentials_file/google_sheets_credentials_file
-    # (same client secret, config/credentials.json by default).
+    # new setting — it reuses gmail_credentials_file (same client secret,
+    # config/credentials.json by default).
     calendar_sync_enabled: bool = Field(default=False, alias="CALENDAR_SYNC_ENABLED")
     calendar_sync_mode: str = Field(default="applied_only", alias="CALENDAR_SYNC_MODE")
     calendar_name: str = Field(default="VIT Placements", alias="CALENDAR_NAME")
@@ -116,25 +106,6 @@ class Settings(BaseSettings):
     smtp_app_password: str = Field(default="", alias="SMTP_APP_PASSWORD")
     email_receiver: str = Field(default="", alias="EMAIL_RECEIVER")
     notification_email: str = Field(default="", alias="NOTIFICATION_EMAIL")
-    digest_send_time: str = Field(default="08:00", alias="DIGEST_SEND_TIME")
-
-    # Backlog item 1 (docs/design/05, promoted in 09): T-48h/T-24h nudges for
-    # ELIGIBLE drives the user hasn't applied to yet, distinct from the
-    # generic deadline alerts which fire regardless of application status.
-    deadline_escalation_thresholds_hours: list[int] = Field(
-        default_factory=lambda: [48, 24],
-        alias="DEADLINE_ESCALATION_THRESHOLDS_HOURS",
-    )
-    reminder_escalation_enabled: bool = Field(
-        default=True, alias="REMINDER_ESCALATION_ENABLED"
-    )
-    reminder_max_per_mail: int = Field(default=20, alias="REMINDER_MAX_PER_MAIL")
-
-    # Per-drive deadline/event push alerts (<4h/<24h/<48h) fire immediately,
-    # every run, on top of the once-daily digest -- that's the inbox-bloat
-    # path. Off by default keeps only the daily digest + genuine system
-    # failure alerts; turn back on for real-time push reminders.
-    urgent_alerts_enabled: bool = Field(default=False, alias="URGENT_ALERTS_ENABLED")
 
     # Feature 1 (docs/design/10-confirmation-and-reminders.md): automatic
     # my_status writes from CDC application-confirmation mails ship OFF by

@@ -7,7 +7,6 @@ counts (Honeywell x3, Flipkart x2) so the signal stays meaningful.
 
 from __future__ import annotations
 
-from placement_mail_tracker.scheduler.digest_generator import _format_digest
 from placement_mail_tracker.utils.duplicate_drive_detection import (
     find_duplicate_drive_groups,
     format_duplicate_drive_warnings,
@@ -97,38 +96,14 @@ class TestFormatDuplicateDriveWarnings:
         assert "1" in lines[0] and "2" in lines[0]
 
 
-class TestDuplicateDriveDigestSection:
-    def test_section_present_when_lines_given(self):
-        output = _format_digest(
-            [], [], [], __import__("datetime").datetime.now(),
-            duplicate_drive_lines=["Blackrock (2026): 2 active drives share this company+year"],
-        )
-        assert "DUPLICATE DRIVE WARNING" in output
-        assert "Blackrock" in output
-
-    def test_section_omitted_when_empty(self):
-        output = _format_digest(
-            [], [], [], __import__("datetime").datetime.now(),
-            duplicate_drive_lines=[],
-        )
-        assert "DUPLICATE DRIVE WARNING" not in output
-
-    def test_section_omitted_when_none(self):
-        output = _format_digest([], [], [], __import__("datetime").datetime.now())
-        assert "DUPLICATE DRIVE WARNING" not in output
-
-
 class TestRunnerWiring:
-    def test_detect_duplicate_drives_logs_and_appends_to_store(
-        self, db_manager, mock_settings, monkeypatch, tmp_path
+    def test_detect_duplicate_drives_logs_a_warning(
+        self, db_manager, mock_settings, caplog
     ):
         """End-to-end through PlacementTrackerRunner._detect_duplicate_drives:
-        two fragmented Blackrock rows produce a warning that survives in the
-        digest store (safety-nets plan Phase 3 acceptance)."""
-        import placement_mail_tracker.scheduler.duplicate_drive_store as store_module
+        two fragmented Blackrock rows produce a logged warning (safety-nets
+        plan Phase 3 acceptance)."""
         from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
-
-        monkeypatch.setattr(store_module, "_FLAGS_FILE", tmp_path / "duplicate_flags.json")
 
         _seed_active(db_manager, "Blackrock", "Software Engineer")
         _seed_active(db_manager, "Blackrock", "Assistant Manager")
@@ -136,19 +111,17 @@ class TestRunnerWiring:
         runner = PlacementTrackerRunner(
             connection=db_manager.connection, settings=mock_settings
         )
-        runner._detect_duplicate_drives(db_manager)
+        with caplog.at_level("WARNING"):
+            runner._detect_duplicate_drives(db_manager)
 
-        pending = store_module.pop_pending_duplicate_drive_lines()
-        assert len(pending) == 1
-        assert "Blackrock" in pending[0]
+        warnings = [r.message for r in caplog.records if "DUPLICATE DRIVE" in r.message]
+        assert len(warnings) == 1
+        assert "Blackrock" in warnings[0]
 
     def test_detect_duplicate_drives_silent_for_known_allowlisted_pair(
-        self, db_manager, mock_settings, monkeypatch, tmp_path
+        self, db_manager, mock_settings, caplog
     ):
-        import placement_mail_tracker.scheduler.duplicate_drive_store as store_module
         from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
-
-        monkeypatch.setattr(store_module, "_FLAGS_FILE", tmp_path / "duplicate_flags.json")
 
         _seed_active(db_manager, "Flipkart", "Super Dream PPO")
         _seed_active(db_manager, "Flipkart", "Super Dream Internship")
@@ -156,6 +129,8 @@ class TestRunnerWiring:
         runner = PlacementTrackerRunner(
             connection=db_manager.connection, settings=mock_settings
         )
-        runner._detect_duplicate_drives(db_manager)
+        with caplog.at_level("WARNING"):
+            runner._detect_duplicate_drives(db_manager)
 
-        assert store_module.pop_pending_duplicate_drive_lines() == []
+        warnings = [r.message for r in caplog.records if "DUPLICATE DRIVE" in r.message]
+        assert warnings == []

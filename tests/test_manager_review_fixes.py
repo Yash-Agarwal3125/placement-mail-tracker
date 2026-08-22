@@ -1,26 +1,18 @@
 """Tests for docs/design/09-manager-review.md's Top-5 fixes: F1 (rescue
-unattributed follow-ups), F2 (dual-date event alerts) + the deadline-
-escalation backlog item, F3 (self-mail short-circuit), and the dead
+unattributed follow-ups), F3 (self-mail short-circuit), and the dead
 fallback-model-list refresh.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.config.user_profile import UserProfile
-from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.extraction.rule_engine import RuleExtractionResult
 from placement_mail_tracker.scheduler import runner as runner_module
-from placement_mail_tracker.scheduler.alert_generator import AlertGenerator
 from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
-from placement_mail_tracker.scheduler.unattributed_mail_store import (
-    pop_pending_unattributed_mail,
-)
 
 
 def _stats() -> dict[str, int]:
@@ -33,18 +25,6 @@ def _stats() -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # F1: rescue unattributed follow-ups at the "no identifiable company" gate
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _isolate_unattributed_mail_file(tmp_path, monkeypatch):
-    from placement_mail_tracker.scheduler import unattributed_mail_store
-
-    monkeypatch.setattr(
-        unattributed_mail_store, "_FLAGS_FILE", tmp_path / "unattributed_mail.json"
-    )
-    monkeypatch.setattr(
-        runner_module, "append_unattributed_mail", unattributed_mail_store.append_unattributed_mail
-    )
 
 
 class TestF1RescueUnattributedFollowups:
@@ -118,11 +98,11 @@ class TestF1RescueUnattributedFollowups:
         assert stats["created"] == 0
         assert stats["skipped"] == 0
 
-    def test_unmatchable_date_bearing_mail_is_skipped_and_flagged_in_digest(
+    def test_unmatchable_date_bearing_mail_is_skipped(
         self, db_manager, mock_settings
     ):
-        """No active drive matches -> still skipped (unattributable), but the
-        digest gets a line instead of the mail vanishing silently."""
+        """No active drive matches -> skipped (unattributable), no phantom
+        drive created."""
         runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
         extractor = MagicMock()
         extractor.extract_from_email.return_value = {
@@ -158,64 +138,6 @@ class TestF1RescueUnattributedFollowups:
         assert after == before
         assert stats["skipped"] == 1
         assert stats["created"] == 0
-
-        pending = pop_pending_unattributed_mail()
-        assert any(subject in line for line in pending)
-
-
-# ---------------------------------------------------------------------------
-# F2: event alerts must fire on oa_date/interview_date directly
-# ---------------------------------------------------------------------------
-
-
-class TestF2DualDateEventAlerts:
-    def test_varroc_shape_oa_past_interview_future_fires_interview_alert(
-        self, db_manager: DatabaseManager, mock_settings
-    ):
-        """docs/design/09 F2's exact live shape: OA already passed, interview
-        is within the 24h window -> must fire an interview alert even though
-        the drive's single next_event_date would have gone stale on the OA."""
-        gen = AlertGenerator(db_manager, mock_settings)
-        gen.notifier = MagicMock()
-
-        now = datetime(2026, 7, 13, 6, 0, 0)
-        opp = {
-            "id": 42,
-            "company_name": "Varroc",
-            "eligibility_status": "ELIGIBLE",
-            "my_status": "REGISTERED",
-            "oa_date": (now - timedelta(days=5)).isoformat(),
-            "interview_date": (now + timedelta(hours=20)).isoformat(),
-        }
-
-        gen._check_event_alerts(opp, now)
-
-        gen.notifier.send_email.assert_called_once()
-        subject = gen.notifier.send_email.call_args[1]["subject"]
-        assert "INTERVIEW" in subject
-        assert "Varroc" in subject
-
-    def test_second_event_alert_is_independent_of_first(
-        self, db_manager: DatabaseManager, mock_settings
-    ):
-        """Both oa_date and interview_date can each independently fire their
-        own alert within the same run when both are upcoming."""
-        gen = AlertGenerator(db_manager, mock_settings)
-        gen.notifier = MagicMock()
-
-        now = datetime(2026, 7, 8, 6, 0, 0)
-        opp = {
-            "id": 43,
-            "company_name": "Groww",
-            "eligibility_status": "ELIGIBLE",
-            "my_status": "REGISTERED",
-            "oa_date": (now + timedelta(hours=20)).isoformat(),
-            "interview_date": (now + timedelta(hours=40)).isoformat(),
-        }
-
-        gen._check_event_alerts(opp, now)
-
-        assert gen.notifier.send_email.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -277,47 +199,6 @@ class TestF3SelfGeneratedMailShortCircuit:
             "[Yash-Agarwal3125/placement-mail-tracker] Run failed: CI - main",
             "notifications@github.com",
         )
-
-    def test_digest_subject_with_content_is_short_circuited(self, db_manager, mock_settings):
-        """Regression for production opportunities.id=53 (Flender): the daily
-        digest's own subject, when it has actionable content (new drives /
-        OA-tomorrow counts), used to be built as e.g. "3 New Drives | 1 OA
-        Tomorrow" by digest_generator._build_subject -- a string that starts
-        with neither of the two self-mail prefixes runner.py checks for, so a
-        digest re-delivered to the monitored inbox slipped past
-        _is_self_generated_mail and got re-extracted as a brand-new placement
-        email. Gemini then had to invent an oa_date from the digest's own
-        "OA Tomorrow" summary text with no real drive body behind it, and
-        produced an implausible year (2023) for what should have been the
-        already-correctly-tracked 2026 Flender interview -- creating a bogus
-        duplicate drive row. digest_generator._build_subject now always
-        prefixes with "Placement Mail Tracker" (matching the existing
-        failure-streak alert convention) so this class of subject is caught
-        by the sender-independent subject-prefix fallback below.
-        """
-        from placement_mail_tracker.scheduler.digest_generator import _build_subject
-
-        now = datetime(2026, 7, 8, 8, 0, 0)
-        new_opps = [{"company_name": "Flender"}]
-        upcoming_events = [
-            {"oa_date": "2026-07-09", "interview_date": None, "next_event_date": None}
-        ]
-        subject = _build_subject([], new_opps, upcoming_events, now)
-
-        # The exact reconstructed-bug subject from production, with the fix
-        # applied, must now short-circuit before extraction -- regardless of
-        # the sender used, since a mail-forwarding rule (or historical
-        # smtp_email misconfiguration) can rewrite the sender the tracker
-        # actually sees.
-        stats, msg_id = self._process(
-            db_manager, mock_settings, subject, "someone-else@example.com",
-        )
-        assert stats["skipped"] == 1
-        row = db_manager.connection.execute(
-            "SELECT processed_status FROM processed_emails WHERE gmail_message_id = ?",
-            (msg_id,),
-        ).fetchone()
-        assert row["processed_status"] == "SELF_NOISE"
 
     def test_normal_cdc_mail_is_untouched(self, db_manager, mock_settings):
         runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)

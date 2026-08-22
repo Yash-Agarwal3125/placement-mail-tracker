@@ -17,9 +17,6 @@ import pytest
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.extraction.confirmation import CONFIRMATION_SENDER
 from placement_mail_tracker.gmail.filters import calculate_relevance_score
-from placement_mail_tracker.scheduler.confirmation_digest_store import (
-    pop_pending_confirmation_lines,
-)
 from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
 
 
@@ -28,15 +25,6 @@ def _stats() -> dict[str, int]:
         "processed": 0, "skipped": 0, "errors": 0,
         "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
     }
-
-
-@pytest.fixture(autouse=True)
-def _isolate_confirmation_digest_file(tmp_path, monkeypatch):
-    from placement_mail_tracker.scheduler import confirmation_digest_store
-
-    monkeypatch.setattr(
-        confirmation_digest_store, "_FLAGS_FILE", tmp_path / "confirmation_digest.json"
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -79,8 +67,6 @@ class TestConfirmationRunnerIntegration:
         assert row["my_status"] == "NOT_APPLIED"
         assert stats["created"] == 0
         assert stats["processed"] == 1
-        lines = pop_pending_confirmation_lines()
-        assert any("would have marked Resmed APPLIED" in line for line in lines)
 
     def test_enforce_mode_confirmed_tier_writes_applied(
         self, db_manager, mock_settings, sample_opportunity
@@ -121,8 +107,6 @@ class TestConfirmationRunnerIntegration:
 
         row = db_manager.fetch_opportunity_by_id(opp_id)
         assert row["my_status"] == "NOT_APPLIED"
-        lines = pop_pending_confirmation_lines()
-        assert any("unrecognized phrasing" in line for line in lines)
 
     def test_no_confident_match_is_persisted_and_surfaced(self, db_manager, mock_settings):
         settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
@@ -138,8 +122,6 @@ class TestConfirmationRunnerIntegration:
         unmatched = db_manager.fetch_unmatched_confirmations()
         assert len(unmatched) == 1
         assert unmatched[0]["gmail_message_id"] == "conf_4"
-        lines = pop_pending_confirmation_lines()
-        assert any("no confident drive match" in line for line in lines)
 
     def test_duplicate_confirmation_is_a_noop(self, db_manager, mock_settings, sample_opportunity):
         """D6: a second, differently-ID'd confirmation for the same drive
@@ -286,8 +268,6 @@ class TestPhase6SubjectResolvedConfirmations:
         ).fetchone()
         assert row is not None
         assert row["my_status"] == "NOT_APPLIED"
-        lines = pop_pending_confirmation_lines()
-        assert any("would have marked Accenture APPLIED" in line for line in lines)
 
     def test_attaches_to_existing_single_active_candidate_not_creates(
         self, db_manager, mock_settings, sample_opportunity
