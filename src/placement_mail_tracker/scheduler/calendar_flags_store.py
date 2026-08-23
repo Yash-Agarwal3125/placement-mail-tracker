@@ -35,6 +35,17 @@ def pop_pending_calendar_flags() -> list[str]:
     return lines
 
 
+def peek_pending_calendar_flags() -> list[str]:
+    """Return pending anomaly lines without clearing them.
+
+    The digest that used to call ``pop_pending_calendar_flags`` was removed
+    along with the Sheets/email-digest feature, so flags written here
+    otherwise accumulate with nothing ever reading them back -- this is the
+    non-destructive read a diagnostic/reporting tool should use instead.
+    """
+    return _read()
+
+
 def _read() -> list[str]:
     try:
         if _FLAGS_FILE.exists():
