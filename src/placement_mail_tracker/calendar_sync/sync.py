@@ -21,7 +21,12 @@ from placement_mail_tracker.calendar_sync.client import (
     CalendarEventGoneError,
     GoogleCalendarClient,
 )
-from placement_mail_tracker.calendar_sync.derive import CalendarEvent, derive_events
+from placement_mail_tracker.calendar_sync.derive import (
+    CalendarEvent,
+    derive_events,
+    is_deadline_gated_out,
+    is_round_excluded,
+)
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.db.manager import DatabaseManager
 from placement_mail_tracker.utils.time import utc_now_iso
@@ -448,11 +453,19 @@ class CalendarSyncEngine:
         and only some of them are safe to act on without a human. When the
         round is confidently no longer relevant -- the drive was
         reclassified as a non-placement `drive_kind`, `eligibility_status`
-        says NOT_ELIGIBLE, or a roster explicitly returned `NOT_MATCHED` for
-        this specific round -- the Google event is actually deleted (by
-        explicit user choice; this overrides the module's original
-        never-delete stance, ADR Decision 2 / doc 15 §5.3 -- see
-        ``_delete_and_freeze``). Any other cause (a genuinely missing date,
+        says NOT_ELIGIBLE, a roster returned `NOT_MATCHED` for this round
+        directly *or* for an earlier round of the same drive (Cause 2 /
+        Phase 3's cascade, via ``derive.is_round_excluded`` -- the same
+        resolver ``derive_events`` uses, so the two passes never disagree),
+        or (Cause 5 / Phase 7) this is a DEADLINE event whose drive lost
+        demonstrated interest/HIGH priority after the event was already
+        created (via ``derive.is_deadline_gated_out`` -- again the same
+        resolver ``derive_events`` uses) -- the Google event is actually
+        deleted (by explicit user choice;
+        this overrides the module's original never-delete stance, ADR
+        Decision 2 / doc 15 §5.3 -- see ``_delete_and_freeze``). A direct
+        `MATCHED` verdict on this round always overrides an inherited
+        cascade exclusion. Any other cause (a genuinely missing date,
         an AMBIGUOUS roster verdict, or no verdict at all -- the round was
         never evaluated) keeps the original "kept as-is, flagged for
         review" behaviour unchanged. An unproven exclusion must not resolve
@@ -471,12 +484,20 @@ class CalendarSyncEngine:
             opportunity = rows_by_id.get(opportunity_id) or {}
             drive_kind = opportunity.get("drive_kind") or "PLACEMENT"
             eligibility_status = opportunity.get("eligibility_status") or ""
-            verdict_row = roster_verdicts.get(key)
-            not_matched = verdict_row is not None and verdict_row.get("verdict") == "NOT_MATCHED"
+            # Cause 2 / Phase 3: same shared resolver derive_events() uses,
+            # so a cascaded (not just direct) NOT_MATCHED excludes here too
+            # -- the two paths disagreeing is what makes an event flicker
+            # between created and deleted on alternate runs.
+            excluded_by_roster = is_round_excluded(roster_verdicts, opportunity_id, event_type)
+            # Cause 5 / Phase 7: only ever applies to the DEADLINE round --
+            # OA/INTERVIEW derivation stays governed purely by roster/
+            # eligibility (Phases 3-4), untouched here.
+            deadline_gated_out = event_type == "DEADLINE" and is_deadline_gated_out(opportunity)
             confidently_excluded = (
                 drive_kind != "PLACEMENT"
                 or "NOT_ELIGIBLE" in eligibility_status
-                or not_matched
+                or excluded_by_roster
+                or deadline_gated_out
             )
 
             if confidently_excluded:

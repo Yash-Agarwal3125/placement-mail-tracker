@@ -61,9 +61,18 @@ def _contains_id(text: str, identifier: str) -> bool:
 
 @dataclass(frozen=True)
 class RosterVerdict:
-    """One of the three outcomes doc 15 §3.3 allows -- no fourth option."""
+    """One of four outcomes (docs/design/16 Cause 3 extends doc 15 §3.3's
+    original three): AMBIGUOUS now means specifically "roster-shaped content
+    was found and evaluated, but the match was uncertain" -- kept because it
+    genuinely might be the student. NO_ROSTER means nothing roster-shaped was
+    found at all (empty text, an unreadable attachment, or a roster with no
+    IDs and no name-worthy match); it must fall back to ordinary eligibility
+    gating rather than acting as a free pass. Precedence:
+    MATCHED > NOT_MATCHED > AMBIGUOUS > NO_ROSTER, non-downgrading -- see
+    ``db.manager.upsert_roster_verdict``.
+    """
 
-    verdict: str  # "MATCHED" | "NOT_MATCHED" | "AMBIGUOUS"
+    verdict: str  # "MATCHED" | "NOT_MATCHED" | "AMBIGUOUS" | "NO_ROSTER"
     method: str  # "registration_no" | "codename" | "name_fuzzy" | "none"
     score: float | None = None
 
@@ -93,16 +102,25 @@ def _best_name_score(text: str, full_name: str) -> tuple[float, bool] | None:
 def verify_roster(roster_text: str, profile: UserProfile) -> RosterVerdict:
     """Determine whether ``profile``'s student appears on this roster.
 
-    The hard rule (doc 15 §3.3): AMBIGUOUS must never resolve toward
-    MATCHED, and NOT_MATCHED is only assertable when the roster
+    The hard rule (doc 15 §3.3): AMBIGUOUS/NO_ROSTER must never resolve
+    toward MATCHED, and NOT_MATCHED is only assertable when the roster
     demonstrably parsed -- at least one registration number *or* Neo ID was
     found on it somewhere. A roster that yields zero IDs of either kind
-    proves nothing about this student's absence; that is AMBIGUOUS, not
-    NOT_MATCHED. (Real VIT rosters checked while building this were
-    exclusively Neo-ID lists -- registration numbers never actually
-    appeared -- so treating only _REG_NO_RE as "the roster parsed" silently
-    downgraded every real NOT_MATCHED case to AMBIGUOUS; fixed by checking
-    both.)
+    proves nothing about this student's absence; that is AMBIGUOUS or
+    NO_ROSTER, not NOT_MATCHED. (Real VIT rosters checked while building
+    this were exclusively Neo-ID lists -- registration numbers never
+    actually appeared -- so treating only _REG_NO_RE as "the roster parsed"
+    silently downgraded every real NOT_MATCHED case to AMBIGUOUS; fixed by
+    checking both.)
+
+    docs/design/16 Cause 3 further splits the old catch-all AMBIGUOUS: when
+    no ID is found but a name-worthy candidate came close (cleared the score
+    threshold without a clear uniqueness margin), that is AMBIGUOUS -- the
+    roster genuinely parsed and this genuinely might be the student. When
+    nothing roster-shaped was found at all (empty text, an unreadable
+    attachment, or no name worth reporting), that is NO_ROSTER -- absence of
+    evidence, not evidence of anything, and callers must not treat it as a
+    free pass.
     """
     if not profile.is_identity_verified():
         # Doc 15 §3.1: matching against an unverified identity could assert
@@ -130,4 +148,19 @@ def verify_roster(roster_text: str, profile: UserProfile) -> RosterVerdict:
     if _NEO_ID_RE.search(upper_text):
         return RosterVerdict("NOT_MATCHED", "codename", None)
 
-    return RosterVerdict("AMBIGUOUS", "none")
+    # The roster demonstrably parsed (it had at least one name-worthy line to
+    # compare against) and the name match cleared the threshold but not the
+    # uniqueness margin -- two similarly-named candidates. That is a genuine
+    # "might be you" ambiguity, not an absence of evidence (docs/design/16
+    # Cause 3): keep it AMBIGUOUS, distinct from the no-roster-at-all case
+    # below.
+    if name_match is not None:
+        best_score, _margin_clear = name_match
+        if best_score >= ROSTER_NAME_THRESHOLD:
+            return RosterVerdict("AMBIGUOUS", "name_fuzzy", best_score)
+
+    # Nothing roster-shaped was found at all -- no registration number, no
+    # Neo ID, and no name match worth reporting. This proves nothing about
+    # the student's presence/absence and must not be treated as "might be
+    # you" (docs/design/16 Cause 3).
+    return RosterVerdict("NO_ROSTER", "none")

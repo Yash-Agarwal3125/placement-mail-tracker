@@ -16,7 +16,6 @@ from google.auth.exceptions import RefreshError
 
 from placement_mail_tracker.gmail.gmail_client import GmailAuthenticationError, GmailClient
 from placement_mail_tracker.reliability import auth_alerts
-from placement_mail_tracker.sheets.sheets_sync import GoogleSheetsSync, SheetsAuthenticationError
 
 
 @pytest.fixture(autouse=True)
@@ -62,34 +61,6 @@ class TestGmailRefreshWrapping:
              patch("placement_mail_tracker.gmail.gmail_client.InstalledAppFlow") as flow_cls:
             with pytest.raises(GmailAuthenticationError, match="not interactive"):
                 client.authenticate()
-            flow_cls.from_client_secrets_file.assert_not_called()
-
-
-class TestSheetsRefreshWrapping:
-    def test_refresh_error_raises_typed_auth_error(self, mock_settings, tmp_path):
-        sync = GoogleSheetsSync(mock_settings)
-        sync.token_path = tmp_path / "token.json"
-        creds = _expired_credentials()
-        creds.refresh.side_effect = RefreshError("invalid_grant")
-
-        with patch.object(GoogleSheetsSync, "_load_token", return_value=creds):
-            with pytest.raises(SheetsAuthenticationError, match="OAuth dead"):
-                sync.authenticate()
-
-    def test_no_token_non_interactive_fails_fast_without_local_server(
-        self, mock_settings, tmp_path
-    ):
-        sync = GoogleSheetsSync(mock_settings)
-        sync.token_path = tmp_path / "token.json"
-        sync.credentials_path = tmp_path / "credentials.json"
-        sync.credentials_path.write_text("{}", encoding="utf-8")
-
-        isatty_target = "placement_mail_tracker.sheets.sheets_sync.sys.stdin.isatty"
-        with patch.object(GoogleSheetsSync, "_load_token", return_value=None), \
-             patch(isatty_target, return_value=False), \
-             patch("placement_mail_tracker.sheets.sheets_sync.InstalledAppFlow") as flow_cls:
-            with pytest.raises(SheetsAuthenticationError, match="not interactive"):
-                sync.authenticate()
             flow_cls.from_client_secrets_file.assert_not_called()
 
 

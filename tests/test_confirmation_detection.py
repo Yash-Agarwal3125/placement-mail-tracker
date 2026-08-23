@@ -11,6 +11,7 @@ from __future__ import annotations
 from placement_mail_tracker.extraction.confirmation import (
     CONFIRMATION_SENDER,
     detect_confirmation_tier,
+    extract_company_from_confirmation_subject,
     extract_reference_id,
     find_confident_drive_match,
     is_confirmation_sender,
@@ -264,3 +265,67 @@ class TestFindConfidentDriveMatch:  # SYNTHETIC fixtures
         match, candidates = find_confident_drive_match("Confirmation", body, opps)
         assert match is not None
         assert match.opportunity["company_name"] == "Resmed"
+
+
+class TestExtractCompanyFromConfirmationSubject:
+    """Phase 6 (calendar-drift remediation plan, Cause 7): these four
+    phrasings are the REAL live-Gmail VIT CDC confirmation subjects observed
+    in production, unlike the rest of this file's synthetic fixtures."""
+
+    def test_eligible_for_placement_drive(self):
+        assert (
+            extract_company_from_confirmation_subject(
+                "Congratulations! You're Eligible for Honeywell Aerospace Placement Drive"
+            )
+            == "Honeywell Aerospace"
+        )
+
+    def test_confirmed_registration_for_no_suffix(self):
+        assert (
+            extract_company_from_confirmation_subject(
+                "Confirmed: Your Registration for Honeywell Aerospace"
+            )
+            == "Honeywell Aerospace"
+        )
+
+    def test_confirmed_registration_for_placement_drive_suffix(self):
+        assert (
+            extract_company_from_confirmation_subject(
+                "Confirmed: Your Registration for Accenture Placement Drive"
+            )
+            == "Accenture"
+        )
+
+    def test_date_change_for_placement_drive(self):
+        assert (
+            extract_company_from_confirmation_subject(
+                "Important: Date Change for Honeywell Placement Drive"
+            )
+            == "Honeywell"
+        )
+
+    def test_updated_optional_form_available(self):
+        assert (
+            extract_company_from_confirmation_subject(
+                "Updated Optional Form Available - Accenture Drive"
+            )
+            == "Accenture"
+        )
+
+    def test_no_recognized_phrase_returns_none(self):
+        assert extract_company_from_confirmation_subject("Application Confirmation") is None
+        assert extract_company_from_confirmation_subject("Confirmation") is None
+
+    def test_blank_subject_returns_none(self):
+        assert extract_company_from_confirmation_subject("") is None
+        assert extract_company_from_confirmation_subject(None) is None
+
+    def test_rejected_junk_token_returns_none(self):
+        """docs/design/16 Cause 6/7 interaction: a company candidate that
+        normalizes to a rejected junk token must not slip through as a real
+        company name just because it followed a recognized confirmation
+        phrase."""
+        assert (
+            extract_company_from_confirmation_subject("Confirmed: Your Registration for Location")
+            is None
+        )

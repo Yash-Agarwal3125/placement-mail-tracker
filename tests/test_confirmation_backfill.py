@@ -33,15 +33,6 @@ def _write_fixture(corpus_dir: Path, message_id: str, subject: str, body: str) -
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_confirmation_digest_file(tmp_path, monkeypatch):
-    from placement_mail_tracker.scheduler import confirmation_digest_store
-
-    monkeypatch.setattr(
-        confirmation_digest_store, "_FLAGS_FILE", tmp_path / "confirmation_digest.json"
-    )
-
-
 @pytest.fixture()
 def corpus_dir(tmp_path, monkeypatch):
     directory = tmp_path / "confirmations"

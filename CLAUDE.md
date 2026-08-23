@@ -7,8 +7,8 @@ This file orients any engineer (human or AI) working in this repository.
 A **zero-touch, one-shot batch job** that a Windows Task Scheduler runs every few
 hours. Each run: reads recent Gmail → filters placement/internship mail →
 extracts structured fields (rules first, Gemini only when needed) → stores
-drive-centric records in SQLite → syncs active drives to Google Sheets → sends
-email digests/alerts → records health/heartbeat state.
+drive-centric records in SQLite → syncs active drives to Google Calendar →
+records health/heartbeat state.
 
 It must survive being run unattended for months on a personal machine.
 
@@ -22,7 +22,7 @@ It must survive being run unattended for months on a personal machine.
    (`RuleExtractionResult.needs_gemini`).
 5. **Optimise for long, unsupervised operation.** Fail soft, log clearly,
    never wedge.
-6. **Minimise operational cost** (Gemini tokens, Sheets API calls, disk I/O).
+6. **Minimise operational cost** (Gemini tokens, Calendar API calls, disk I/O).
 7. **Preserve existing behaviour** unless there is a compelling, justified reason
    to change it. Favour incremental change over rewrites.
 8. **Every behavioural change keeps the test suite green** (`python -m pytest`).
@@ -43,10 +43,8 @@ utils/deduplication.py       fuzzy duplicate detection (rapidfuzz)
 utils/scoring.py             priority (HIGH/MEDIUM/LOW)
 db/manager.py                DatabaseManager: the real schema + all queries
 db/connection.py             sqlite connection factory (WAL)
-sheets/sheets_sync.py        Google Sheets sync + formatting
 calendar_sync/               Google Calendar sync (client/derive/sync); opt-in via
                               CALENDAR_SYNC_ENABLED, see docs/design/03-adr-calendar-sync.md
-scheduler/digest_generator.py / alert_generator.py  email digests + deadline/event alerts
 reliability/                 status report, health (failure streak), heartbeat
 reliability/auth_alerts.py   one-shot SMTP alert when an OAuth token stack goes dead
 utils/lock_manager.py        single-instance lock (PID liveness)
@@ -73,14 +71,6 @@ free text and parsed with `utils.time.parse_datetime_flexible` — never assume 
 - The Gmail fetch window (`data/fetch_state.json`) only advances when the fetch
   **succeeds**, so a transient Gmail outage never silently drops emails.
 - Keep per-email logging at `DEBUG`; one concise `INFO` summary per email is enough.
-- `ACTIVE_OPP_HEADERS` defines the Active/Filtered sheet layout and is asserted by
-  tests — change with care. The sheet is decision-first and human-readable:
-  dates are rendered in local time as text (forced via a leading apostrophe in
-  `_force_text` so Sheets doesn't re-localise them), enums get friendly labels,
-  and the internal `Drive ID` is the **last** column (`ACTIVE_KEY_INDEX`), used
-  as the row dedupe key.
-- `My Status` is **user-owned** (`ACTIVE_USER_COLUMNS`): the sync preserves the
-  value already in the sheet and must never overwrite it from the DB.
 - Eligibility filtering needs `config/user_profile.json`; `UserProfile.load`
   warns and falls back to a default if it's missing.
 

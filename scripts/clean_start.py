@@ -6,7 +6,6 @@ Clears:
   - fetch_state.json  -> today (so next run picks up only new mail)
   - heartbeat.json    -> clean slate
   - system_health.json -> clean slate
-  - Google Sheets     -> all tabs cleared
 
 Keeps:
   - trusted_senders.json (learned filter config, not data)
@@ -44,7 +43,6 @@ def _confirm() -> bool:
     print("This will permanently delete ALL placement data:")
     print(f"  Database : {DB_PATH}")
     print(f"  State    : fetch_state, heartbeat, system_health")
-    print(f"  Sheets   : all tabs will be cleared")
     print(f"  Kept     : trusted_senders.json, config/, logs/")
     answer = input("\nType YES to continue: ").strip()
     return answer == "YES"
@@ -113,42 +111,6 @@ def _reset_state_files(today_iso: str) -> None:
     print("  [STATE] system_health.json -> reset")
 
 
-def _clear_sheets() -> None:
-    try:
-        from placement_mail_tracker.config.settings import Settings
-        from placement_mail_tracker.sheets.sheets_sync import GoogleSheetsSync
-
-        settings = Settings()
-        if not settings.google_sheet_id:
-            print("  [SHEETS] GOOGLE_SHEET_ID not set — skipping.")
-            return
-
-        sync = GoogleSheetsSync(settings)
-        service = sync._get_service()
-        values = service.spreadsheets().values()
-
-        tabs = [
-            "ACTION REQUIRED",
-            "ALL DRIVES",
-            "MY APPLICATIONS",
-            "UPCOMING EVENTS",
-            "Company History",
-            "Dashboard",
-        ]
-        for tab in tabs:
-            try:
-                values.clear(
-                    spreadsheetId=settings.google_sheet_id,
-                    range=f"'{tab}'",
-                ).execute()
-                print(f"  [SHEETS] '{tab}' cleared")
-            except Exception as e:
-                print(f"  [SHEETS] '{tab}' — could not clear: {e}")
-    except Exception as e:
-        print(f"  [SHEETS] Error connecting to Sheets API: {e}")
-        print("  [SHEETS] Run `python main.py` once to clear the sheet via normal sync.")
-
-
 def main() -> None:
     skip_confirm = "--yes" in sys.argv
     if not skip_confirm and not _confirm():
@@ -162,9 +124,6 @@ def main() -> None:
 
     print("\nResetting state files...")
     _reset_state_files(today_iso)
-
-    print("\nClearing Google Sheets...")
-    _clear_sheets()
 
     print("\nDone. Run `python main.py` to start fresh from today.")
 

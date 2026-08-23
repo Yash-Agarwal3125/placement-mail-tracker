@@ -55,7 +55,7 @@ def test_timed_oa_event_has_offset_and_one_hour_duration(mock_settings):
 
 
 def test_date_only_deadline_is_all_day(mock_settings):
-    opp = _opp(deadline="15 June 2026")
+    opp = _opp(deadline="15 June 2026", my_status="APPLIED")
     events, anomalies = derive_events([opp], mock_settings)
 
     deadline_events = [e for e in events if e.event_type == "DEADLINE"]
@@ -87,7 +87,10 @@ def test_bare_year_and_out_of_range_date_produce_no_event_and_anomaly(mock_setti
     assert len(anomalies) == 2
 
 
-def test_applied_only_mode_gates_oa_interview_but_not_deadline(mock_settings):
+def test_applied_only_mode_gates_oa_interview_and_deadline_when_not_applied(mock_settings):
+    """calendar_sync_mode's applied_only gate is independent of, and
+    composes with, Phase 7's deadline-interest gate: a NOT_APPLIED/MEDIUM
+    drive gets nothing at all under applied_only mode."""
     settings = mock_settings.model_copy(update={"calendar_sync_mode": "applied_only"})
     opp_not_applied = _opp(
         id=1,
@@ -97,8 +100,7 @@ def test_applied_only_mode_gates_oa_interview_but_not_deadline(mock_settings):
         my_status="NOT_APPLIED",
     )
     events, _ = derive_events([opp_not_applied], settings)
-    event_types = {e.event_type for e in events}
-    assert event_types == {"DEADLINE"}
+    assert events == []
 
     opp_applied = _opp(
         id=2,
@@ -113,12 +115,17 @@ def test_applied_only_mode_gates_oa_interview_but_not_deadline(mock_settings):
 
 
 def test_all_eligible_mode_includes_oa_interview_regardless_of_my_status(mock_settings):
+    """all_eligible mode bypasses the OA/INTERVIEW my_status gate even while
+    my_status stays NOT_APPLIED -- DEADLINE is admitted here via HIGH
+    priority (Phase 7's other admission path), kept deliberately independent
+    of my_status so this test still proves the OA/INTERVIEW mode bypass."""
     settings = mock_settings.model_copy(update={"calendar_sync_mode": "all_eligible"})
     opp = _opp(
         deadline="15 June 2026",
         oa_date="17-Jun-2026 05:30 PM",
         interview_date="20-Jun-2026 10:00 AM",
         my_status="NOT_APPLIED",
+        priority="HIGH",
     )
     events, _ = derive_events([opp], settings)
     event_types = {e.event_type for e in events}
@@ -155,15 +162,18 @@ def test_non_placement_drive_kind_produces_zero_events(mock_settings):
 def test_missing_drive_kind_defaults_to_placement(mock_settings):
     """Legacy rows without drive_kind populated must keep working (backfill
     default is PLACEMENT at the DB layer; derive_events mirrors that)."""
-    opp = _opp(id=1, deadline="15 June 2026")
+    opp = _opp(id=1, deadline="15 June 2026", my_status="APPLIED")
     opp.pop("drive_kind", None)
     events, _ = derive_events([opp], mock_settings)
     assert len(events) == 1
 
 
-def test_not_matched_roster_verdict_excludes_only_that_round(mock_settings):
-    """docs/design/16 Phase D: NOT_MATCHED for OA must not also hide
-    INTERVIEW -- round independence is the whole point."""
+def test_not_matched_roster_verdict_cascades_to_later_round(mock_settings):
+    """Cause 2 / Phase 3: selection is a ladder -- a NOT_MATCHED verdict at
+    OA now cascades forward and also suppresses INTERVIEW, since you cannot
+    reach round n+1 of a drive you were cut from at round n (this replaces
+    the old "round independence" behaviour, which was itself the Flipkart
+    opp 22 bug: OA excluded but INTERVIEW still derived)."""
     opp = _opp(oa_date="17-Jun-2026 05:30 PM", interview_date="20-Jun-2026", my_status="APPLIED")
     verdicts = {
         (1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"},
@@ -171,8 +181,32 @@ def test_not_matched_roster_verdict_excludes_only_that_round(mock_settings):
     events, _ = derive_events([opp], mock_settings, verdicts)
     types = {e.event_type for e in events}
     assert "OA" not in types
-    assert "INTERVIEW" in types
+    assert "INTERVIEW" not in types
     assert "DEADLINE" not in types  # no deadline set on this fixture
+
+
+def test_direct_matched_at_later_round_overrides_inherited_exclusion(mock_settings):
+    """The "shortlisted after all" correction path: a direct MATCHED at
+    INTERVIEW wins over an inherited NOT_MATCHED-at-OA exclusion."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", interview_date="20-Jun-2026", my_status="APPLIED")
+    verdicts = {
+        (1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"},
+        (1, "INTERVIEW"): {"verdict": "MATCHED", "method": "registration_no"},
+    }
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    types = {e.event_type for e in events}
+    assert "OA" not in types
+    assert "INTERVIEW" in types
+
+
+def test_not_matched_at_oa_does_not_exclude_oa_itself_twice_or_error(mock_settings):
+    """A NOT_MATCHED verdict on the earliest round only has itself to
+    exclude directly -- no earlier round exists, so the cascade loop is a
+    no-op and this must not raise."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    verdicts = {(1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"}}
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    assert not any(e.event_type == "OA" for e in events)
 
 
 def test_ambiguous_roster_verdict_does_not_exclude(mock_settings):
@@ -192,8 +226,8 @@ def test_no_roster_verdict_at_all_does_not_exclude(mock_settings):
 
 
 def test_collision_guard_drops_higher_opportunity_id(mock_settings):
-    opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026")
-    opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026")
+    opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026", my_status="APPLIED")
+    opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026", my_status="APPLIED")
     events, anomalies = derive_events([opp1, opp2], mock_settings)
 
     deadline_events = [e for e in events if e.event_type == "DEADLINE"]
@@ -201,6 +235,60 @@ def test_collision_guard_drops_higher_opportunity_id(mock_settings):
     assert deadline_events[0].opportunity_id == 1
     assert len(anomalies) == 1
     assert "opportunity_id=2" in anomalies[0]
+
+
+class TestDeadlineGatedOnDemonstratedInterest:
+    """Phase 7 (calendar-drift remediation plan, Cause 5): a DEADLINE event
+    is only emitted when my_status shows engagement (not NOT_APPLIED) or the
+    drive is HIGH priority -- fixes the Spense complaint specifically (an
+    ELIGIBLE, NOT_APPLIED, MEDIUM-priority drive with no evidence of
+    registration should not get a calendar deadline)."""
+
+    def test_not_applied_medium_priority_gets_no_deadline_event(self, mock_settings):
+        opp = _opp(deadline="15 June 2026", my_status="NOT_APPLIED", priority="MEDIUM")
+        events, anomalies = derive_events([opp], mock_settings)
+        assert events == []
+        assert anomalies == []
+
+    def test_high_priority_gets_deadline_event_despite_not_applied(self, mock_settings):
+        opp = _opp(deadline="15 June 2026", my_status="NOT_APPLIED", priority="HIGH")
+        events, _ = derive_events([opp], mock_settings)
+        deadline_events = [e for e in events if e.event_type == "DEADLINE"]
+        assert len(deadline_events) == 1
+
+    def test_applied_gets_deadline_event_even_at_medium_priority(self, mock_settings):
+        opp = _opp(deadline="15 June 2026", my_status="APPLIED", priority="MEDIUM")
+        events, _ = derive_events([opp], mock_settings)
+        deadline_events = [e for e in events if e.event_type == "DEADLINE"]
+        assert len(deadline_events) == 1
+
+    def test_shortlisted_and_selected_also_count_as_demonstrated_interest(self, mock_settings):
+        for status in ("SHORTLISTED", "SELECTED"):
+            opp = _opp(deadline="15 June 2026", my_status=status, priority="LOW")
+            events, _ = derive_events([opp], mock_settings)
+            deadline_events = [e for e in events if e.event_type == "DEADLINE"]
+            assert len(deadline_events) == 1, f"expected a deadline event for {status}"
+
+    def test_missing_my_status_treated_as_not_applied(self, mock_settings):
+        opp = _opp(deadline="15 June 2026", priority="LOW")
+        opp.pop("my_status", None)
+        events, _ = derive_events([opp], mock_settings)
+        assert events == []
+
+    def test_oa_and_interview_derivation_unaffected_by_deadline_gate(self, mock_settings):
+        """OA/INTERVIEW gating must stay governed purely by the existing
+        roster/eligibility (calendar_sync_mode) logic -- untouched here."""
+        settings = mock_settings.model_copy(update={"calendar_sync_mode": "all_eligible"})
+        opp = _opp(
+            oa_date="17-Jun-2026 05:30 PM",
+            interview_date="20-Jun-2026 10:00 AM",
+            my_status="NOT_APPLIED",
+            priority="LOW",
+        )
+        events, _ = derive_events([opp], settings)
+        event_types = {e.event_type for e in events}
+        assert event_types == {"OA", "INTERVIEW"}
+        assert "DEADLINE" not in event_types
 
 
 def test_content_hash_stable_and_changes_with_fields():

@@ -79,22 +79,20 @@ def test_validate_directory_auto_creation(tmp_path: Path):
 def test_run_all_checks_healthy(monkeypatch, tmp_path: Path):
     # Setup mock env so all checks pass
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setenv("GOOGLE_SHEET_ID", "fake_id")
-    
+
     # Create fake files
     env_file = tmp_path / ".env"
     env_file.touch()
-    
+
     creds_file = tmp_path / "credentials.json"
     creds_file.touch()
-    
+
     db_file = tmp_path / "placements.db"
     db_file.touch()
 
     # Modify settings instance to point to our temp paths
     settings = Settings(DATABASE_URL=f"sqlite:///{db_file}")
-    settings.google_sheets_credentials_file = str(creds_file)
-    
+
     validator = ConfigValidator(settings)
     
     # Patch the .env check path specifically
@@ -122,8 +120,6 @@ def test_production_validation_requires_oauth_files(tmp_path: Path):
         DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
         GMAIL_CREDENTIALS_FILE=str(tmp_path / "missing_gmail_credentials.json"),
         GMAIL_TOKEN_FILE=str(tmp_path / "missing_gmail_token.json"),
-        GOOGLE_SHEETS_CREDENTIALS_FILE=str(tmp_path / "missing_sheets_credentials.json"),
-        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "missing_sheets_token.json"),
     )
     validator = ConfigValidator(settings)
 
@@ -131,7 +127,6 @@ def test_production_validation_requires_oauth_files(tmp_path: Path):
 
     assert validator.is_healthy() is False
     assert any(result.component == "gmail" for result in validator.errors())
-    assert any(result.component == "sheets" for result in validator.errors())
 
 
 def test_development_validation_warns_for_missing_oauth_files(tmp_path: Path):
@@ -140,8 +135,6 @@ def test_development_validation_warns_for_missing_oauth_files(tmp_path: Path):
         DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
         GMAIL_CREDENTIALS_FILE=str(tmp_path / "missing_gmail_credentials.json"),
         GMAIL_TOKEN_FILE=str(tmp_path / "missing_gmail_token.json"),
-        GOOGLE_SHEETS_CREDENTIALS_FILE=str(tmp_path / "missing_sheets_credentials.json"),
-        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "missing_sheets_token.json"),
     )
     validator = ConfigValidator(settings)
 
@@ -173,8 +166,6 @@ def test_calendar_token_missing_is_warning_not_error(tmp_path: Path):
         DATABASE_URL=f"sqlite:///{tmp_path / 'tracker.db'}",
         GMAIL_CREDENTIALS_FILE=str(creds_file),
         GMAIL_TOKEN_FILE=str(tmp_path / "gmail_token.json"),
-        GOOGLE_SHEETS_CREDENTIALS_FILE=str(creds_file),
-        GOOGLE_SHEETS_TOKEN_FILE=str(tmp_path / "sheets_token.json"),
         CALENDAR_SYNC_ENABLED=True,
         CALENDAR_TOKEN_FILE=str(tmp_path / "missing_calendar_token.json"),
     )

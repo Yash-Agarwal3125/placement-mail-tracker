@@ -59,6 +59,84 @@ _EVENT_LABELS: dict[str, str] = {
     "INTERVIEW": "Interview",
 }
 
+# Cause 2 / Phase 3 (calendar-drift remediation, "Round verdicts don't
+# cascade forward"): selection is a ladder -- you cannot reach round n+1 of
+# a drive you were cut from at round n. OFFER is included as a possible
+# *source* round (e.g. a manually-asserted verdict) even though it is not a
+# CalendarEvent.event_type on its own; is_round_excluded tolerates being
+# asked about a round outside this tuple (DEADLINE) by returning False.
+ROUND_ORDER: tuple[str, ...] = ("OA", "INTERVIEW", "OFFER")
+
+
+def is_round_excluded(
+    roster_verdicts: dict[tuple[int, str], dict[str, Any]],
+    opportunity_id: int | None,
+    round_name: str,
+) -> bool:
+    """Single shared resolver for "is this drive/round excluded?".
+
+    Used by both ``derive_events`` and ``calendar_sync/sync.py``'s
+    ``_null_date_pass`` so the two never disagree -- disagreement is what
+    makes an event flicker between created and deleted on alternate runs.
+
+    Contract:
+    - A direct ``MATCHED`` verdict at ``round_name`` itself always wins
+      (revocable exclusion -- the "shortlisted after all" correction path).
+    - A direct ``NOT_MATCHED`` verdict at ``round_name`` excludes it.
+    - Otherwise, a ``NOT_MATCHED`` verdict at any *earlier* round of the
+      same drive (per ``ROUND_ORDER``) excludes it too (the cascade).
+    - Any other case (no verdict, ``AMBIGUOUS``, ``NO_ROSTER``) does not
+      exclude -- unproven exclusion must not resolve toward "hidden".
+    - A ``round_name`` outside ``ROUND_ORDER`` (e.g. ``DEADLINE``) is never
+      roster-gated and always returns False.
+    """
+    if round_name not in ROUND_ORDER or opportunity_id is None:
+        return False
+
+    direct = roster_verdicts.get((opportunity_id, round_name))
+    if direct is not None:
+        verdict = direct.get("verdict")
+        if verdict == "MATCHED":
+            return False
+        if verdict == "NOT_MATCHED":
+            return True
+
+    idx = ROUND_ORDER.index(round_name)
+    for earlier_round in ROUND_ORDER[:idx]:
+        earlier = roster_verdicts.get((opportunity_id, earlier_round))
+        if earlier is not None and earlier.get("verdict") == "NOT_MATCHED":
+            return True
+
+    return False
+
+
+def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
+    """Cause 5 / Phase 7 (calendar-drift remediation plan): True when a
+    DEADLINE event for ``opp`` must NOT be admitted.
+
+    A DEADLINE event is only useful once there's a reason to care about this
+    specific drive -- otherwise nearly every ELIGIBLE posting mints an
+    "Apply by" entry regardless of interest (over half the calendar in the
+    observed case). Gate on demonstrated interest (any ``my_status`` other
+    than NOT_APPLIED -- APPLIED/SHORTLISTED/SELECTED/REJECTED all mean the
+    user actually engaged) OR HIGH priority. Everything else is still
+    covered by the digest mail, just not the calendar.
+
+    Shared by ``derive_events`` (new events) and ``calendar_sync/sync.py``'s
+    ``_null_date_pass`` (an already-existing event whose drive later loses
+    interest/priority) so the two never disagree -- disagreement here would
+    mean a gated-out DEADLINE's Google event is never actually deleted, only
+    flagged forever as "date became empty" (the same class of flicker/
+    permanent-anomaly bug ``is_round_excluded`` exists to prevent for OA/
+    INTERVIEW). Deliberately does not touch OA/INTERVIEW gating -- those stay
+    governed purely by the existing roster/eligibility logic from Phases 3-4.
+    """
+    demonstrated_interest = (opp.get("my_status") or "NOT_APPLIED") not in (
+        "NOT_APPLIED", "", None,
+    )
+    priority_high = (opp.get("priority") or "").upper() == "HIGH"
+    return not (demonstrated_interest or priority_high)
+
 
 def _is_identifiable_company(name: str | None) -> bool:
     """Return True when ``name`` is a real company (not blank/Unknown)."""
@@ -201,10 +279,16 @@ def derive_events(
     keyed by (opportunity_id, event_type). A round with a stored
     ``NOT_MATCHED`` verdict is never admitted, even if it's otherwise
     eligible -- a roster explicitly said this student isn't on it for that
-    specific round. Any other case (no verdict row -- the round was never
-    evaluated, or ``AMBIGUOUS`` -- the roster didn't parse) is treated
-    exactly as today: admitted by the existing eligibility/kind/mode rules.
-    Doc 15's hard rule cuts both ways -- an unproven exclusion must not
+    specific round. Cause 2 / Phase 3: that exclusion also cascades
+    forward -- a ``NOT_MATCHED`` at an earlier round of the same drive
+    (``ROUND_ORDER`` = OA -> INTERVIEW -> OFFER) suppresses a later round
+    too, unless that later round itself has a direct ``MATCHED`` verdict
+    (see ``is_round_excluded``, shared with ``calendar_sync/sync.py``'s
+    ``_null_date_pass`` so the two never disagree). Any other case (no
+    verdict row -- the round was never evaluated, or ``AMBIGUOUS``/
+    ``NO_ROSTER`` -- the roster didn't parse) is treated exactly as today:
+    admitted by the existing eligibility/kind/mode rules. Doc 15's hard
+    rule cuts both ways -- an unproven exclusion must not
     resolve toward "hidden" any more than an unproven inclusion resolves
     toward "shortlisted".
     """
@@ -229,10 +313,15 @@ def derive_events(
 
         norm_company = normalize_company_name(opp.get("company_name"))
 
+        # Cause 5 / Phase 7: see is_deadline_gated_out's docstring. Still
+        # run the parse (and record any anomaly) regardless of the
+        # interest gate -- an unparseable deadline is a data-quality issue
+        # worth surfacing whether or not the resulting event would be shown;
+        # only the *event* itself is gated on demonstrated interest/priority.
         deadline_event = _derive_single_event(
             opp, "DEADLINE", opp.get("deadline"), settings, anomalies
         )
-        if deadline_event is not None:
+        if deadline_event is not None and not is_deadline_gated_out(opp):
             events.append(deadline_event)
             normalized_companies[(deadline_event.opportunity_id, "DEADLINE")] = norm_company
 
@@ -244,8 +333,7 @@ def derive_events(
                 ("OA", opp.get("oa_date")),
                 ("INTERVIEW", opp.get("interview_date")),
             ):
-                verdict_row = roster_verdicts.get((opp.get("id"), event_type))
-                if verdict_row is not None and verdict_row.get("verdict") == "NOT_MATCHED":
+                if is_round_excluded(roster_verdicts, opp.get("id"), event_type):
                     continue
                 event = _derive_single_event(opp, event_type, raw_date, settings, anomalies)
                 if event is not None:

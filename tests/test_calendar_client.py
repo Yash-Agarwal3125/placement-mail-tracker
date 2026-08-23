@@ -216,3 +216,46 @@ class TestScopedDeleteCapability:
 
         calendar_client.delete_event("cal_vit", "evt_missing")  # must not raise
         assert calendar_client.last_error is None
+
+
+class TestFindCalendarId:
+    """Read-only counterpart to ensure_calendar (safety-nets plan Phase 4):
+    the audit script must never create a calendar."""
+
+    def test_returns_id_when_found(self, calendar_client, fake_calendar_service):
+        fake_calendar_service.calendarList().list().execute.return_value = {
+            "items": [{"id": "cal_vit", "summary": "VIT Placements"}]
+        }
+        assert calendar_client.find_calendar_id("VIT Placements") == "cal_vit"
+
+    def test_returns_none_when_absent_and_never_creates(
+        self, calendar_client, fake_calendar_service
+    ):
+        fake_calendar_service.calendarList().list().execute.return_value = {"items": []}
+        assert calendar_client.find_calendar_id("VIT Placements") is None
+        fake_calendar_service.calendars().insert.assert_not_called()
+
+
+class TestListEvents:
+    def test_single_page(self, calendar_client, fake_calendar_service):
+        fake_calendar_service.events().list().execute.return_value = {
+            "items": [{"id": "evt_1"}, {"id": "evt_2"}]
+        }
+        events = calendar_client.list_events("cal_vit")
+        assert [e["id"] for e in events] == ["evt_1", "evt_2"]
+
+    def test_paginates_until_no_next_token(self, calendar_client, fake_calendar_service):
+        fake_calendar_service.events().list().execute.side_effect = [
+            {"items": [{"id": "evt_1"}], "nextPageToken": "page2"},
+            {"items": [{"id": "evt_2"}]},
+        ]
+        events = calendar_client.list_events("cal_vit")
+        assert [e["id"] for e in events] == ["evt_1", "evt_2"]
+
+    def test_uses_single_events_false(self, calendar_client, fake_calendar_service):
+        """Recurring-event expansion would mint per-instance ids that don't
+        match anything in calendar_events and would misreport as orphans."""
+        fake_calendar_service.events().list().execute.return_value = {"items": []}
+        calendar_client.list_events("cal_vit")
+        _, kwargs = fake_calendar_service.events().list.call_args
+        assert kwargs["singleEvents"] is False

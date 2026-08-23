@@ -40,7 +40,6 @@ class RunReport:
     finished_at: str | None = None
     database_ok: bool = True
     gmail_ok: bool = True
-    sheets_ok: bool = True
     notifications_ok: bool = True
     calendar_ok: bool = True
     critical_failure: bool = False
@@ -92,7 +91,6 @@ class RunReport:
             [
                 self.database_ok,
                 self.gmail_ok,
-                self.sheets_ok,
                 self.notifications_ok,
                 self.calendar_ok,
             ]
@@ -138,7 +136,6 @@ class RunReport:
             f"Final status: {self.status.value}",
             f"Database OK: {self.database_ok}",
             f"Gmail OK: {self.gmail_ok}",
-            f"Sheets OK: {self.sheets_ok}",
             f"Notifications OK: {self.notifications_ok}",
             f"Calendar OK: {self.calendar_ok}",
         ]

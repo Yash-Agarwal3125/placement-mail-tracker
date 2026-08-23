@@ -251,6 +251,44 @@ class GoogleCalendarClient:
 
         self._call_with_retry(_call)
 
+    def find_calendar_id(self, name: str) -> str | None:
+        """Return the calendarId whose summary == name, or None.
+
+        Read-only counterpart to ``ensure_calendar`` -- deliberately never
+        creates the calendar (safety-nets plan Phase 4: the audit script
+        this backs must never write to Google Calendar).
+        """
+        response = self._call_with_retry(
+            lambda: self._get_service().calendarList().list().execute()
+        )
+        for entry in response.get("items", []):
+            if entry.get("summary") == name:
+                return entry["id"]
+        return None
+
+    def list_events(self, calendar_id: str) -> list[dict[str, Any]]:
+        """Return every event on the calendar (read-only, paginated).
+
+        ``singleEvents=False`` deliberately -- with it True, a recurring
+        event would expand into per-instance ids that don't match anything
+        stored in ``calendar_events.gcal_event_id`` and would misreport as
+        orphans (safety-nets plan Phase 4).
+        """
+        events: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            response = self._call_with_retry(
+                lambda pt=page_token: self._get_service()
+                .events()
+                .list(calendarId=calendar_id, singleEvents=False, pageToken=pt)
+                .execute()
+            )
+            events.extend(response.get("items", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        return events
+
     def get_event(self, calendar_id: str, event_id: str) -> dict[str, Any] | None:
         """events().get; returns None on 404 (used only by rebuild).
 

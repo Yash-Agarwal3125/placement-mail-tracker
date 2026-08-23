@@ -30,9 +30,8 @@ def test_gmail_client_fetch_since(test_settings):
 @patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
 @patch("placement_mail_tracker.scheduler.runner.GmailClient")
 @patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
-@patch("placement_mail_tracker.scheduler.runner.SheetsClient")
 def test_runner_offline_recovery_reads_state(
-    mock_sheets, mock_gemini, mock_gmail, mock_db, test_settings
+    mock_gemini, mock_gmail, mock_db, test_settings
 ):
     # Create the fetch_state.json manually
     state_file = Path(test_settings.fetch_state_file)

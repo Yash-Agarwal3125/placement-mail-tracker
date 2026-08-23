@@ -167,19 +167,6 @@ class ConfigValidator:
             is_critical=strict,
             component="gmail",
         )
-        self.validate_file(
-            self.settings.google_sheets_credentials_file,
-            "Google Sheets OAuth credentials.json",
-            is_critical=strict,
-            component="sheets",
-        )
-        self.validate_file(
-            self.settings.google_sheets_token_file,
-            "Google Sheets OAuth token.json",
-            is_critical=strict,
-            component="sheets",
-        )
-        
         if self.settings.ai_provider == "groq":
             self.validate_env_var(
                 self.settings.groq_api_key,
@@ -192,12 +179,6 @@ class ConfigValidator:
                 "Gemini API Key (GEMINI_API_KEY)",
                 is_critical=strict,
             )
-        self.validate_env_var(
-            self.settings.google_sheet_id,
-            "Google Sheet ID (GOOGLE_SHEET_ID)",
-            is_critical=strict,
-            component="sheets",
-        )
         self.validate_env_var(
             self.settings.notification_email,
             "Failure Notification Email (NOTIFICATION_EMAIL)",
