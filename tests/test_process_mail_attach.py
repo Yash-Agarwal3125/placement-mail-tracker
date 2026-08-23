@@ -335,3 +335,56 @@ class TestExpiredDriveStillResolvable:
         )
         assert opp_id == seeded_id
         assert created is False
+
+
+class TestIrrelevantClassificationNeverSilentlyCreatesADuplicate:
+    """2026-08-23 audit: the 6th+ instance of the same bug class (PPT,
+    assignment-submission, bare-deadline, selection-process-scheduled,
+    selection-list, written-test) was always the same shape -- real
+    placement mail that doesn't match any pattern yet classifies
+    IRRELEVANT, which used to fall straight through to an unconditional
+    insert. This is the structural backstop: IRRELEVANT with a same-
+    company+year active drive already on file never silently creates a
+    second row, and never silently attaches either -- it's parked for
+    review, same as a genuinely ambiguous process-mail match."""
+
+    def test_irrelevant_mail_with_existing_drive_is_parked_not_duplicated(
+        self, db_manager
+    ):
+        seeded_id = _seed(db_manager, company_name="Foodhub")
+        before = db_manager.connection.execute(
+            "SELECT COUNT(*) FROM opportunities"
+        ).fetchone()[0]
+
+        incoming = {"company_name": "Foodhub", "role": "Some Unmatched Phrasing"}
+        opp_id, created = db_manager.insert_or_update_opportunity(
+            incoming,
+            source_email_id="foodhub_unrecognized_phrasing",
+            email_classification="IRRELEVANT",
+        )
+
+        after = db_manager.connection.execute(
+            "SELECT COUNT(*) FROM opportunities"
+        ).fetchone()[0]
+
+        # Not attached to the existing drive (a single match is not proof of
+        # identity for a non-process classification)...
+        assert opp_id is None
+        assert created is False
+        # ...but not duplicated either.
+        assert after == before == 1
+        assert seeded_id is not None
+
+    def test_irrelevant_mail_with_no_existing_drive_still_inserts_normally(
+        self, db_manager
+    ):
+        """No same-company+year candidate at all -- the backstop must not
+        block a genuinely unrelated insert (e.g. a script/manual entry)."""
+        incoming = {"company_name": "BrandNewCo", "role": "Something"}
+        opp_id, created = db_manager.insert_or_update_opportunity(
+            incoming,
+            source_email_id="brandnewco_entry",
+            email_classification="IRRELEVANT",
+        )
+        assert created is True
+        assert opp_id is not None

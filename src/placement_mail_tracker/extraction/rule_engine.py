@@ -256,7 +256,12 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         # a duplicate drive with no extracted date (docs/design/16
         # follow-up, 2026-08-18 and 2026-08-22).
         r"pre[\-\s]?placement\s*talk|"
-        r"\bppt\b\s*(?:is\s*)?(?:scheduled|announcement|notification|date))",
+        r"\bppt\b\s*(?:is\s*)?(?:scheduled|announcement|notification|date)|"
+        # "X written test is scheduled on ..." -- real CDC phrasing (EasyReach)
+        # that the bare "online\s*test" alternative above doesn't reach since
+        # it isn't described as "online". Found the same way as the PPT gap:
+        # classified IRRELEVANT, minted a duplicate drive (2026-08-23 audit).
+        r"written\s*test\s*(?:is\s*)?scheduled)",
         re.IGNORECASE,
     )),
     ("SHORTLIST_UPDATE", re.compile(
@@ -273,12 +278,27 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("INTERVIEW_UPDATE", re.compile(
         r"(interview\s*(scheduled|process|round|update|date)|"
         r"next\s*round|final\s*round|technical\s*interview|hr\s*round|"
-        r"group\s*discussion|gd\s*(scheduled|round))",
+        r"group\s*discussion|gd\s*(scheduled|round)|"
+        # "X selection process is scheduled on <date>" -- real, recurring CDC
+        # phrasing for an onsite test+interview day (Valuelabs, Valeo,
+        # WorkIndia, BluBridge, Novac, BorgWarner) with none of "interview"/
+        # "round"/"GD" in the subject. Anchored on "scheduled" directly next
+        # to "selection process" so a NEW_DRIVE announcement merely
+        # *describing* its selection process (no date yet) doesn't misroute
+        # here (2026-08-23 audit).
+        r"selection\s*process\s*(?:is\s*)?scheduled)",
         re.IGNORECASE,
     )),
     ("OFFER_UPDATE", re.compile(
         r"(offer\s*(letter|released|update)|final\s*selection|"
-        r"selected\s*for\s*offer|congratulations)",
+        r"selected\s*for\s*offer|congratulations|"
+        # "X Dream/PPO/Regular/Core Internship selection list" -- real,
+        # recurring CDC naming (Bosch, Flipkart, Fidas) for a results list
+        # with no "offer"/"final selection"/"congratulations" wording.
+        # Scoped to the tier vocabulary actually observed rather than a bare
+        # "selection list", to avoid sweeping in an unrelated (e.g.
+        # eligibility) "selection list" (2026-08-23 audit).
+        r"(?:dream|ppo|regular|core)\w*.{0,40}?selection\s*list)",
         re.IGNORECASE,
     )),
     ("REMINDER", re.compile(

@@ -442,12 +442,45 @@ class DatabaseManager:
                     resolved["company_name"],
                     resolved["role"],
                 )
+        elif not existing and email_classification == "IRRELEVANT":
+            # Fail-closed backstop (2026-08-23 audit) for exactly the failure
+            # class that produced the PPT/assignment/bare-deadline/selection-
+            # process/selection-list/written-test bugs: a real placement mail
+            # whose phrasing doesn't (yet) match any pattern in rule_engine's
+            # _CLASSIFICATION_PATTERNS classifies IRRELEVANT and, before this
+            # change, fell straight through to the unconditional insert below
+            # -- minting a duplicate, dateless drive instead of updating the
+            # real one. Every one of those bugs was only ever caught after
+            # the fact by re-diffing the whole historical corpus by hand.
+            #
+            # Deliberately scoped to the literal "IRRELEVANT" classification
+            # only -- NOT "any classification other than NEW_DRIVE", which
+            # also catches email_classification=None (no classification was
+            # even attempted: exercised throughout the test suite and by
+            # scripts that insert opportunities directly) and would block
+            # perfectly legitimate inserts having nothing to do with this bug
+            # class.
+            #
+            # This does NOT silently attach (an ambiguous or even a single
+            # match here is not proof the mail is a follow-up the way a
+            # genuine process classification is -- it could be a real second
+            # concurrent drive at the same company). It only ever prevents a
+            # silent create: when a same-company+year active drive already
+            # exists, park it in unmatched_confirmations for a human to
+            # decide, via the same review path §1.4-B's ambiguous case
+            # already uses, instead of minting a duplicate. A genuinely new
+            # company (no existing active row) still falls through to a
+            # normal insert below, unchanged -- this costs nothing for the
+            # overwhelming common case.
+            candidate, ambiguous_candidates = self._resolve_process_mail_target(normalized)
+            if candidate is not None:
+                ambiguous_candidates = [candidate, *ambiguous_candidates]
 
         if existing is None and ambiguous_candidates:
             candidate_ids = [c["id"] for c in ambiguous_candidates]
             logger.warning(
-                "Process mail (%s) for %r / %r matched %d active candidates "
-                "%s for the year -- not attaching to any, routing to "
+                "Mail (%s) for %r / %r matched %d active candidate(s) %s for "
+                "the year -- not attaching to any, routing to "
                 "unmatched_confirmations",
                 email_classification,
                 normalized.get("company_name"),
@@ -460,9 +493,9 @@ class DatabaseManager:
                     gmail_message_id=source_email_id,
                     extracted_text=(
                         f"{normalized.get('company_name')} / {normalized.get('role')}: "
-                        f"process mail ({email_classification}) matched "
-                        f"{len(candidate_ids)} active candidates {candidate_ids} for "
-                        "the year -- ambiguous, not attached to any."
+                        f"mail ({email_classification}) matched "
+                        f"{len(candidate_ids)} active candidate(s) {candidate_ids} for "
+                        "the year -- ambiguous or unattached, not attached to any."
                     ),
                     candidates=[dict(c) for c in ambiguous_candidates],
                 )
@@ -620,7 +653,15 @@ class DatabaseManager:
         candidates = [
             row
             for row in rows
-            if normalize_company_name(row["company_name"]) == norm_company
+            # .casefold(): normalize_company_name() preserves an all-caps
+            # single token as a presumed acronym (rule_engine._smart_title),
+            # so "GROWW" (shouting its own name, not an acronym) and "Groww"
+            # normalize to two different strings and an exact match here
+            # misses them -- confirmed live as opportunities 13/54 (2026-08-23
+            # audit). Casefolding the comparison (not the stored/display
+            # value) closes that gap without touching real acronym display.
+            if (normalize_company_name(row["company_name"]) or "").casefold()
+            == norm_company.casefold()
             and _get_year_from_opportunity(dict(row)) == year
         ]
 
