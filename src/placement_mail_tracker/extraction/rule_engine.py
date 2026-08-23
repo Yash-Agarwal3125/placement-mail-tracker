@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
 
+from placement_mail_tracker.utils.time import parse_datetime_flexible
+
 logger = logging.getLogger(__name__)
 
 # D1 (docs/design/10-confirmation-and-reminders.md): the sender gate for
@@ -577,6 +579,41 @@ def _extract_oa_date(text: str) -> str | None:
     return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}"
 
 
+# "X pre placement talk is scheduled on 24th August 2026 3.30 pm @ Anna
+# Auditorium" / "X pre placement talk is scheduled on 24.08.2026 by 11:30 am
+# at the respective venues" -- real, recurring CDC phrasing (Unilever,
+# Accenture, 2026-08-23/24). Captures the date/time fragment between
+# "scheduled on" and whichever venue-introducing phrase follows it; the
+# fragment is normalized (ordinal suffixes stripped, "H.MM am/pm" -> "H:MM
+# am/pm") and handed to parse_datetime_flexible rather than parsed by a
+# second bespoke regex, since the phrasing varies more than _OA_DATE_RE's
+# single fixed shape. A PPT date is deliberately its own field, not folded
+# into oa_date/interview_date -- neither is what actually happens at a PPT,
+# and conflating them previously meant a PPT mail's date went nowhere.
+_PPT_DATE_FRAGMENT_RE = re.compile(
+    r"pre[\-\s]?placement\s*talk\s+is\s+scheduled\s+on\s+([^\n]+?)"
+    r"(?:\s*@|\s+at\s+the\s+respective|\s+for\s+other\s+campuses|\.\s|\.$|$)",
+    re.IGNORECASE,
+)
+_ORDINAL_SUFFIX_RE = re.compile(r"(\d)(st|nd|rd|th)\b", re.IGNORECASE)
+_DOTTED_TIME_RE = re.compile(r"\b(\d{1,2})\.(\d{2})\s*([ap]m)\b", re.IGNORECASE)
+
+
+def _extract_ppt_date(text: str) -> str | None:
+    """Return an ISO-ish datetime string for a pre-placement-talk mail."""
+    match = _PPT_DATE_FRAGMENT_RE.search(text)
+    if not match:
+        return None
+    fragment = _ORDINAL_SUFFIX_RE.sub(r"\1", match.group(1))
+    fragment = _DOTTED_TIME_RE.sub(r"\1:\2 \3", fragment)
+    parsed = parse_datetime_flexible(fragment)
+    if parsed is None:
+        return None
+    if parsed.hour == 0 and parsed.minute == 0 and ":" not in fragment:
+        return parsed.strftime("%Y-%m-%d")
+    return parsed.strftime("%Y-%m-%dT%H:%M")
+
+
 # Location patterns
 _LOCATION_PATTERNS = [
     re.compile(
@@ -884,6 +921,7 @@ class RuleExtractionResult:
     stipend: str | None = None
     deadline: str | None = None
     oa_date: str | None = None
+    ppt_date: str | None = None
     location: str | None = None
     registration_link: str | None = None
     current_status: str = "OPEN"
@@ -926,6 +964,7 @@ class RuleExtractionResult:
             "package_or_stipend": self.ctc or self.stipend,
             "deadline": self.deadline,
             "oa_date": self.oa_date,
+            "ppt_date": self.ppt_date,
             "work_location": self.location,
             "registration_link": self.registration_link,
             "current_status": self.current_status,
@@ -998,6 +1037,7 @@ def extract_from_email(
     # phrasing; docs/design/16 Cause 6). Independent of email_classification:
     # this is a narrow, deterministic date format, not a generic date guess.
     result.oa_date = _extract_oa_date(combined)
+    result.ppt_date = _extract_ppt_date(combined)
 
     # 9. Extract location
     result.location = _first_match(_LOCATION_PATTERNS, combined)

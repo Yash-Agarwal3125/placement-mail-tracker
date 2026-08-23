@@ -37,6 +37,7 @@ OPPORTUNITY_FIELDS = (
     "deadline",
     "interview_date",
     "oa_date",
+    "ppt_date",
     "registration_link",
     "work_location",
     "hiring_process",
@@ -233,7 +234,8 @@ class DatabaseManager:
                 degree_level TEXT NOT NULL DEFAULT 'UNKNOWN',
                 dream_category TEXT NOT NULL DEFAULT 'NORMAL',
                 validation_flags TEXT NOT NULL DEFAULT '[]',
-                drive_kind TEXT NOT NULL DEFAULT 'PLACEMENT'
+                drive_kind TEXT NOT NULL DEFAULT 'PLACEMENT',
+                ppt_date TEXT
             );
 
             CREATE TABLE IF NOT EXISTS updates (
@@ -1507,7 +1509,7 @@ class DatabaseManager:
             INSERT INTO opportunities (
                 unique_hash, company_name, role, internship_or_fulltime,
                 package_or_stipend, eligibility, cgpa_requirement,
-                branches_allowed, deadline, interview_date, oa_date,
+                branches_allowed, deadline, interview_date, oa_date, ppt_date,
                 registration_link, work_location, hiring_process,
                 important_notes, source_email_id, created_at, updated_at,
                 current_status, status_history, last_update_timestamp,
@@ -1519,7 +1521,7 @@ class DatabaseManager:
             VALUES (
                 :unique_hash, :company_name, :role, :internship_or_fulltime,
                 :package_or_stipend, :eligibility, :cgpa_requirement,
-                :branches_allowed, :deadline, :interview_date, :oa_date,
+                :branches_allowed, :deadline, :interview_date, :oa_date, :ppt_date,
                 :registration_link, :work_location, :hiring_process,
                 :important_notes, :source_email_id, :created_at, :updated_at,
                 :current_status, :status_history, :last_update_timestamp,
@@ -1579,6 +1581,7 @@ class DatabaseManager:
                 deadline = COALESCE(:deadline, deadline),
                 interview_date = COALESCE(:interview_date, interview_date),
                 oa_date = COALESCE(:oa_date, oa_date),
+                ppt_date = COALESCE(:ppt_date, ppt_date),
                 registration_link = :registration_link,
                 work_location = :work_location,
                 hiring_process = :hiring_process,
@@ -1631,6 +1634,7 @@ class DatabaseManager:
             "dream_category": "TEXT NOT NULL DEFAULT 'NORMAL'",
             "validation_flags": "TEXT NOT NULL DEFAULT '[]'",
             "drive_kind": "TEXT NOT NULL DEFAULT 'PLACEMENT'",
+            "ppt_date": "TEXT",
         }
 
         for col_name, col_def in new_columns.items():

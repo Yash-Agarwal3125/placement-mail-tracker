@@ -29,7 +29,7 @@ from placement_mail_tracker.utils.time import parse_datetime_flexible, parse_dat
 # though nothing else about it looks structurally wrong.
 LOW_CONFIDENCE_THRESHOLD = 0.5
 
-_EVENT_FIELDS = ("deadline", "oa_date", "interview_date")
+_EVENT_FIELDS = ("deadline", "oa_date", "interview_date", "ppt_date")
 
 _CGPA_RE = re.compile(r"(-?\d+(?:\.\d+)?)")
 

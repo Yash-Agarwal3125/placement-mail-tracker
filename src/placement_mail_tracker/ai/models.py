@@ -22,6 +22,7 @@ class PlacementExtraction(BaseModel):
     registration_deadline: str | None = None
     interview_date: str | None = None
     oa_date: str | None = None
+    ppt_date: str | None = None
     registration_link: str | None = None
     hiring_process: list[str] | None = Field(default=None)
     important_notes: list[str] | None = Field(default=None)
@@ -79,6 +80,7 @@ class PlacementExtraction(BaseModel):
         "registration_deadline",
         "interview_date",
         "oa_date",
+        "ppt_date",
         "registration_link",
         "update_type",
         "current_status",

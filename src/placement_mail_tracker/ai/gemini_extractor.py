@@ -53,6 +53,7 @@ Extract:
 - registration_deadline
 - interview_date
 - oa_date
+- ppt_date
 - registration_link
 - hiring_process
 - important_notes
@@ -830,24 +831,28 @@ Additional rules:
 - eligible_branches, hiring_process, and important_notes must be JSON arrays when known.
 - cgpa_requirement should be the minimum CGPA as a plain number string (e.g., "7.5"),
   or null if not stated.
-- registration_deadline, interview_date, and oa_date MUST be returned in ISO 8601 format:
-  "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time is given. Convert any human-written date
-  (e.g., "9 June 2026 (2 pm)") to this format. Use null if no date is present.
+- registration_deadline, interview_date, oa_date, and ppt_date MUST be returned in ISO 8601
+  format: "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time is given. Convert any human-written
+  date (e.g., "9 June 2026 (2 pm)") to this format. Use null if no date is present.
 - These emails are Indian placement-cell correspondence: any numeric date is day-month-year,
   NOT month-day-year. "03/06/2026" and "3-06-2026" both mean 3 June 2026 — never read them as
   March 6. "1-07-2026" means 1 July 2026, never January 7. This only applies to ambiguous
   numeric dates; written month names ("17 June 2026") are already unambiguous.
-- registration_deadline, oa_date, and interview_date are three DIFFERENT events — only fill
-  in the ones the email actually states, and leave the others null:
+- registration_deadline, oa_date, interview_date, and ppt_date are four DIFFERENT events — only
+  fill in the ones the email actually states, and leave the others null:
   - registration_deadline: the last date/time to apply or register (look for "last date for
     registration", "apply by", "registration closes"). Not a visit date, not an OA or
     interview date.
   - oa_date: when an online assessment / online test / coding test happens (look for "online
     test", "OA scheduled", "assessment"). A test conducted virtually still counts as oa_date.
   - interview_date: when an interview / selection round / HR round / group discussion happens
-    (look for "interview", "next round of selection process", "PPT", "group discussion",
-    "HR round"). A "selection process" round is interview_date, not oa_date, unless the email
-    explicitly calls it an online test/assessment.
+    (look for "interview", "next round of selection process", "group discussion", "HR round").
+    A "selection process" round is interview_date, not oa_date, unless the email explicitly
+    calls it an online test/assessment.
+  - ppt_date: when a pre-placement talk / PPT / company info session happens (look for "PPT",
+    "pre-placement talk", "pre placement talk"). A PPT is an informational session before any
+    test or interview — do NOT put its date/time in interview_date or oa_date even though the
+    subject often uses the same "is scheduled on <date>" phrasing as those.
 - If the email includes a "Received: <ISO timestamp>" line, treat that as the date/time
   the email was received and resolve any relative date reference in the body (e.g.,
   "this Friday", "tomorrow", "in 3 days", "next Monday", "by EOD today") against it before

@@ -545,6 +545,53 @@ class TestOaDateExtraction:
         assert result.company_name is None
         assert result.oa_date == "2026-08-18T14:30"
 
+class TestPptDateExtraction:
+    """2026-08-23/24 gap: a pre-placement-talk mail's date went nowhere --
+    neither oa_date nor interview_date is what a PPT actually is, and
+    neither field's rule-based extractor recognized the phrasing anyway."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            pytest.param(
+                "Unilever pre placement talk is scheduled on 24th August 2026 "
+                "3.30 pm @ Anna Auditorium",
+                "2026-08-24T15:30",
+                id="unilever_ordinal_dotted_time_at_sign",
+            ),
+            pytest.param(
+                "Accenture pre placement talk is scheduled on 24.08.2026 by "
+                "11:30 am at the respective venues",
+                "2026-08-24T11:30",
+                id="accenture_numeric_date_at_the_respective_venues",
+            ),
+            pytest.param(
+                "Blackrock Pre-Placement Talk is scheduled on 20 August 2026.",
+                "2026-08-20",
+                id="hyphenated_ppt_no_time_all_day",
+            ),
+            pytest.param("No PPT mentioned here at all.", None, id="no_match"),
+        ],
+    )
+    def test_ppt_date_pattern(self, text, expected):
+        result = extract_from_email("Subject", text)
+        assert result.ppt_date == expected
+
+    def test_ppt_date_never_leaks_into_oa_or_interview_date(self):
+        text = (
+            "Unilever pre placement talk is scheduled on 24th August 2026 "
+            "3.30 pm @ Anna Auditorium"
+        )
+        result = extract_from_email("Subject", text)
+        assert result.ppt_date == "2026-08-24T15:30"
+        assert result.oa_date is None
+
+    def test_to_dict_carries_ppt_date(self):
+        result = RuleExtractionResult(ppt_date="2026-08-24T15:30")
+        assert result.to_dict()["ppt_date"] == "2026-08-24T15:30"
+
+
+class TestOaDateExtractionToDict:
     def test_to_dict_carries_oa_date(self):
         result = RuleExtractionResult(oa_date="2026-08-18T14:30")
         assert result.to_dict()["oa_date"] == "2026-08-18T14:30"

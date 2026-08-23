@@ -196,6 +196,7 @@ def map_extraction_to_opportunity(extraction: dict[str, Any]) -> dict[str, Any]:
         "deadline": extraction.get("registration_deadline") or extraction.get("deadline"),
         "interview_date": extraction.get("interview_date"),
         "oa_date": extraction.get("oa_date"),
+        "ppt_date": extraction.get("ppt_date"),
         "registration_link": extraction.get("registration_link"),
         "work_location": extraction.get("location") or extraction.get("work_location"),
         "hiring_process": extraction.get("hiring_process"),

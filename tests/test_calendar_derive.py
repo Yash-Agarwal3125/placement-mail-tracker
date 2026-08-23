@@ -322,3 +322,65 @@ def test_content_hash_stable_and_changes_with_fields():
 
     changed_location = event.model_copy(update={"location": "Chennai"})
     assert changed_location.content_hash() != event.content_hash()
+
+    changed_color = event.model_copy(update={"color_id": "11"})
+    assert changed_color.content_hash() != event.content_hash()
+
+
+def test_ppt_event_derived_for_applied_drive(mock_settings):
+    """2026-08-23/24 gap: a pre-placement talk has its own date field and
+    calendar event type now, gated on 'applied' only (never roster-gated --
+    a PPT is open to every applicant, not a shortlisted subset)."""
+    opp = _opp(ppt_date="24 August 2026 3:30 PM", my_status="APPLIED")
+    events, _ = derive_events([opp], mock_settings)
+    ppt_events = [e for e in events if e.event_type == "PPT"]
+    assert len(ppt_events) == 1
+    assert ppt_events[0].color_id is None
+
+
+def test_ppt_event_not_derived_when_not_applied(mock_settings):
+    opp = _opp(ppt_date="24 August 2026 3:30 PM", my_status="NOT_APPLIED")
+    events, _ = derive_events([opp], mock_settings)
+    assert not any(e.event_type == "PPT" for e in events)
+
+
+def test_ppt_event_not_excluded_by_a_not_matched_oa_verdict(mock_settings):
+    """PPT sits outside ROUND_ORDER -- is_round_excluded never applies to
+    it, so it must survive even when OA is roster-excluded on the same
+    drive."""
+    opp = _opp(
+        oa_date="17-Jun-2026 05:30 PM", ppt_date="24 August 2026 3:30 PM", my_status="APPLIED"
+    )
+    verdicts = {(1, "OA"): {"verdict": "NOT_MATCHED", "method": "registration_no"}}
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    types = {e.event_type for e in events}
+    assert "OA" not in types
+    assert "PPT" in types
+
+
+def test_oa_event_flagged_red_without_a_matched_verdict(mock_settings):
+    """User-requested behavior: an OA/INTERVIEW event that isn't excluded
+    but also isn't positively confirmed by a MATCHED roster verdict still
+    shows (doc 15 §3.3 -- unproven exclusion must not hide it), but gets the
+    unproven color instead of the calendar's default."""
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    events, _ = derive_events([opp], mock_settings)  # no roster_verdicts at all
+    oa_event = next(e for e in events if e.event_type == "OA")
+    assert oa_event.color_id == "11"
+
+
+def test_oa_event_not_flagged_red_with_a_matched_verdict(mock_settings):
+    opp = _opp(oa_date="17-Jun-2026 05:30 PM", my_status="APPLIED")
+    verdicts = {(1, "OA"): {"verdict": "MATCHED", "method": "codename"}}
+    events, _ = derive_events([opp], mock_settings, verdicts)
+    oa_event = next(e for e in events if e.event_type == "OA")
+    assert oa_event.color_id is None
+
+
+def test_deadline_event_never_gets_the_unproven_color(mock_settings):
+    """DEADLINE is never roster-gated at all -- it must never pick up the
+    unproven-red color regardless of any OA/INTERVIEW verdict state."""
+    opp = _opp(deadline="15 June 2026", my_status="APPLIED", priority="HIGH")
+    events, _ = derive_events([opp], mock_settings)
+    deadline_event = next(e for e in events if e.event_type == "DEADLINE")
+    assert deadline_event.color_id is None

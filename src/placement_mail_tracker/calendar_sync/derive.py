@@ -26,7 +26,7 @@ class CalendarEvent(BaseModel):
 
     opportunity_id: int
     drive_id: str | None
-    event_type: Literal["DEADLINE", "OA", "INTERVIEW"]
+    event_type: Literal["DEADLINE", "OA", "INTERVIEW", "PPT"]
     title: str
     start_iso: str
     end_iso: str
@@ -34,11 +34,22 @@ class CalendarEvent(BaseModel):
     location: str | None
     description: str
     reminder_minutes: list[int]
+    # Google Calendar colorId (see UNPROVEN_COLOR_ID below), or None to use
+    # the calendar's default color. Set only on OA/INTERVIEW events that are
+    # showing despite no positive roster confirmation -- by explicit user
+    # request, these events are never hidden (an unproven exclusion must not
+    # resolve toward "hidden" -- doc 15 §3.3's rule already governs that),
+    # but they ARE visually distinguished from a confirmed shortlist so the
+    # two are never confused for the same thing at a glance.
+    color_id: str | None = None
 
     def content_hash(self) -> str:
-        """sha256(start_iso|end_iso|title|location) — the diff key (ADR D2)."""
+        """sha256(start_iso|end_iso|title|location|color_id) — the diff key
+        (ADR D2). color_id is included so a drive gaining/losing roster
+        confirmation between runs is treated as a real change and PATCHes
+        the calendar (not just a DB-side no-op)."""
         parts = "|".join(
-            [self.start_iso, self.end_iso, self.title, self.location or ""]
+            [self.start_iso, self.end_iso, self.title, self.location or "", self.color_id or ""]
         )
         return hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
@@ -57,7 +68,15 @@ _EVENT_LABELS: dict[str, str] = {
     "DEADLINE": "Apply by deadline",
     "OA": "OA",
     "INTERVIEW": "Interview",
+    "PPT": "Pre-Placement Talk",
 }
+
+# Google Calendar's "Tomato" colorId -- the one visibly red option in the
+# standard event-color palette. Used only for an OA/INTERVIEW event that is
+# showing without a positive roster/shortlist confirmation (see
+# CalendarEvent.color_id's docstring). Left unset (None) everywhere else, so
+# a confirmed/PPT/DEADLINE event keeps the calendar's normal default color.
+UNPROVEN_COLOR_ID = "11"
 
 # Cause 2 / Phase 3 (calendar-drift remediation, "Round verdicts don't
 # cascade forward"): selection is a ladder -- you cannot reach round n+1 of
@@ -173,10 +192,12 @@ def _build_description(opp: dict[str, Any]) -> str:
 
 def _derive_single_event(
     opp: dict[str, Any],
-    event_type: Literal["DEADLINE", "OA", "INTERVIEW"],
+    event_type: Literal["DEADLINE", "OA", "INTERVIEW", "PPT"],
     raw_date: Any,
     settings: Settings,
     anomalies: list[str],
+    *,
+    color_id: str | None = None,
 ) -> CalendarEvent | None:
     """Build one CalendarEvent from a single raw date column, or append an
     anomaly and return None when the date is missing/unparseable."""
@@ -229,6 +250,7 @@ def _derive_single_event(
         location=opp.get("work_location"),
         description=_build_description(opp),
         reminder_minutes=list(reminder_minutes),
+        color_id=color_id,
     )
 
 
@@ -321,7 +343,8 @@ def derive_events(
             # of silently dropping when there's a real date at stake, so a
             # human notices before the date passes rather than after.
             has_pending_date = any(
-                opp.get(field) for field in ("deadline", "oa_date", "interview_date")
+                opp.get(field)
+                for field in ("deadline", "oa_date", "interview_date", "ppt_date")
             )
             if has_pending_date:
                 anomalies.append(
@@ -346,9 +369,8 @@ def derive_events(
             events.append(deadline_event)
             normalized_companies[(deadline_event.opportunity_id, "DEADLINE")] = norm_company
 
-        include_oa_interview = settings.calendar_sync_mode == "all_eligible" or opp.get(
-            "my_status"
-        ) not in ("NOT_APPLIED", "", None)
+        has_applied = opp.get("my_status") not in ("NOT_APPLIED", "", None)
+        include_oa_interview = settings.calendar_sync_mode == "all_eligible" or has_applied
         if include_oa_interview:
             for event_type, raw_date in (
                 ("OA", opp.get("oa_date")),
@@ -356,10 +378,34 @@ def derive_events(
             ):
                 if is_round_excluded(roster_verdicts, opp.get("id"), event_type):
                     continue
-                event = _derive_single_event(opp, event_type, raw_date, settings, anomalies)
+                # Positive confirmation, not just "not excluded" -- a MATCHED
+                # verdict specifically for THIS round. Everything else (no
+                # verdict, AMBIGUOUS, NO_ROSTER, or only an earlier round
+                # confirmed) still shows the event -- doc 15 §3.3's rule
+                # that an unproven exclusion must not resolve toward
+                # "hidden" -- but gets flagged red (UNPROVEN_COLOR_ID) rather
+                # than the default color, on explicit user request: they
+                # want confirmed-shortlist events visually distinct from
+                # ones that are merely not-yet-disproven.
+                verdict = roster_verdicts.get((opp.get("id"), event_type), {}).get("verdict")
+                color_id = None if verdict == "MATCHED" else UNPROVEN_COLOR_ID
+                event = _derive_single_event(
+                    opp, event_type, raw_date, settings, anomalies, color_id=color_id
+                )
                 if event is not None:
                     events.append(event)
                     normalized_companies[(event.opportunity_id, event_type)] = norm_company
+
+        # A pre-placement talk is (per real CDC mail seen so far) open to
+        # every applied student, not a shortlisted subset -- so it is gated
+        # on "applied" only, never on roster verdicts (is_round_excluded
+        # never applies to "PPT" anyway, since it's outside ROUND_ORDER) and
+        # never gets the unproven-red treatment above.
+        if has_applied:
+            ppt_event = _derive_single_event(opp, "PPT", opp.get("ppt_date"), settings, anomalies)
+            if ppt_event is not None:
+                events.append(ppt_event)
+                normalized_companies[(ppt_event.opportunity_id, "PPT")] = norm_company
 
     events, collision_anomalies = _apply_collision_guard(events, normalized_companies)
     anomalies.extend(collision_anomalies)
