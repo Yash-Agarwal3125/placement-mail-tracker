@@ -146,17 +146,28 @@ def is_image_attachment(filename: str, mime_type: str) -> bool:
     return (filename or "").lower().endswith(_IMAGE_EXTENSIONS)
 
 
-def extract_attachment_text(filename: str, mime_type: str, data: bytes) -> str:
+def extract_attachment_text(
+    filename: str, mime_type: str, data: bytes, *, max_chars: int = MAX_ATTACHMENT_CHARS
+) -> str:
     """Dispatch attachment bytes to the right text extractor by name/MIME type.
 
     Returns "" for attachment kinds this module does not parse (e.g. images,
     which are routed to Gemini multimodal separately, or unsupported types).
+
+    ``max_chars`` defaults to the Gemini-prompt cap (this module's original
+    and still primary purpose), but a caller with no per-attachment cost to
+    control -- e.g. roster verification, which only ever does local regex/
+    fuzzy matching, never an API call -- should pass a much larger value.
+    Reusing the Gemini cap there was a real bug: a real shortlist/applied-
+    students roster this large routinely exceeds 3000 chars, so the caller
+    could see a truncated roster missing the student's own Neo ID entirely
+    and record a confident (and wrong) NOT_MATCHED verdict.
     """
     name = (filename or "").lower()
     mime = (mime_type or "").lower()
 
     if name.endswith(".xlsx") or mime in _XLSX_MIME_TYPES:
-        return extract_xlsx_text(data)
+        return extract_xlsx_text(data, max_chars=max_chars)
     if name.endswith(".pdf") or mime == "application/pdf":
-        return extract_pdf_text(data)
+        return extract_pdf_text(data, max_chars=max_chars)
     return ""

@@ -16,7 +16,11 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
-from placement_mail_tracker.ai.attachments import extract_attachment_text, is_image_attachment
+from placement_mail_tracker.ai.attachments import (
+    MAX_ATTACHMENT_CHARS,
+    extract_attachment_text,
+    is_image_attachment,
+)
 from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
 from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
@@ -1085,8 +1089,22 @@ class PlacementTrackerRunner:
         )
         stats["processed"] += 1
 
+    # Roster attachments (shortlist/applied-student lists) are pure local
+    # regex/rapidfuzz matching in extraction/roster.py -- no API call, so no
+    # per-attachment cost to control. 200_000 is an order of magnitude above
+    # the largest real roster observed so far (~69K chars extracted from one
+    # ~138KB VIT shortlist .xlsx), while still bounded against a pathological
+    # attachment. Deliberately much larger than MAX_ATTACHMENT_CHARS (the
+    # Gemini-prompt cap, which stays untouched -- that one really does have a
+    # token-cost reason to stay small).
+    _ROSTER_MAX_ATTACHMENT_CHARS = 200_000
+
     def _prepare_attachments(
-        self, gmail_client: GmailClient | None, msg: dict[str, Any]
+        self,
+        gmail_client: GmailClient | None,
+        msg: dict[str, Any],
+        *,
+        max_chars: int = MAX_ATTACHMENT_CHARS,
     ) -> tuple[str, list[tuple[bytes, str]]]:
         """Fetch and classify this mail's attachments.
 
@@ -1096,7 +1114,9 @@ class PlacementTrackerRunner:
         Gmail attachment-fetch call for OA/INTERVIEW-round mail specifically
         -- that's the one piece of data this feature needs and Gmail
         attachment fetches don't carry the per-call cost a Gemini call does
-        (CLAUDE.md item 6 is about minimising *paid* API cost).
+        (CLAUDE.md item 6 is about minimising *paid* API cost). The roster
+        caller passes a much larger ``max_chars`` for exactly that reason --
+        see ``_ROSTER_MAX_ATTACHMENT_CHARS``.
         Returns (attachment_text, image_parts): pre-extracted .xlsx/.pdf text,
         and raw (bytes, mime_type) pairs for image attachments -- a scanned/
         image roster is flagged AMBIGUOUS by ``verify_roster``, never OCR'd
@@ -1130,7 +1150,7 @@ class PlacementTrackerRunner:
                 image_parts.append((data, mime_type or "image/jpeg"))
                 continue
 
-            text = extract_attachment_text(filename, mime_type, data)
+            text = extract_attachment_text(filename, mime_type, data, max_chars=max_chars)
             if text:
                 text_chunks.append(f"--- Attachment: {filename} ---\n{text}")
 
@@ -1176,7 +1196,9 @@ class PlacementTrackerRunner:
             return
 
         try:
-            attachment_text, _images = self._prepare_attachments(gmail_client, msg)
+            attachment_text, _images = self._prepare_attachments(
+                gmail_client, msg, max_chars=self._ROSTER_MAX_ATTACHMENT_CHARS
+            )
         except Exception as error:  # noqa: BLE001 - one bad email must not abort the run
             logger.warning("Roster attachment fetch failed for %s: %s", msg_id, error)
             return
