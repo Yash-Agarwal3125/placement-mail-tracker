@@ -49,16 +49,19 @@ class Settings(BaseSettings):
 
     # AI extraction backend. "gemini" (default, preserves existing behavior)
     # or "groq" — Groq's free tier is far more generous than Gemini's 20
-    # requests/day (llama-3.3-70b-versatile: 1,000 requests/day / 100k
-    # tokens/day; its fallback llama-3.1-8b-instant: 14,400 requests/day),
-    # which matters for a mailbox that can generate dozens of Gemini-needing
-    # emails a day. Uses the OpenAI-compatible chat completions endpoint via
+    # requests/day. Uses the OpenAI-compatible chat completions endpoint via
     # httpx (already an installed transitive dependency) — no new package.
+    #
+    # llama-3.3-70b-versatile / llama-3.1-8b-instant were deprecated by Groq
+    # on 2026-06-17 and fully shut down 2026-08-16 (see
+    # console.groq.com/docs/deprecations) — every live call with those model
+    # IDs now 404s, silently degrading every email to the rule-only
+    # extraction path. Replaced with Groq's own recommended successors.
     ai_provider: str = Field(default="gemini", alias="AI_PROVIDER")
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
-    groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    groq_model: str = Field(default="openai/gpt-oss-120b", alias="GROQ_MODEL")
     groq_fallback_models: list[str] = Field(
-        default_factory=lambda: ["llama-3.1-8b-instant"],
+        default_factory=lambda: ["openai/gpt-oss-20b"],
         alias="GROQ_FALLBACK_MODELS",
     )
     # A per-minute (TPM/RPM) rate limit is a "wait and retry the same model"
