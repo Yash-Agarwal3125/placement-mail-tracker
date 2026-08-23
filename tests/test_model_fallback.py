@@ -14,13 +14,22 @@ from placement_mail_tracker.config.settings import Settings
 
 @pytest.fixture
 def test_settings():
+    # Settings fields use `alias=...`; model_config has no populate_by_name,
+    # so construction must use the UPPERCASE env-var aliases (see
+    # TestGroqProvider.groq_settings below, and conftest.py's mock_settings)
+    # -- snake_case kwargs are silently dropped by extra="ignore" and fall
+    # back to real .env values. This fixture previously used snake_case and
+    # was silently picking up the real .env's AI_PROVIDER=groq + a live
+    # GROQ_API_KEY, making these "Gemini path" tests fire real network calls
+    # at Groq instead of using the mocked _generate_content below.
     settings = Settings(
-        app_env="testing",
-        gemini_api_key="fake-key",
-        gemini_model="gemini-2.5-flash",
-        gemini_fallback_models=["gemini-2.0-flash", "gemini-2.0-flash-lite"],
-        gemini_max_retries=1, # Keep small for tests
-        gemini_retry_delay_seconds=0.01
+        APP_ENV="testing",
+        AI_PROVIDER="gemini",
+        GEMINI_API_KEY="fake-key",
+        GEMINI_MODEL="gemini-2.5-flash",
+        GEMINI_FALLBACK_MODELS=["gemini-2.0-flash", "gemini-2.0-flash-lite"],
+        GEMINI_MAX_RETRIES=1,  # Keep small for tests
+        GEMINI_RETRY_DELAY_SECONDS=0.01,
     )
     return settings
 
