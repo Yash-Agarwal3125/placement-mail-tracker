@@ -141,7 +141,14 @@ def test_not_eligible_and_unknown_company_produce_zero_events(mock_settings):
         [opp_not_eligible, opp_unknown_company], mock_settings
     )
     assert events == []
-    assert anomalies == []
+    # NOT_ELIGIBLE stays fully silent (working as intended), but an "Unknown"
+    # company with a real pending date is flagged rather than silently
+    # dropped forever -- see derive_events' comment: this is the exact shape
+    # of bug that let a confirmed interview vanish from the calendar after a
+    # duplicate-merge left company_name as "Unknown" with no way back.
+    assert len(anomalies) == 1
+    assert "opportunity_id=2" in anomalies[0]
+    assert "Unknown" in anomalies[0]
 
 
 def test_non_placement_drive_kind_produces_zero_events(mock_settings):

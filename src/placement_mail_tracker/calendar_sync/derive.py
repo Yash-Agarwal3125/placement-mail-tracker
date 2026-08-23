@@ -309,6 +309,27 @@ def derive_events(
         if "NOT_ELIGIBLE" in eligibility_status:
             continue
         if not _is_identifiable_company(opp.get("company_name")):
+            # A drive can land here as "Unknown" for two different reasons:
+            # genuine junk (see docs/design/16, runner.py's dedup-review
+            # comment), or a legitimate drive whose identity merge left it
+            # ambiguous (action_required="VERIFY ROLE") while it still has a
+            # real, dated round pending. The former is correctly silent; the
+            # latter previously vanished from the calendar with zero trace —
+            # the exact bug that let a confirmed Foodhub interview disappear
+            # after a duplicate-merge inherited a stale roster verdict and
+            # this gate then blocked it from ever coming back. Flag instead
+            # of silently dropping when there's a real date at stake, so a
+            # human notices before the date passes rather than after.
+            has_pending_date = any(
+                opp.get(field) for field in ("deadline", "oa_date", "interview_date")
+            )
+            if has_pending_date:
+                anomalies.append(
+                    f"opportunity_id={opp.get('id')} ({opp.get('drive_id') or 'unknown drive'}): "
+                    "excluded from calendar — company_name is 'Unknown' "
+                    f"(action_required={opp.get('action_required') or 'none'}) but has a "
+                    "pending date; verify/correct the drive's identity to restore calendar sync"
+                )
             continue
 
         norm_company = normalize_company_name(opp.get("company_name"))
