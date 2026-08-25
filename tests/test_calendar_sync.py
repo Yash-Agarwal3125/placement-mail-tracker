@@ -723,8 +723,10 @@ def test_deadline_gated_out_after_creation_actually_deletes_event(
 def test_regaining_interest_reinserts_deadline_event(
     db_manager, mock_settings, sample_opportunity
 ):
-    """The other direction: my_status advancing past NOT_APPLIED after the
-    deadline event was gated out must bring it back (reactivation path)."""
+    """The other direction: priority upgrading to HIGH after the deadline
+    event was gated out must bring it back (reactivation path). Applying
+    is deliberately NOT this lever any more (2026-08-27 revision) -- see
+    test_applying_removes_an_already-shown_deadline_event below."""
     opp = sample_opportunity(deadline="17 June 2030")
     opp["priority"] = "MEDIUM"  # my_status stays NOT_APPLIED (DB default)
     opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-p7-2")
@@ -733,8 +735,10 @@ def test_regaining_interest_reinserts_deadline_event(
     engine.sync()
     assert db_manager.fetch_calendar_event_states() == []  # gated out from the start
 
-    db_manager.set_my_status(
-        db_manager.fetch_opportunity_by_id(opp_id)["drive_id"], "APPLIED", source="sheet"
+    row = db_manager.fetch_opportunity_by_id(opp_id)
+    db_manager.insert_or_update_opportunity(
+        {"company_name": row["company_name"], "role": row["role"], "priority": "HIGH"},
+        matched_opportunity_id=opp_id,
     )
 
     result = engine.sync()
@@ -745,6 +749,40 @@ def test_regaining_interest_reinserts_deadline_event(
     )
     assert state["status"] == "active"
     assert state["gcal_event_id"] is not None
+
+
+def test_applying_removes_an_already_shown_deadline_event(
+    db_manager, mock_settings, sample_opportunity
+):
+    """2026-08-27, explicit user request: an "apply by" reminder is
+    confusion, not a nudge, once the user has actually applied -- they get
+    an application-confirmation email for that. A HIGH-priority drive's
+    deadline event, already live on the calendar while NOT_APPLIED, must be
+    deleted for real once my_status advances to APPLIED -- not kept just
+    because priority is still HIGH."""
+    opp = sample_opportunity(deadline="17 June 2030")
+    opp["priority"] = "HIGH"  # admits the deadline while NOT_APPLIED
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-p7-3")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "active"
+
+    db_manager.set_my_status(
+        db_manager.fetch_opportunity_by_id(opp_id)["drive_id"], "APPLIED", source="sheet"
+    )
+
+    result = engine.sync()
+
+    assert result.deleted == 1
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "excluded"
+    assert state["gcal_event_id"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,10 @@ def test_timed_oa_event_has_offset_and_one_hour_duration(mock_settings):
 
 
 def test_date_only_deadline_is_all_day(mock_settings):
-    opp = _opp(deadline="15 June 2026", my_status="APPLIED")
+    # HIGH priority (not APPLIED -- applying now excludes the deadline
+    # event outright, see TestDeadlineGatedOnDemonstratedInterest) admits
+    # this deadline so the all-day shape can be checked on its own.
+    opp = _opp(deadline="15 June 2026", priority="HIGH")
     events, anomalies = derive_events([opp], mock_settings)
 
     deadline_events = [e for e in events if e.event_type == "DEADLINE"]
@@ -111,7 +114,10 @@ def test_applied_only_mode_gates_oa_interview_and_deadline_when_not_applied(mock
     )
     events, _ = derive_events([opp_applied], settings)
     event_types = {e.event_type for e in events}
-    assert event_types == {"DEADLINE", "OA", "INTERVIEW"}
+    # DEADLINE is correctly absent here -- once applied, its reminder has
+    # done its job (TestDeadlineGatedOnDemonstratedInterest), independent
+    # of the applied_only mode gate this test is actually about.
+    assert event_types == {"OA", "INTERVIEW"}
 
 
 def test_all_eligible_mode_includes_oa_interview_regardless_of_my_status(mock_settings):
@@ -169,7 +175,7 @@ def test_non_placement_drive_kind_produces_zero_events(mock_settings):
 def test_missing_drive_kind_defaults_to_placement(mock_settings):
     """Legacy rows without drive_kind populated must keep working (backfill
     default is PLACEMENT at the DB layer; derive_events mirrors that)."""
-    opp = _opp(id=1, deadline="15 June 2026", my_status="APPLIED")
+    opp = _opp(id=1, deadline="15 June 2026", priority="HIGH")
     opp.pop("drive_kind", None)
     events, _ = derive_events([opp], mock_settings)
     assert len(events) == 1
@@ -233,8 +239,8 @@ def test_no_roster_verdict_at_all_does_not_exclude(mock_settings):
 
 
 def test_collision_guard_drops_higher_opportunity_id(mock_settings):
-    opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026", my_status="APPLIED")
-    opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026", my_status="APPLIED")
+    opp1 = _opp(id=1, company_name="Acme Corp", deadline="15 June 2026", priority="HIGH")
+    opp2 = _opp(id=2, company_name="Acme Corp", deadline="15 June 2026", priority="HIGH")
     events, anomalies = derive_events([opp1, opp2], mock_settings)
 
     deadline_events = [e for e in events if e.event_type == "DEADLINE"]
@@ -245,11 +251,19 @@ def test_collision_guard_drops_higher_opportunity_id(mock_settings):
 
 
 class TestDeadlineGatedOnDemonstratedInterest:
-    """Phase 7 (calendar-drift remediation plan, Cause 5): a DEADLINE event
-    is only emitted when my_status shows engagement (not NOT_APPLIED) or the
-    drive is HIGH priority -- fixes the Spense complaint specifically (an
+    """Phase 7 (calendar-drift remediation plan, Cause 5), revised
+    2026-08-27 per explicit user request: a DEADLINE event is only emitted
+    for a NOT_APPLIED, HIGH-priority drive -- not yet applied, but worth a
+    nudge to. The moment my_status shows real engagement (APPLIED or
+    further -- SHORTLISTED/SELECTED/REJECTED/...), the "apply by" reminder
+    has done its job and is now excluded outright, regardless of priority:
+    the user already gets an application-confirmation email for that drive,
+    and a deadline reminder surviving past that point is just confusion,
+    not a nudge. (Originally this gate only *added* a reason to show the
+    event once engaged; that direction is now inverted -- engagement is a
+    reason to hide it.) Still fixes the original Spense complaint too: an
     ELIGIBLE, NOT_APPLIED, MEDIUM-priority drive with no evidence of
-    registration should not get a calendar deadline)."""
+    registration still gets no calendar deadline."""
 
     def test_not_applied_medium_priority_gets_no_deadline_event(self, mock_settings):
         opp = _opp(deadline="15 June 2026", my_status="NOT_APPLIED", priority="MEDIUM")
@@ -263,18 +277,21 @@ class TestDeadlineGatedOnDemonstratedInterest:
         deadline_events = [e for e in events if e.event_type == "DEADLINE"]
         assert len(deadline_events) == 1
 
-    def test_applied_gets_deadline_event_even_at_medium_priority(self, mock_settings):
-        opp = _opp(deadline="15 June 2026", my_status="APPLIED", priority="MEDIUM")
+    def test_applied_excludes_deadline_event_even_at_high_priority(self, mock_settings):
+        """The reminder's job is done once you've actually applied --
+        confirmed by the user's own application-confirmation email -- so
+        this overrides HIGH priority rather than the other way around."""
+        opp = _opp(deadline="15 June 2026", my_status="APPLIED", priority="HIGH")
         events, _ = derive_events([opp], mock_settings)
-        deadline_events = [e for e in events if e.event_type == "DEADLINE"]
-        assert len(deadline_events) == 1
+        assert not any(e.event_type == "DEADLINE" for e in events)
 
-    def test_shortlisted_and_selected_also_count_as_demonstrated_interest(self, mock_settings):
+    def test_shortlisted_and_selected_also_exclude_the_deadline_event(self, mock_settings):
         for status in ("SHORTLISTED", "SELECTED"):
-            opp = _opp(deadline="15 June 2026", my_status=status, priority="LOW")
+            opp = _opp(deadline="15 June 2026", my_status=status, priority="HIGH")
             events, _ = derive_events([opp], mock_settings)
-            deadline_events = [e for e in events if e.event_type == "DEADLINE"]
-            assert len(deadline_events) == 1, f"expected a deadline event for {status}"
+            assert not any(e.event_type == "DEADLINE" for e in events), (
+                f"expected no deadline event for {status}"
+            )
 
     def test_missing_my_status_treated_as_not_applied(self, mock_settings):
         opp = _opp(deadline="15 June 2026", priority="LOW")
@@ -379,8 +396,10 @@ def test_oa_event_not_flagged_red_with_a_matched_verdict(mock_settings):
 
 def test_deadline_event_never_gets_the_unproven_color(mock_settings):
     """DEADLINE is never roster-gated at all -- it must never pick up the
-    unproven-red color regardless of any OA/INTERVIEW verdict state."""
-    opp = _opp(deadline="15 June 2026", my_status="APPLIED", priority="HIGH")
+    unproven-red color regardless of any OA/INTERVIEW verdict state. Uses
+    NOT_APPLIED/HIGH priority to admit the event at all -- APPLIED now
+    excludes it outright (TestDeadlineGatedOnDemonstratedInterest)."""
+    opp = _opp(deadline="15 June 2026", my_status="NOT_APPLIED", priority="HIGH")
     events, _ = derive_events([opp], mock_settings)
     deadline_event = next(e for e in events if e.event_type == "DEADLINE")
     assert deadline_event.color_id is None

@@ -133,28 +133,37 @@ def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
     """Cause 5 / Phase 7 (calendar-drift remediation plan): True when a
     DEADLINE event for ``opp`` must NOT be admitted.
 
-    A DEADLINE event is only useful once there's a reason to care about this
-    specific drive -- otherwise nearly every ELIGIBLE posting mints an
-    "Apply by" entry regardless of interest (over half the calendar in the
-    observed case). Gate on demonstrated interest (any ``my_status`` other
-    than NOT_APPLIED -- APPLIED/SHORTLISTED/SELECTED/REJECTED all mean the
-    user actually engaged) OR HIGH priority. Everything else is still
-    covered by the digest mail, just not the calendar.
+    Two independent reasons land here, checked in this order:
+
+    1. Already applied (or further along -- SHORTLISTED/SELECTED/REJECTED/
+       any ``my_status`` other than NOT_APPLIED). A "apply by" reminder has
+       served its entire purpose the moment you've actually applied --
+       explicit user request, 2026-08-27: it gets an application-
+       confirmation email and the calendar entry becomes pure confusion,
+       not a nudge, from that point on. This check runs first and
+       overrides HIGH priority -- a high-priority drive you already applied
+       to still loses its deadline reminder, it doesn't get to keep it.
+    2. Not yet applied AND not HIGH priority -- unproven interest, kept
+       hidden so nearly every ELIGIBLE posting doesn't mint an "Apply by"
+       entry regardless of interest (Cause 5 / Phase 7's original reasoning;
+       over half the calendar in the observed case before this gate
+       existed).
 
     Shared by ``derive_events`` (new events) and ``calendar_sync/sync.py``'s
-    ``_null_date_pass`` (an already-existing event whose drive later loses
-    interest/priority) so the two never disagree -- disagreement here would
-    mean a gated-out DEADLINE's Google event is never actually deleted, only
-    flagged forever as "date became empty" (the same class of flicker/
-    permanent-anomaly bug ``is_round_excluded`` exists to prevent for OA/
-    INTERVIEW). Deliberately does not touch OA/INTERVIEW gating -- those stay
-    governed purely by the existing roster/eligibility logic from Phases 3-4.
+    ``_null_date_pass`` (an already-existing event whose drive later gets
+    applied to, or loses priority) so the two never disagree -- disagreement
+    here would mean a gated-out DEADLINE's Google event is never actually
+    deleted, only flagged forever as "date became empty" (the same class of
+    flicker/permanent-anomaly bug ``is_round_excluded`` exists to prevent
+    for OA/INTERVIEW). Deliberately does not touch OA/INTERVIEW gating --
+    those stay governed purely by the existing roster/eligibility logic
+    from Phases 3-4.
     """
-    demonstrated_interest = (opp.get("my_status") or "NOT_APPLIED") not in (
-        "NOT_APPLIED", "", None,
-    )
+    my_status = opp.get("my_status") or "NOT_APPLIED"
+    if my_status not in ("NOT_APPLIED", "", None):
+        return True
     priority_high = (opp.get("priority") or "").upper() == "HIGH"
-    return not (demonstrated_interest or priority_high)
+    return not priority_high
 
 
 def _is_identifiable_company(name: str | None) -> bool:
