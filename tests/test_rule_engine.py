@@ -570,6 +570,12 @@ class TestPptDateExtraction:
                 "2026-08-20",
                 id="hyphenated_ppt_no_time_all_day",
             ),
+            pytest.param(
+                "Cognizant pre placement talk is scheduled on 27th August 2026 "
+                "by 10.30 am - ANNA Auditorium",
+                "2026-08-27T10:30",
+                id="cognizant_dash_venue_regression_2026_08_25",
+            ),
             pytest.param("No PPT mentioned here at all.", None, id="no_match"),
         ],
     )

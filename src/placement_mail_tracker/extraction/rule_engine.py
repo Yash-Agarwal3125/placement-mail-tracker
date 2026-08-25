@@ -580,19 +580,31 @@ def _extract_oa_date(text: str) -> str | None:
 
 
 # "X pre placement talk is scheduled on 24th August 2026 3.30 pm @ Anna
-# Auditorium" / "X pre placement talk is scheduled on 24.08.2026 by 11:30 am
-# at the respective venues" -- real, recurring CDC phrasing (Unilever,
-# Accenture, 2026-08-23/24). Captures the date/time fragment between
-# "scheduled on" and whichever venue-introducing phrase follows it; the
-# fragment is normalized (ordinal suffixes stripped, "H.MM am/pm" -> "H:MM
-# am/pm") and handed to parse_datetime_flexible rather than parsed by a
-# second bespoke regex, since the phrasing varies more than _OA_DATE_RE's
-# single fixed shape. A PPT date is deliberately its own field, not folded
-# into oa_date/interview_date -- neither is what actually happens at a PPT,
-# and conflating them previously meant a PPT mail's date went nowhere.
+# Auditorium" / "...24.08.2026 by 11:30 am at the respective venues" /
+# "...27th August 2026 by 10.30 am - ANNA Auditorium" -- real, recurring CDC
+# phrasing (Unilever, Accenture, Cognizant, 2026-08-23/25). The venue text
+# that follows the date is unbounded and keeps taking new shapes ("@ X",
+# "at the respective venues", "- X Auditorium", ...) -- an earlier version
+# of this regex tried to enumerate stop-phrases for each one and missed
+# Cognizant's "- ANNA Auditorium" dash form entirely (dateutil's fuzzy
+# parser silently returns None on trailing junk it can't place, rather than
+# raising, so a missed stop-phrase fails this quietly). Capturing only a
+# strict date/time shape directly -- never "everything up to a delimiter"
+# -- sidesteps needing to know what any given CDC mail's venue phrasing
+# looks like at all. Normalized (ordinal suffixes stripped, "H.MM am/pm" ->
+# "H:MM am/pm") and handed to parse_datetime_flexible for the actual date
+# math. A PPT date is deliberately its own field, not folded into
+# oa_date/interview_date -- neither is what actually happens at a PPT, and
+# conflating them previously meant a PPT mail's date went nowhere.
+_MONTH_NAMES_RE = (
+    r"(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)"
+)
 _PPT_DATE_FRAGMENT_RE = re.compile(
-    r"pre[\-\s]?placement\s*talk\s+is\s+scheduled\s+on\s+([^\n]+?)"
-    r"(?:\s*@|\s+at\s+the\s+respective|\s+for\s+other\s+campuses|\.\s|\.$|$)",
+    r"pre[\-\s]?placement\s*talk\s+is\s+scheduled\s+on\s+"
+    r"(\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH_NAMES_RE + r"\s+\d{4}"
+    r"(?:\s*(?:by\s+)?\d{1,2}[.:]\d{2}\s*[ap]m)?"
+    r"|\d{1,2}\.\d{1,2}\.\d{4}\s+by\s+\d{1,2}[.:]\d{2}\s*[ap]m)",
     re.IGNORECASE,
 )
 _ORDINAL_SUFFIX_RE = re.compile(r"(\d)(st|nd|rd|th)\b", re.IGNORECASE)
