@@ -170,6 +170,86 @@ def test_reschedule_patches_by_stored_event_id(db_manager, mock_settings, sample
 
 
 # ---------------------------------------------------------------------------
+# Regression: an all-day <-> timed transition can't be PATCHed in place --
+# verified live against the real API, which rejects even a minimal
+# {"start": {"dateTime": ...}} body against a currently-all-day event with
+# HTTP 400 "Invalid start time." every time. This silently stuck two real
+# interview events (Tredence, Valco Melton Engg.) showing the wrong,
+# date-only time forever once the real interview time arrived in a
+# follow-up mail -- the generic exception handler just logged a warning and
+# moved on, every sync, with no way to recover.
+# ---------------------------------------------------------------------------
+
+
+def test_interview_gaining_a_time_deletes_and_reinserts_instead_of_patching(
+    db_manager, mock_settings, sample_opportunity
+):
+    # Date-only interview_date -> all-day event on the first sync.
+    opp = sample_opportunity(interview_date="17 August 2027")
+    db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-allday-timed")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+
+    result1 = engine.sync()
+    assert result1.inserted == 1
+    original_event_id = db_manager.fetch_calendar_event_states()[0]["gcal_event_id"]
+    assert db_manager.fetch_calendar_event_states()[0]["all_day"] == 1
+
+    # A follow-up mail supplies the real time-of-day for the same interview.
+    followup = sample_opportunity(interview_date="17 August 2027 02:30 PM")
+    db_manager.insert_or_update_opportunity(followup, source_thread_id="thread-allday-timed")
+
+    client.insert_calls.clear()
+    client.patch_calls.clear()
+
+    result2 = engine.sync()
+
+    # Never PATCHed (that's the call Google's real API rejects for this
+    # exact transition) -- deleted the stale all-day event and inserted a
+    # fresh timed one instead.
+    assert client.patch_calls == []
+    assert client.delete_calls == [(client.calendar_id, original_event_id)]
+    assert len(client.insert_calls) == 1
+    assert result2.inserted == 1
+    assert result2.patched == 0
+
+    new_state = db_manager.fetch_calendar_event_states()[0]
+    assert new_state["all_day"] == 0
+    assert new_state["gcal_event_id"] != original_event_id
+
+
+def test_interview_losing_its_time_deletes_and_reinserts_as_all_day(
+    db_manager, mock_settings, sample_opportunity
+):
+    """The reverse transition (timed -> all-day) hits the same Google
+    restriction and must be handled the same way."""
+    opp = sample_opportunity(interview_date="17 August 2027 02:30 PM")
+    db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-timed-allday")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+
+    engine.sync()
+    original_event_id = db_manager.fetch_calendar_event_states()[0]["gcal_event_id"]
+    assert db_manager.fetch_calendar_event_states()[0]["all_day"] == 0
+
+    followup = sample_opportunity(interview_date="17 August 2027")
+    db_manager.insert_or_update_opportunity(followup, source_thread_id="thread-timed-allday")
+
+    client.insert_calls.clear()
+    client.patch_calls.clear()
+
+    result2 = engine.sync()
+
+    assert client.patch_calls == []
+    assert client.delete_calls == [(client.calendar_id, original_event_id)]
+    assert result2.inserted == 1
+
+    new_state = db_manager.fetch_calendar_event_states()[0]
+    assert new_state["all_day"] == 1
+    assert new_state["gcal_event_id"] != original_event_id
+
+
+# ---------------------------------------------------------------------------
 # Case 12 — date became NULL: event/state untouched, anomaly flagged
 # ---------------------------------------------------------------------------
 

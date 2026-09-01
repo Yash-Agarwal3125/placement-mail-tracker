@@ -370,6 +370,34 @@ class CalendarSyncEngine:
             )
             return
 
+        # An all-day <-> timed transition (e.g. an interview whose date-only
+        # extraction later gets a real time-of-day, or vice versa) can't be
+        # PATCHed in place -- verified live against the real API: Google
+        # rejects even a minimal {"start": {"dateTime": ...}, "end": {...}}
+        # body against a currently-all-day event with HTTP 400 "Invalid
+        # start time." every time, regardless of what else is in the body.
+        # This is exactly what silently stuck the Tredence and Valco Melton
+        # Engg. interview events showing the wrong (date-only) time on every
+        # sync since the real interview time arrived -- the generic
+        # exception handler below caught it and just logged a warning,
+        # forever. Deleting and re-inserting sidesteps the type-conversion
+        # restriction entirely instead of chasing the exact PATCH semantics
+        # Google's API enforces for it.
+        if bool(existing.get("all_day")) != event.all_day:
+            gcal_event_id = existing["gcal_event_id"]
+            try:
+                self.client.delete_event(calendar_id, gcal_event_id)
+            except CalendarAuthenticationError:
+                raise
+            except Exception as error:  # noqa: BLE001 - best-effort; insert still proceeds
+                logger.warning(
+                    "Could not delete stale all-day/timed event for %s %s "
+                    "(opportunity_id=%s) before recreating it: %s",
+                    event.event_type, event.title, event.opportunity_id, error,
+                )
+            self._handle_insert(event, calendar_id, dry_run, result, states_by_key)
+            return
+
         gcal_event_id = existing["gcal_event_id"]
         try:
             self.client.patch_event(calendar_id, gcal_event_id, self._build_body(event))
