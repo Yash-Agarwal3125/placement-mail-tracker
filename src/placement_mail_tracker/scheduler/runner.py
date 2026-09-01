@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import logging
 import re
@@ -15,9 +14,7 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
-import httplib2
-from google.auth.exceptions import RefreshError, TransportError
-from googleapiclient.errors import HttpError
+from google.auth.exceptions import RefreshError
 
 from placement_mail_tracker.ai.attachments import (
     MAX_ATTACHMENT_CHARS,
@@ -52,6 +49,7 @@ from placement_mail_tracker.gmail.gmail_client import GmailAuthenticationError, 
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
 from placement_mail_tracker.scheduler.confirmation_corpus import capture_confirmation_fixture
 from placement_mail_tracker.utils.deduplication import find_best_match
+from placement_mail_tracker.utils.network_retry import is_transient_network_error
 from placement_mail_tracker.utils.scoring import compute_priority
 from placement_mail_tracker.utils.time import parse_datetime_flexible, utc_now_iso
 
@@ -267,19 +265,13 @@ def _is_retryable_gmail_error(error: Exception) -> bool:
     own signal that OAuth is genuinely dead, not transient -- retrying
     wastes 7s before ``alert_oauth_dead_once`` gets to fire) and
     ``google.auth.exceptions.RefreshError`` (a dead refresh token will not
-    self-heal within one run either).
+    self-heal within one run either). The transient-network judgment itself
+    is shared with Calendar's retry logic (``utils.network_retry``) so the
+    two can't independently drift apart again the way they already had.
     """
     if isinstance(error, (GmailAuthenticationError, RefreshError)):
         return False
-    if isinstance(error, HttpError):
-        return error.resp.status in {429, 500, 502, 503, 504}
-    if isinstance(error, TransportError):
-        return True
-    if isinstance(error, httplib2.HttpLib2Error):
-        return True
-    if isinstance(error, (OSError, http.client.HTTPException)):
-        return True
-    return False
+    return is_transient_network_error(error)
 
 
 @dataclass(slots=True)

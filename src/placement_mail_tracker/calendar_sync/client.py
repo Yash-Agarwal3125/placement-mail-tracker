@@ -9,10 +9,8 @@ and the retry helper) are implemented by the "calendar-client" subagent.
 
 from __future__ import annotations
 
-import http.client
 import logging
 import os
-import socket
 import sys
 import time
 from collections.abc import Callable
@@ -28,6 +26,7 @@ from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.reliability.auth_alerts import alert_oauth_dead_once, clear_oauth_alert
+from placement_mail_tracker.utils.network_retry import is_transient_network_error
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +66,7 @@ class GoogleCalendarClient:
 
         if credentials and credentials.expired and credentials.refresh_token:
             logger.info("Refreshing expired Google Calendar OAuth token")
-            try:
-                credentials.refresh(Request())
-            except RefreshError as error:
-                msg = f"OAuth dead — re-consent needed for Calendar: {error}"
-                alert_oauth_dead_once("Calendar", msg, self.settings)
-                raise CalendarAuthenticationError(msg) from error
+            self._refresh_with_retry(credentials)
             self._save_token(credentials)
             clear_oauth_alert("Calendar")
             return credentials
@@ -103,6 +97,39 @@ class GoogleCalendarClient:
         self._save_token(credentials)
         clear_oauth_alert("Calendar")
         return credentials
+
+    def _refresh_with_retry(self, credentials: Credentials) -> None:
+        """Refresh ``credentials``, retrying a transient network blip.
+
+        2026-09-01 incident: an intermittent local TLS blip broke Gmail
+        fetch 209 times, and the same blip hits token refresh here too --
+        uncaught, it used to kill calendar sync for the *entire run* with
+        zero retry, even though Gmail's own fetch loop already recovers
+        from it within the same run. ``RefreshError`` (a genuinely dead
+        refresh token) is never retried -- see ``CalendarAuthenticationError``
+        below; only shapes ``is_transient_network_error`` recognizes as
+        transient get the same 3-attempt/2s-then-5s backoff Gmail's fetch
+        loop and this client's own ``_call_with_retry`` already use.
+        """
+        for attempt in range(1, 4):
+            try:
+                credentials.refresh(Request())
+                return
+            except RefreshError as error:
+                msg = f"OAuth dead — re-consent needed for Calendar: {error}"
+                alert_oauth_dead_once("Calendar", msg, self.settings)
+                raise CalendarAuthenticationError(msg) from error
+            except Exception as error:
+                if is_transient_network_error(error) and attempt < 3:
+                    backoff = 2 if attempt == 1 else 5
+                    logger.warning(
+                        "Calendar token refresh attempt %s failed, retrying in "
+                        "%ss: %s (%s)",
+                        attempt, backoff, type(error).__name__, error,
+                    )
+                    time.sleep(backoff)
+                    continue
+                raise
 
     def _get_service(self) -> Resource:
         if self._service is None:
@@ -135,11 +162,14 @@ class GoogleCalendarClient:
 
     # ------------------------------------------------------------------
     # Retry helper (mirrors GoogleSheetsSync.sync_active_opportunities'
-    # retry envelope, sheets_sync.py:152-187): 3 attempts, retry on HttpError
-    # 429/5xx or transient socket/connection errors, backoff 2s then 5s,
-    # re-raise on the 3rd failed attempt. Callers are responsible for
-    # catching/counting per-event failures (spec §3.3); this helper never
-    # swallows a final failure.
+    # retry envelope, sheets_sync.py:152-187): 3 attempts, retry on whatever
+    # utils.network_retry.is_transient_network_error recognizes as transient
+    # (HttpError 429/5xx, TransportError, httplib2 errors, OSError/
+    # http.client.HTTPException -- the same judgment Gmail's own fetch retry
+    # uses, so the two can't drift apart the way they already had), backoff
+    # 2s then 5s, re-raise on the 3rd failed attempt. Callers are responsible
+    # for catching/counting per-event failures (spec §3.3); this helper
+    # never swallows a final failure.
     # ------------------------------------------------------------------
 
     def _call_with_retry(self, fn: Callable[[], _T]) -> _T:
@@ -147,17 +177,7 @@ class GoogleCalendarClient:
             try:
                 return fn()
             except Exception as error:
-                is_retryable = False
-                if isinstance(error, HttpError) and error.resp.status in {
-                    429, 500, 502, 503, 504,
-                }:
-                    is_retryable = True
-                elif isinstance(
-                    error,
-                    (socket.error, socket.timeout, http.client.HTTPException,
-                     ConnectionError, TimeoutError),
-                ):
-                    is_retryable = True
+                is_retryable = is_transient_network_error(error)
 
                 if is_retryable and attempt < 3:
                     backoff = 2 if attempt == 1 else 5

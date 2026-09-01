@@ -477,22 +477,37 @@ class GeminiPlacementExtractor:
                 for data, mime_type in image_parts
             ]
 
-        return self._client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
-                "temperature": 0.0,
-                "response_mime_type": "application/json",
-                # Structured output: constrains the model to emit JSON that
-                # conforms to PlacementExtraction's shape, and the SDK parses
-                # + validates it into response.parsed for us (see
-                # _extract_result_from_response), eliminating most of the
-                # hand-rolled JSON-repair failure class at the source. The
-                # prompt's own JSON instructions (build_extraction_prompt) are
-                # kept as belt-and-suspenders.
-                "response_schema": PlacementExtraction,
-            },
-        )
+        try:
+            return self._client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config={
+                    "temperature": 0.0,
+                    "response_mime_type": "application/json",
+                    # Structured output: constrains the model to emit JSON that
+                    # conforms to PlacementExtraction's shape, and the SDK parses
+                    # + validates it into response.parsed for us (see
+                    # _extract_result_from_response), eliminating most of the
+                    # hand-rolled JSON-repair failure class at the source. The
+                    # prompt's own JSON instructions (build_extraction_prompt) are
+                    # kept as belt-and-suspenders.
+                    "response_schema": PlacementExtraction,
+                },
+            )
+        except httpx.RequestError as error:
+            # The genai SDK makes its own HTTP calls internally and can raise
+            # a transport-level httpx exception directly (ConnectError,
+            # ConnectTimeout, ReadTimeout, ...) that is NOT a genai_errors.
+            # APIError and not a subclass of the builtin ConnectionError/
+            # TimeoutError extract_from_text's retry loop catches -- so a
+            # transient network blip here (the same shape that broke Gmail
+            # fetch 209 times) would propagate uncaught, past the fallback-
+            # model loop entirely, straight to the caller's generic "Gemini
+            # failed completely" handler and silently degrade to the weaker
+            # rule-only extraction instead of retrying. Wrapped the same way
+            # _call_groq already wraps its own httpx.RequestError, so both
+            # provider paths degrade through the same, already-retried route.
+            raise GeminiExtractionError(f"Gemini request failed: {error}") from error
 
     def _call_groq(self, prompt: str, model_name: str) -> _TextResponse:
         """Call Groq's OpenAI-compatible chat completions endpoint.

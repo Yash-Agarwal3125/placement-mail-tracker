@@ -220,6 +220,46 @@ def test_generate_content_uses_zero_temperature(test_settings):
         assert kwargs["config"]["temperature"] == 0.0
 
 
+def test_generate_content_wraps_httpx_transport_error(test_settings):
+    """The genai SDK makes its own HTTP calls internally and can raise a raw
+    httpx.RequestError (ConnectError, ConnectTimeout, ...) directly -- the
+    same transient-network shape that broke Gmail fetch 209 times in the
+    2026-09-01 incident. Before this fix, that error wasn't a
+    genai_errors.APIError or a builtin ConnectionError/TimeoutError, so
+    extract_from_text's retry loop never caught it: it propagated straight
+    past the fallback-model loop to the caller's generic exception handler,
+    silently degrading to the weaker rule-only extraction instead of
+    retrying -- exactly what _call_groq's own httpx.RequestError handling
+    already prevents on the Groq path."""
+    extractor = GeminiPlacementExtractor(test_settings)
+
+    with patch("placement_mail_tracker.ai.gemini_extractor.genai.Client") as mock_client_cls:
+        mock_client = mock_client_cls.return_value
+        mock_client.models.generate_content.side_effect = httpx.ConnectError("SSL blip")
+        mock_client.models.list.return_value = []
+
+        with pytest.raises(GeminiExtractionError):
+            extractor._generate_content("prompt text", "gemini-2.5-flash")
+
+
+def test_extract_from_text_retries_after_transport_error(test_settings):
+    """End-to-end: a transient httpx blip on the first call is retried and
+    recovers, instead of degrading straight to rule-only extraction."""
+    extractor = GeminiPlacementExtractor(test_settings)
+
+    with patch("placement_mail_tracker.ai.gemini_extractor.genai.Client") as mock_client_cls:
+        mock_client = mock_client_cls.return_value
+        mock_client.models.generate_content.side_effect = [
+            httpx.ConnectError("SSL blip"),
+            MagicMock(parsed=PlacementExtraction(company_name="Google"), text="{}"),
+        ]
+        mock_client.models.list.return_value = []
+
+        result = extractor.extract_from_text("Test email")
+
+        assert result["company_name"] == "Google"
+
+
 # ---------------------------------------------------------------------------
 # Prompt-and-validation workstream: confidence field, null-discipline, DMY
 # convention, field definitions, and few-shot examples in the prompt.

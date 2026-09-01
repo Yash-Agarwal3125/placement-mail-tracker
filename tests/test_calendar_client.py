@@ -184,6 +184,91 @@ class TestRetryHelper:
         assert fake_calendar_service.events().insert().execute.call_count == 1
         assert sleep_calls == []
 
+    def test_retries_on_transport_error_then_succeeds(
+        self, calendar_client, fake_calendar_service
+    ):
+        """2026-09-01 incident: the same intermittent TLS blip that broke
+        Gmail fetch 209 times raises google.auth.exceptions.TransportError,
+        not an HttpError -- this retry helper used to only recognize
+        HttpError{429,5xx}, so this exact shape would have failed on the
+        first attempt with zero retry."""
+        from google.auth.exceptions import TransportError
+
+        fake_calendar_service.events().insert().execute.side_effect = [
+            TransportError("SSL blip"),
+            {"id": "evt_after_transport_blip"},
+        ]
+
+        event_id = calendar_client.insert_event("cal_vit", {"summary": "x"})
+
+        assert event_id == "evt_after_transport_blip"
+        assert fake_calendar_service.events().insert().execute.call_count == 2
+
+    def test_retries_on_httplib2_error_then_succeeds(
+        self, calendar_client, fake_calendar_service
+    ):
+        """The other real shape from the same incident: an httplib2 DNS/
+        connection error (32 of 209 occurrences on the Gmail side)."""
+        import httplib2
+
+        fake_calendar_service.events().insert().execute.side_effect = [
+            httplib2.ServerNotFoundError("DNS blip"),
+            {"id": "evt_after_dns_blip"},
+        ]
+
+        event_id = calendar_client.insert_event("cal_vit", {"summary": "x"})
+
+        assert event_id == "evt_after_dns_blip"
+        assert fake_calendar_service.events().insert().execute.call_count == 2
+
+
+class TestRefreshWithRetry:
+    """authenticate()'s token-refresh step used to have zero retry -- an
+    uncaught TransportError here killed calendar sync for the entire run,
+    even though the identical blip self-heals within one run on the Gmail
+    side via its own (separately fixed) retry loop."""
+
+    def _credentials(self, *, side_effect):
+        creds = MagicMock()
+        creds.valid = False
+        creds.expired = True
+        creds.refresh_token = "refresh-tok"
+        creds.refresh.side_effect = side_effect
+        return creds
+
+    def test_recovers_from_transient_blip_on_second_attempt(
+        self, mock_settings, monkeypatch
+    ):
+        from google.auth.exceptions import TransportError
+
+        client = GoogleCalendarClient(mock_settings)
+        creds = self._credentials(side_effect=[TransportError("SSL blip"), None])
+        monkeypatch.setattr(client, "_load_token", lambda: creds)
+        monkeypatch.setattr(client, "_save_token", lambda _creds: None)
+
+        result = client.authenticate()
+
+        assert result is creds
+        assert creds.refresh.call_count == 2
+
+    def test_dead_refresh_token_is_never_retried(self, mock_settings, monkeypatch):
+        from google.auth.exceptions import RefreshError
+
+        from placement_mail_tracker.calendar_sync.client import CalendarAuthenticationError
+
+        client = GoogleCalendarClient(mock_settings)
+        creds = self._credentials(side_effect=RefreshError("token revoked"))
+        monkeypatch.setattr(client, "_load_token", lambda: creds)
+        monkeypatch.setattr(
+            "placement_mail_tracker.calendar_sync.client.alert_oauth_dead_once",
+            lambda *a, **k: None,
+        )
+
+        with pytest.raises(CalendarAuthenticationError):
+            client.authenticate()
+
+        assert creds.refresh.call_count == 1
+
 
 class TestScopedDeleteCapability:
     """ADR Decision 2 said disappearance is handled by retitling, never
