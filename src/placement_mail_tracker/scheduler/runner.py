@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import re
@@ -14,6 +15,8 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
+import httplib2
+from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.ai.attachments import (
@@ -44,7 +47,7 @@ from placement_mail_tracker.extraction.rule_engine import (
 )
 from placement_mail_tracker.extraction.validation import validate_opportunity_data
 from placement_mail_tracker.gmail.filters import is_placement_mail
-from placement_mail_tracker.gmail.gmail_client import GmailClient
+from placement_mail_tracker.gmail.gmail_client import GmailAuthenticationError, GmailClient
 from placement_mail_tracker.reliability.status import RunReport, SyncMetrics
 from placement_mail_tracker.scheduler.confirmation_corpus import capture_confirmation_fixture
 from placement_mail_tracker.utils.deduplication import find_best_match
@@ -91,6 +94,25 @@ _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", 
 # Placeholder company values that mean "extraction failed", not a real drive.
 _UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
 
+# Common English function words. A real company name is never composed
+# *entirely* of these -- but a subject-line fragment misread as a company
+# name during a rule-extraction failure often is (e.g. "Is Scheduled On",
+# lifted from "...Test Is Scheduled On 2nd Sept..."). Such a fragment,
+# once it slips into `opportunities.company_name`, becomes a magnet: every
+# later email whose own extraction fails gets rescue-matched onto it via
+# `_rescue_company_from_subject` (that boilerplate phrase appears in nearly
+# every OA/interview reminder), silently merging unrelated drives and
+# clobbering the merged-onto row's dates. Reject the fragment at the door
+# instead of enumerating every phrase that could produce one.
+_COMPANY_NAME_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "will", "be", "been", "being",
+    "on", "at", "in", "for", "to", "of", "and", "or", "your", "you", "has", "have",
+    "had", "this", "that", "it", "its", "as", "by", "with", "from",
+    "scheduled", "conducted", "held", "starts", "starting", "start",
+    "today", "tomorrow", "now", "please", "regarding", "re", "fwd",
+    "test", "exam", "interview", "round", "date", "time", "session",
+})
+
 # F3: the tracker's own alert/digest mail and GitHub CI notifications land
 # back in the monitored inbox and pass the relevance filter, burning scarce
 # Gemini quota on mail that will never contain a placement to extract.
@@ -127,8 +149,19 @@ def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
 
 
 def _is_identifiable_company(name: str | None) -> bool:
-    """Return True when ``name`` is a real company (not blank/Unknown)."""
-    return bool(name) and name.strip().casefold() not in _UNIDENTIFIED_COMPANIES
+    """Return True when ``name`` is a real company (not blank/Unknown/a garbled
+    subject-line fragment)."""
+    if not name:
+        return False
+    stripped = name.strip()
+    if stripped.casefold() in _UNIDENTIFIED_COMPANIES:
+        return False
+    words = re.findall(r"[A-Za-z]+", stripped)
+    if not words:
+        return False
+    if all(w.casefold() in _COMPANY_NAME_STOPWORDS for w in words):
+        return False
+    return True
 
 
 def _is_self_generated_mail(subject: str, sender: str, settings: Settings) -> bool:
@@ -240,6 +273,44 @@ def _derive_next_event_date(opportunity: dict[str, Any]) -> str | None:
     return sorted(candidates, key=lambda c: c[0], reverse=True)[0][1]
 
 
+def _is_retryable_gmail_error(error: Exception) -> bool:
+    """True when ``error`` is a transient Gmail-fetch failure worth retrying.
+
+    2026-09-01 incident: 209 Gmail fetch failures over 12 days, almost all
+    an intermittent local TLS-interception blip (self-signed cert in chain)
+    that Calendar sync already recovers from within one run via its own
+    retry (calendar_sync/client.py's ``_call_with_retry``). Gmail's retry
+    loop existed already but its predicate only ever matched ``HttpError``
+    429/503 -- none of the observed failures are ``HttpError`` at all, so
+    it had never once actually engaged. Broadened here to mirror
+    ``_call_with_retry``'s set (429/500/502/503/504, OSError,
+    http.client.HTTPException) plus the two real shapes this incident's
+    logs showed and Calendar's predicate doesn't cover:
+    - ``google.auth.exceptions.TransportError`` -- google-auth wraps a
+      ``requests`` SSL/connection error in this on an OAuth token refresh
+      (172 of 209 occurrences -- the dominant failure by far).
+    - ``httplib2.ServerNotFoundError`` -- a DNS lookup failure from the
+      Gmail API's own HTTP transport (32 of 209).
+
+    Deliberately NOT retryable: ``GmailAuthenticationError`` (this repo's
+    own signal that OAuth is genuinely dead, not transient -- retrying
+    wastes 7s before ``alert_oauth_dead_once`` gets to fire) and
+    ``google.auth.exceptions.RefreshError`` (a dead refresh token will not
+    self-heal within one run either).
+    """
+    if isinstance(error, (GmailAuthenticationError, RefreshError)):
+        return False
+    if isinstance(error, HttpError):
+        return error.resp.status in {429, 500, 502, 503, 504}
+    if isinstance(error, TransportError):
+        return True
+    if isinstance(error, httplib2.HttpLib2Error):
+        return True
+    if isinstance(error, (OSError, http.client.HTTPException)):
+        return True
+    return False
+
+
 @dataclass(slots=True)
 class PlacementTrackerRunner:
     """Coordinate one Placement Mail Tracker sync cycle."""
@@ -295,7 +366,7 @@ class PlacementTrackerRunner:
             review_queue_marker.write_text(utc_now_iso())
 
         stats = {
-            "processed": 0, "skipped": 0, "errors": 0,
+            "processed": 0, "skipped": 0, "errors": 0, "review": 0,
             "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0
         }
         if messages:
@@ -374,14 +445,15 @@ class PlacementTrackerRunner:
                     )
                     messages.extend(recent)
                     break
-                except HttpError as api_error:
-                    if api_error.resp.status in {429, 503} and attempt < 3:
-                        sleep_time = attempt * 2.0
+                except Exception as fetch_attempt_error:
+                    if _is_retryable_gmail_error(fetch_attempt_error) and attempt < 3:
+                        sleep_time = 2.0 if attempt == 1 else 5.0
                         logger.warning(
-                            "Retry attempt %s. Backoff %ss. Exception: HttpError (%s)",
+                            "Retry attempt %s. Backoff %ss. Exception: %s (%s)",
                             attempt,
                             sleep_time,
-                            api_error.resp.status,
+                            type(fetch_attempt_error).__name__,
+                            fetch_attempt_error,
                         )
                         time.sleep(sleep_time)
                     else:
@@ -659,8 +731,25 @@ class PlacementTrackerRunner:
                     if not opp_data.get("role"):
                         opp_data["role"] = rescue_match.get("role")
                 else:
+                    # No identifiable company and no active drive's name in the
+                    # subject either (e.g. the only matching drive has already
+                    # expired). Previously this mail was dropped with
+                    # processed_status="skipped" and no further trace -- a
+                    # real placement mail (Chubb's PPT+test invite) vanished
+                    # this way. Never guess which expired drive it belongs to;
+                    # park it for human review instead, same as any other
+                    # identity-uncertain confirmation (Doc 15 §1.4-D).
                     logger.info(
-                        "Email %s has no identifiable company; not creating a drive", msg_id
+                        "Email %s has no identifiable company; parking for review", msg_id
+                    )
+                    database.insert_unmatched_confirmation(
+                        gmail_message_id=msg_id,
+                        extracted_text=(
+                            f"Subject: {subject!r} -- extraction found no identifiable "
+                            "company name and no active drive's name appears in the "
+                            "subject either; needs manual identification."
+                        ),
+                        candidates=[],
                     )
                     database.log_processed_email(
                         gmail_message_id=msg_id,
@@ -669,10 +758,10 @@ class PlacementTrackerRunner:
                         received_at=timestamp,
                         filter_score=decision.score,
                         filter_decision=asdict(decision),
-                        processed_status="skipped",
+                        processed_status="unmatched_review",
                         email_classification=classification,
                     )
-                    stats["skipped"] += 1
+                    stats["review"] += 1
                     return
 
             if not opp_data.get("current_status") or opp_data["current_status"] == "OPEN":

@@ -17,7 +17,7 @@ from placement_mail_tracker.scheduler.runner import PlacementTrackerRunner
 
 def _stats() -> dict[str, int]:
     return {
-        "processed": 0, "skipped": 0, "errors": 0,
+        "processed": 0, "skipped": 0, "errors": 0, "review": 0,
         "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
     }
 
@@ -101,8 +101,8 @@ class TestF1RescueUnattributedFollowups:
     def test_unmatchable_date_bearing_mail_is_skipped(
         self, db_manager, mock_settings
     ):
-        """No active drive matches -> skipped (unattributable), no phantom
-        drive created."""
+        """No active drive matches -> parked for human review (unattributable),
+        no phantom drive created, and never silently dropped."""
         runner = PlacementTrackerRunner(connection=db_manager.connection, settings=mock_settings)
         extractor = MagicMock()
         extractor.extract_from_email.return_value = {
@@ -136,7 +136,7 @@ class TestF1RescueUnattributedFollowups:
 
         after = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
         assert after == before
-        assert stats["skipped"] == 1
+        assert stats["review"] == 1
         assert stats["created"] == 0
 
 

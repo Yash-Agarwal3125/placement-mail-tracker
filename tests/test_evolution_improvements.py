@@ -14,17 +14,22 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httplib2
 import pytest
+from google.auth.exceptions import RefreshError, TransportError
+from googleapiclient.errors import HttpError
 
 from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
 from placement_mail_tracker.config.settings import Settings
 from placement_mail_tracker.config.user_profile import UserProfile
 from placement_mail_tracker.db.manager import DatabaseManager
+from placement_mail_tracker.gmail.gmail_client import GmailAuthenticationError
 from placement_mail_tracker.scheduler.runner import (
     _RETRY_MAX,
     PlacementTrackerRunner,
     _derive_next_event_date,
     _is_identifiable_company,
+    _is_retryable_gmail_error,
     canonicalize_status,
 )
 
@@ -387,7 +392,7 @@ class TestUnidentifiableDriveHandling:
         extractor.extract_from_email.return_value = {"company_name": None, "role": "X"}
 
         stats = {
-            "processed": 0, "skipped": 0, "errors": 0,
+            "processed": 0, "skipped": 0, "errors": 0, "review": 0,
             "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
         }
         msg = {
@@ -410,16 +415,57 @@ class TestUnidentifiableDriveHandling:
             "SELECT COUNT(*) FROM opportunities"
         ).fetchone()[0]
         assert after == before  # no "Unknown" drive created
-        assert stats["skipped"] == 1
+        # Parked for review, not silently dropped -- a real placement mail
+        # (Chubb's PPT+test invite) previously vanished this way when the
+        # only candidate drive had already expired.
+        assert stats["review"] == 1
         assert stats["created"] == 0
 
 
+class TestIsIdentifiableCompanyRejectsSubjectFragments:
+    """A rule-extraction failure sometimes lifts a phrase like "Is Scheduled
+    On" from a subject and misreads it as the company name. Once such a row
+    exists as an active drive it becomes a collision magnet: every later
+    email whose own extraction fails gets rescue-matched onto it (that
+    boilerplate phrase appears in nearly every OA/interview reminder
+    subject), silently merging unrelated companies and clobbering whichever
+    one's date landed there last. This is exactly what hid EY GDS's real,
+    roster-confirmed test behind a corrupted row named "Is Scheduled On"."""
+
+    def test_rejects_all_stopword_fragment(self):
+        assert _is_identifiable_company("Is Scheduled On") is False
+
+    def test_rejects_other_boilerplate_fragments(self):
+        assert _is_identifiable_company("Will Be Conducted") is False
+        assert _is_identifiable_company("Has Been Scheduled") is False
+
+    def test_accepts_real_company_names(self):
+        assert _is_identifiable_company("EY GDS") is True
+        assert _is_identifiable_company("Chubb") is True
+        assert _is_identifiable_company("Societe Generale") is True
+
+    def test_accepts_real_company_name_containing_a_stopword(self):
+        # A real company name may itself contain a stopword ("The", "On",
+        # "And") -- only reject when *every* word is one.
+        assert _is_identifiable_company("On Semiconductor") is True
+
+    def test_still_rejects_blank_and_unknown(self):
+        assert _is_identifiable_company(None) is False
+        assert _is_identifiable_company("") is False
+        assert _is_identifiable_company("Unknown") is False
+
+
+@patch("placement_mail_tracker.scheduler.runner.time.sleep")
 @patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
 @patch("placement_mail_tracker.scheduler.runner.GmailClient")
 @patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
 def test_fetch_window_not_advanced_on_gmail_failure(
-    mock_gemini, mock_gmail, mock_db, runner_settings
+    mock_gemini, mock_gmail, mock_db, mock_sleep, runner_settings
 ):
+    """ConnectionError is now retryable (2026-09-01 Gmail-fetch-resilience
+    fix -- it's an OSError, the exact shape seen for the SSL/DNS incident),
+    so this fails on all 3 attempts rather than the first; time.sleep is
+    mocked so the test doesn't actually wait out the 2s+5s backoff."""
     original = "2026-06-01T12:00:00Z"
     state_file = Path(runner_settings.fetch_state_file)
     state_file.write_text(
@@ -438,6 +484,75 @@ def test_fetch_window_not_advanced_on_gmail_failure(
     # The window must be left exactly where it was so no mail is skipped.
     new_state = json.loads(state_file.read_text(encoding="utf-8"))
     assert new_state["last_successful_fetch"] == original
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-01 Gmail-fetch-resilience incident: the retry loop already existed
+# but its predicate only matched HttpError 429/503 -- none of the 209
+# observed failures (mostly google.auth.exceptions.TransportError wrapping
+# an SSL blip on the OAuth token endpoint, or httplib2.ServerNotFoundError
+# on a DNS lookup) were ever actually retried.
+# ---------------------------------------------------------------------------
+
+
+class TestIsRetryableGmailError:
+    def test_transport_error_is_retryable(self):
+        """172 of 209 real occurrences -- the dominant failure shape."""
+        assert _is_retryable_gmail_error(TransportError("ssl blip")) is True
+
+    def test_server_not_found_error_is_retryable(self):
+        """32 of 209 real occurrences -- a DNS lookup failure."""
+        assert _is_retryable_gmail_error(httplib2.ServerNotFoundError("dns")) is True
+
+    def test_os_error_is_retryable(self):
+        assert _is_retryable_gmail_error(ConnectionError("reset")) is True
+        assert _is_retryable_gmail_error(TimeoutError("timed out")) is True
+
+    def test_http_error_retryable_only_for_5xx_and_429(self):
+        for status in (429, 500, 502, 503, 504):
+            resp = MagicMock(status=status)
+            assert _is_retryable_gmail_error(HttpError(resp, b"")) is True
+        resp = MagicMock(status=404)
+        assert _is_retryable_gmail_error(HttpError(resp, b"")) is False
+
+    def test_gmail_auth_error_is_not_retryable(self):
+        """A dead OAuth token will not self-heal within one run -- retrying
+        just delays alert_oauth_dead_once by 7s for nothing."""
+        assert _is_retryable_gmail_error(GmailAuthenticationError("token dead")) is False
+
+    def test_refresh_error_is_not_retryable(self):
+        assert _is_retryable_gmail_error(RefreshError("refresh failed")) is False
+
+
+@patch("placement_mail_tracker.scheduler.runner.time.sleep")
+@patch("placement_mail_tracker.scheduler.runner.DatabaseManager")
+@patch("placement_mail_tracker.scheduler.runner.GmailClient")
+@patch("placement_mail_tracker.scheduler.runner.GeminiExtractor")
+def test_fetch_window_advances_after_transient_ssl_blip_recovers(
+    mock_gemini, mock_gmail, mock_db, mock_sleep, runner_settings
+):
+    """The exact real-world shape of the 2026-09-01 incident: attempt 1
+    hits the SSL/TLS blip (TransportError), attempt 2 succeeds -- same
+    recovery-within-one-run behavior Calendar sync already has."""
+    original = "2026-06-01T12:00:00Z"
+    state_file = Path(runner_settings.fetch_state_file)
+    state_file.write_text(
+        json.dumps({"last_successful_fetch": original}), encoding="utf-8"
+    )
+
+    mock_db.return_value.get_active_opportunities.return_value = []
+    mock_gmail.return_value.last_error = None
+    mock_gmail.return_value.fetch_recent_messages_since.side_effect = [
+        TransportError("self-signed certificate in certificate chain"),
+        [],
+    ]
+
+    runner = PlacementTrackerRunner(connection=MagicMock(), settings=runner_settings)
+    runner.run_once()
+
+    mock_sleep.assert_called_once_with(2.0)
+    new_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert new_state["last_successful_fetch"] != original
 
 
 def test_reprocess_review_queue_refetches_unmatched_review_messages_by_id(

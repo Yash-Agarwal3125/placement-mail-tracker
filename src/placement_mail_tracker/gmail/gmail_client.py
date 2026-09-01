@@ -318,6 +318,22 @@ class GmailClient:
                 raise
             logger.exception("Gmail API request failed: %s", error)
             return []
+        except Exception as error:
+            # 2026-09-01 incident: a transport-level failure (SSL/TLS
+            # interception, DNS lookup failure, etc. -- google.auth's
+            # TransportError, httplib2.ServerNotFoundError, plain OSError)
+            # previously fell through uncaught here in non-production mode,
+            # leaving self.last_error at the None it was reset to above.
+            # The non-production caller (scheduler/runner.py's
+            # ``_fetch_messages``) treats an empty return with last_error
+            # unset as a genuine zero-mail fetch and advances the fetch
+            # window past mail it never actually read (FS INV-7/INV-8) --
+            # exactly the class of bug ``last_error`` exists to prevent.
+            self.last_error = str(error)
+            if self.settings.is_production:
+                raise
+            logger.exception("Gmail API request failed: %s", error)
+            return []
 
     def fetch_message(self, message_id: str) -> dict[str, Any]:
         """Fetch a specific message by ID."""
