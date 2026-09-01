@@ -17,7 +17,12 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from placement_mail_tracker.config.settings import Settings
-from placement_mail_tracker.extraction.rule_engine import normalize_company_name
+from placement_mail_tracker.extraction.rule_engine import (
+    is_identifiable_company as _is_identifiable_company,
+)
+from placement_mail_tracker.extraction.rule_engine import (
+    normalize_company_name,
+)
 from placement_mail_tracker.utils.time import parse_event_datetime
 
 
@@ -53,11 +58,6 @@ class CalendarEvent(BaseModel):
         )
         return hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
-
-# Placeholder company values that mean "extraction failed", not a real drive.
-# Mirrors scheduler/alert_generator.py:15 / scheduler/runner.py:80 (private to
-# those modules, replicated here rather than imported).
-_UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
 
 # A raw date string is "timed" (has a time-of-day component) when it contains
 # a ':' (24h/12h clock), an am/pm marker, or the word "hrs". Anything else is
@@ -164,11 +164,6 @@ def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
         return True
     priority_high = (opp.get("priority") or "").upper() == "HIGH"
     return not priority_high
-
-
-def _is_identifiable_company(name: str | None) -> bool:
-    """Return True when ``name`` is a real company (not blank/Unknown)."""
-    return bool(name) and str(name).strip().casefold() not in _UNIDENTIFIED_COMPANIES
 
 
 def _has_time_token(raw: str) -> bool:

@@ -138,11 +138,52 @@ _REJECTED_COMPANY_TOKENS = frozenset({
     "details", "shortlisted",
 })
 
+# Common English function words. A subject-line fragment misread as a
+# company name during an extraction failure (e.g. "Is Scheduled On", lifted
+# from "...Test Is Scheduled On 2nd Sept...") is composed entirely of these
+# -- a real company name never is. Once such a fragment slipped past this
+# same check under a *different*, narrower copy of it
+# (scheduler.runner._is_identifiable_company, before it was unified here),
+# it became a magnet: every later email whose own extraction failed got
+# rescue-matched onto it, silently merging unrelated drives and clobbering
+# whichever one's date landed there last. Checked only for 2+-word
+# candidates (below) -- a single function word left over after suffix-
+# stripping (e.g. "A Co" -> "A") is a normal short name, not garbage; the
+# garbled fragments this guards against are always multi-word in practice.
+_FUNCTION_WORD_TOKENS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "will", "be", "been",
+    "being", "on", "at", "in", "for", "to", "of", "and", "or", "your",
+    "you", "has", "have", "had", "this", "that", "it", "its", "as", "by",
+    "with", "from", "scheduled", "conducted", "held", "starts", "starting",
+    "start", "today", "tomorrow", "now", "please", "regarding", "re",
+    "fwd", "interview", "round", "date", "time", "session",
+})
+
 
 def _is_rejected_company_candidate(name: str) -> bool:
     """True when every word of ``name`` is a known non-company token."""
     tokens = [t.casefold() for t in re.findall(r"[A-Za-z0-9]+", name)]
-    return bool(tokens) and all(t in _REJECTED_COMPANY_TOKENS for t in tokens)
+    if not tokens:
+        return False
+    if all(t in _REJECTED_COMPANY_TOKENS for t in tokens):
+        return True
+    return len(tokens) >= 2 and all(t in _FUNCTION_WORD_TOKENS for t in tokens)
+
+
+def is_identifiable_company(name: str | None) -> bool:
+    """Return True when ``name`` is usable as a real drive's company name.
+
+    The single shared gate for "is this a real company, not blank/Unknown/a
+    garbled extraction fragment" -- used by the main extraction path
+    (``scheduler.runner``) and calendar derivation (``calendar_sync.derive``)
+    alike, so the two never drift out of sync the way they previously did.
+    """
+    if not name:
+        return False
+    stripped = name.strip()
+    if stripped.casefold() in ("unknown", "unknown company"):
+        return False
+    return not _is_rejected_company_candidate(stripped)
 
 
 def normalize_company_name(raw: str | None) -> str | None:

@@ -157,6 +157,20 @@ def test_not_eligible_and_unknown_company_produce_zero_events(mock_settings):
     assert "Unknown" in anomalies[0]
 
 
+def test_stopword_fragment_company_name_produces_zero_events(mock_settings):
+    """derive.py used to carry its own, narrower copy of the "is this a real
+    company" gate than scheduler.runner's -- a garbled subject-line fragment
+    like "Is Scheduled On" (the collision-magnet incident) would pass this
+    module's gate even after runner.py's own was fixed, and leak onto the
+    user's real Google Calendar. Now both share extraction.rule_engine's
+    single gate, so this is excluded here too."""
+    opp = _opp(id=3, deadline="16 June 2026", company_name="Is Scheduled On")
+    events, anomalies = derive_events([opp], mock_settings)
+    assert events == []
+    assert len(anomalies) == 1
+    assert "opportunity_id=3" in anomalies[0]
+
+
 def test_non_placement_drive_kind_produces_zero_events(mock_settings):
     """docs/design/16 Phase 6: a hackathon/scholarship must never reach the
     calendar even when ELIGIBLE and even for the DEADLINE branch, which the

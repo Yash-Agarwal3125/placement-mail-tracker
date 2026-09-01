@@ -329,3 +329,17 @@ class TestExtractCompanyFromConfirmationSubject:
             extract_company_from_confirmation_subject("Confirmed: Your Registration for Location")
             is None
         )
+
+    def test_subject_fragment_garbage_returns_none(self):
+        """This is the collision-magnet incident, reproduced on the
+        confirmation path specifically: it shares normalize_company_name's
+        rejection with the main extraction path in runner.py, so a subject-
+        line fragment like "Is Scheduled On" can't create a garbage drive
+        here just because the main path's own gate doesn't run on this
+        branch."""
+        assert (
+            extract_company_from_confirmation_subject(
+                "Congratulations! You're Eligible for Is Scheduled On Placement Drive"
+            )
+            is None
+        )

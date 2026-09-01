@@ -40,6 +40,7 @@ from placement_mail_tracker.extraction.roster import verify_roster
 from placement_mail_tracker.extraction.rule_engine import (
     classify_email,
     detect_status_from_text,
+    is_identifiable_company,
     normalize_company_name,
 )
 from placement_mail_tracker.extraction.rule_engine import (
@@ -91,28 +92,6 @@ _FOLLOWUP_CLASSIFICATIONS = frozenset(
 # Mass announcements can trigger these keywords on brand-new drives; gate them here.
 _ADVANCEMENT_STATUSES = frozenset({"SHORTLISTED", "SELECTED", "OFFER_RECEIVED", "HR"})
 
-# Placeholder company values that mean "extraction failed", not a real drive.
-_UNIDENTIFIED_COMPANIES = frozenset({"", "unknown", "unknown company"})
-
-# Common English function words. A real company name is never composed
-# *entirely* of these -- but a subject-line fragment misread as a company
-# name during a rule-extraction failure often is (e.g. "Is Scheduled On",
-# lifted from "...Test Is Scheduled On 2nd Sept..."). Such a fragment,
-# once it slips into `opportunities.company_name`, becomes a magnet: every
-# later email whose own extraction fails gets rescue-matched onto it via
-# `_rescue_company_from_subject` (that boilerplate phrase appears in nearly
-# every OA/interview reminder), silently merging unrelated drives and
-# clobbering the merged-onto row's dates. Reject the fragment at the door
-# instead of enumerating every phrase that could produce one.
-_COMPANY_NAME_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "will", "be", "been", "being",
-    "on", "at", "in", "for", "to", "of", "and", "or", "your", "you", "has", "have",
-    "had", "this", "that", "it", "its", "as", "by", "with", "from",
-    "scheduled", "conducted", "held", "starts", "starting", "start",
-    "today", "tomorrow", "now", "please", "regarding", "re", "fwd",
-    "test", "exam", "interview", "round", "date", "time", "session",
-})
-
 # F3: the tracker's own alert/digest mail and GitHub CI notifications land
 # back in the monitored inbox and pass the relevance filter, burning scarce
 # Gemini quota on mail that will never contain a placement to extract.
@@ -148,20 +127,12 @@ def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
             logger.warning("[DQ] %s (%s): unparseable deadline %r", company, msg_id, deadline)
 
 
-def _is_identifiable_company(name: str | None) -> bool:
-    """Return True when ``name`` is a real company (not blank/Unknown/a garbled
-    subject-line fragment)."""
-    if not name:
-        return False
-    stripped = name.strip()
-    if stripped.casefold() in _UNIDENTIFIED_COMPANIES:
-        return False
-    words = re.findall(r"[A-Za-z]+", stripped)
-    if not words:
-        return False
-    if all(w.casefold() in _COMPANY_NAME_STOPWORDS for w in words):
-        return False
-    return True
+# Re-exported for backwards compatibility -- this module's own copy of the
+# gate (previously with a narrower stopword list than rule_engine's) is what
+# let a garbled company name reach one caller here but not another; the
+# check itself now lives in one place (extraction.rule_engine) so it can't
+# drift again. See docs/design/16 and this session's incident report.
+_is_identifiable_company = is_identifiable_company
 
 
 def _is_self_generated_mail(subject: str, sender: str, settings: Settings) -> bool:
