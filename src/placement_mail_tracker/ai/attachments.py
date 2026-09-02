@@ -146,6 +146,21 @@ def is_image_attachment(filename: str, mime_type: str) -> bool:
     return (filename or "").lower().endswith(_IMAGE_EXTENSIONS)
 
 
+def is_spreadsheet_attachment(filename: str, mime_type: str) -> bool:
+    """True for an .xlsx (or equivalent MIME type) attachment.
+
+    Used to keep a shortlist/roster spreadsheet -- in every real sample seen,
+    a pure codename/reg-no dump with nothing useful for general field
+    extraction -- out of a caller's attachment-text budget entirely, rather
+    than truncating it and still risking a token-budget blowout for content
+    that extraction never needed (2026-09-01 incident: this is exactly what
+    silently lost a real OA date to an HTTP 413 on both configured models).
+    """
+    name = (filename or "").lower()
+    mime = (mime_type or "").lower()
+    return name.endswith(".xlsx") or mime in _XLSX_MIME_TYPES
+
+
 def extract_attachment_text(
     filename: str, mime_type: str, data: bytes, *, max_chars: int = MAX_ATTACHMENT_CHARS
 ) -> str:

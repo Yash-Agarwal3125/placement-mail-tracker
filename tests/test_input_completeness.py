@@ -385,3 +385,46 @@ class TestRunnerAttachmentWiring:
         text, images = runner._prepare_attachments(gmail_client, msg)
         assert text == ""
         assert images == []
+
+    def test_prepare_attachments_include_spreadsheets_false_never_fetches_xlsx(
+        self, mock_settings, db_manager
+    ):
+        """2026-09-01 incident: a real .xlsx shortlist bundled into the main
+        extraction call routinely blew Groq's per-minute token budget on
+        both configured models (HTTP 413 on both, even after 3000-char
+        truncation) -- an .xlsx never has anything useful for the fields
+        this call actually extracts (company/date/status), only roster
+        *matching* (a separate call with its own, much larger budget) needs
+        it. Losing that extraction call silently degraded to the far
+        weaker rule-only fallback, which is what actually lost a real OA
+        date and, separately, misfired a false REJECTED status from a
+        conditional/hypothetical sentence elsewhere in the same mail. The
+        pre-Gemini caller must never even fetch the spreadsheet's bytes."""
+        runner = self._make_runner(mock_settings, db_manager)
+        gmail_client = MagicMock()
+        image_bytes = b"\xff\xd8\xff\xe0fakejpegdata"
+        gmail_client.fetch_attachment_bytes.return_value = image_bytes
+
+        msg = {
+            "message_id": "m1",
+            "attachments": [
+                {
+                    "filename": "shortlist.xlsx",
+                    "mimeType": "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet",
+                    "attachmentId": "a1",
+                },
+                {"filename": "poster.jpg", "mimeType": "image/jpeg", "attachmentId": "a2"},
+            ],
+        }
+
+        text, images = runner._prepare_attachments(
+            gmail_client, msg, include_spreadsheets=False
+        )
+
+        assert text == ""
+        assert images == [(image_bytes, "image/jpeg")]
+        # Never even fetched the xlsx's bytes -- not just "extracted no text
+        # from it" -- since the whole point is to keep it off this call's
+        # token budget entirely.
+        gmail_client.fetch_attachment_bytes.assert_called_once_with("m1", "a2")

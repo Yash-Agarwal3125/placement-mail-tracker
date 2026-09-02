@@ -20,6 +20,7 @@ from placement_mail_tracker.ai.attachments import (
     MAX_ATTACHMENT_CHARS,
     extract_attachment_text,
     is_image_attachment,
+    is_spreadsheet_attachment,
 )
 from placement_mail_tracker.ai.gemini_extractor import GeminiPlacementExtractor as GeminiExtractor
 from placement_mail_tracker.ai.gemini_extractor import GeminiQuotaExhaustedError
@@ -613,7 +614,9 @@ class PlacementTrackerRunner:
 
             if rule_result.needs_gemini and (not known_thread_followup or date_announcement):
                 logger.info("Rule extraction incomplete; calling Gemini")
-                attachment_text, image_parts = self._prepare_attachments(gmail_client, msg)
+                attachment_text, image_parts = self._prepare_attachments(
+                    gmail_client, msg, include_spreadsheets=False
+                )
                 try:
                     extracted = extractor.extract_from_email(
                         msg, attachment_text=attachment_text, image_parts=image_parts
@@ -1158,6 +1161,7 @@ class PlacementTrackerRunner:
         msg: dict[str, Any],
         *,
         max_chars: int = MAX_ATTACHMENT_CHARS,
+        include_spreadsheets: bool = True,
     ) -> tuple[str, list[tuple[bytes, str]]]:
         """Fetch and classify this mail's attachments.
 
@@ -1170,6 +1174,24 @@ class PlacementTrackerRunner:
         (CLAUDE.md item 6 is about minimising *paid* API cost). The roster
         caller passes a much larger ``max_chars`` for exactly that reason --
         see ``_ROSTER_MAX_ATTACHMENT_CHARS``.
+
+        2026-09-01 incident: an .xlsx shortlist/eligible-students attachment
+        is, in every real sample seen, a pure codename/reg-no dump with
+        nothing useful for the fields Gemini is actually asked to extract
+        here (company/date/status/etc. -- roster *matching* is
+        ``_capture_roster_verdict``'s separate job entirely, with its own
+        attachment fetch and a much larger char budget). Bundling it into
+        this call anyway routinely pushed a real request over Groq's 8000
+        TPM per-minute budget even after truncation to 3000 chars (a
+        Cognizant OA-date email hit HTTP 413 on both the primary and
+        fallback model this way), and unlike a 429 rate limit there is no
+        retry for a 413 -- the extraction call fails outright and the
+        oa_date that email exists specifically to announce is lost for
+        good, silently degrading to the weaker rule-only result. The
+        pre-Gemini caller passes ``include_spreadsheets=False`` to keep
+        spreadsheet attachments out of this budget entirely; the roster
+        caller (which needs exactly this content) leaves it on.
+
         Returns (attachment_text, image_parts): pre-extracted .xlsx/.pdf text,
         and raw (bytes, mime_type) pairs for image attachments -- a scanned/
         image roster is flagged AMBIGUOUS by ``verify_roster``, never OCR'd
@@ -1188,6 +1210,8 @@ class PlacementTrackerRunner:
             mime_type = attachment.get("mimeType", "")
             attachment_id = attachment.get("attachmentId")
             if not attachment_id:
+                continue
+            if not include_spreadsheets and is_spreadsheet_attachment(filename, mime_type):
                 continue
             try:
                 data = gmail_client.fetch_attachment_bytes(msg_id, attachment_id)
