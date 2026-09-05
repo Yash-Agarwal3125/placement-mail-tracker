@@ -779,14 +779,14 @@ class CalendarSyncEngine:
         }
         if event.location:
             body["location"] = event.location
-        # Always send colorId -- omitting the key when color_id turns falsy
-        # (e.g. a once-unproven OA round gets a MATCHED verdict) would PATCH
-        # every other field but leave the event stuck red forever, since
-        # PATCH only touches keys present in the body. None (JSON null) is
-        # what actually resets it to the calendar's default color; an empty
-        # string is NOT -- verified live against the real API, which
-        # rejects "" with HTTP 400 "Invalid color id value."
-        body["colorId"] = event.color_id
+        # Always reset colorId to the calendar's default (None/JSON null,
+        # not "" -- verified live against the real API, which rejects ""
+        # with HTTP 400 "Invalid color id value.") -- the roster-based red/
+        # default color-coding this used to carry was removed on explicit
+        # user request (2026-09-02: it added noise, not signal), but every
+        # event still explicitly clears colorId on each PATCH so no event
+        # from before that removal stays stuck red.
+        body["colorId"] = None
         return body
 
     def _body_from_state(self, state: dict[str, Any]) -> dict[str, Any]:

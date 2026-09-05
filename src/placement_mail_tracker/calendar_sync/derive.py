@@ -39,23 +39,10 @@ class CalendarEvent(BaseModel):
     location: str | None
     description: str
     reminder_minutes: list[int]
-    # Google Calendar colorId (see UNPROVEN_COLOR_ID below), or None to use
-    # the calendar's default color. Set only on OA/INTERVIEW events that are
-    # showing despite no positive roster confirmation -- by explicit user
-    # request, these events are never hidden (an unproven exclusion must not
-    # resolve toward "hidden" -- doc 15 §3.3's rule already governs that),
-    # but they ARE visually distinguished from a confirmed shortlist so the
-    # two are never confused for the same thing at a glance.
-    color_id: str | None = None
 
     def content_hash(self) -> str:
-        """sha256(start_iso|end_iso|title|location|color_id) — the diff key
-        (ADR D2). color_id is included so a drive gaining/losing roster
-        confirmation between runs is treated as a real change and PATCHes
-        the calendar (not just a DB-side no-op)."""
-        parts = "|".join(
-            [self.start_iso, self.end_iso, self.title, self.location or "", self.color_id or ""]
-        )
+        """sha256(start_iso|end_iso|title|location) — the diff key (ADR D2)."""
+        parts = "|".join([self.start_iso, self.end_iso, self.title, self.location or ""])
         return hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
 
@@ -70,13 +57,6 @@ _EVENT_LABELS: dict[str, str] = {
     "INTERVIEW": "Interview",
     "PPT": "Pre-Placement Talk",
 }
-
-# Google Calendar's "Tomato" colorId -- the one visibly red option in the
-# standard event-color palette. Used only for an OA/INTERVIEW event that is
-# showing without a positive roster/shortlist confirmation (see
-# CalendarEvent.color_id's docstring). Left unset (None) everywhere else, so
-# a confirmed/PPT/DEADLINE event keeps the calendar's normal default color.
-UNPROVEN_COLOR_ID = "11"
 
 # Cause 2 / Phase 3 (calendar-drift remediation, "Round verdicts don't
 # cascade forward"): selection is a ladder -- you cannot reach round n+1 of
@@ -200,8 +180,6 @@ def _derive_single_event(
     raw_date: Any,
     settings: Settings,
     anomalies: list[str],
-    *,
-    color_id: str | None = None,
 ) -> CalendarEvent | None:
     """Build one CalendarEvent from a single raw date column, or append an
     anomaly and return None when the date is missing/unparseable."""
@@ -254,7 +232,6 @@ def _derive_single_event(
         location=opp.get("work_location"),
         description=_build_description(opp),
         reminder_minutes=list(reminder_minutes),
-        color_id=color_id,
     )
 
 
@@ -382,20 +359,15 @@ def derive_events(
             ):
                 if is_round_excluded(roster_verdicts, opp.get("id"), event_type):
                     continue
-                # Positive confirmation, not just "not excluded" -- a MATCHED
-                # verdict specifically for THIS round. Everything else (no
-                # verdict, AMBIGUOUS, NO_ROSTER, or only an earlier round
-                # confirmed) still shows the event -- doc 15 §3.3's rule
-                # that an unproven exclusion must not resolve toward
-                # "hidden" -- but gets flagged red (UNPROVEN_COLOR_ID) rather
-                # than the default color, on explicit user request: they
-                # want confirmed-shortlist events visually distinct from
-                # ones that are merely not-yet-disproven.
-                verdict = roster_verdicts.get((opp.get("id"), event_type), {}).get("verdict")
-                color_id = None if verdict == "MATCHED" else UNPROVEN_COLOR_ID
-                event = _derive_single_event(
-                    opp, event_type, raw_date, settings, anomalies, color_id=color_id
-                )
+                # Everything short of a proven exclusion (no verdict,
+                # AMBIGUOUS, NO_ROSTER, or only an earlier round confirmed)
+                # still shows the event -- doc 15 §3.3's rule that an
+                # unproven exclusion must not resolve toward "hidden". No
+                # longer color-coded (explicit user request, 2026-09-02: the
+                # red/default distinction added noise, not signal -- they
+                # track roster status themselves and just want every
+                # not-excluded event to look the same).
+                event = _derive_single_event(opp, event_type, raw_date, settings, anomalies)
                 if event is not None:
                     events.append(event)
                     normalized_companies[(event.opportunity_id, event_type)] = norm_company
