@@ -86,10 +86,18 @@ def is_round_excluded(
       same drive (per ``ROUND_ORDER``) excludes it too (the cascade).
     - Any other case (no verdict, ``AMBIGUOUS``, ``NO_ROSTER``) does not
       exclude -- unproven exclusion must not resolve toward "hidden".
-    - A ``round_name`` outside ``ROUND_ORDER`` (e.g. ``DEADLINE``) is never
-      roster-gated and always returns False.
+    - ``PPT`` (outside ``ROUND_ORDER``) is a special case: it has no round
+      of its own to be cut at, but a ``NOT_MATCHED`` at *any* real round
+      (OA/INTERVIEW/OFFER) means the drive is dead and the PPT event should
+      disappear too (explicit user request, 2026-09-05: "if my name isn't
+      in the list, remove all the events"). A direct ``PPT`` verdict, if
+      one ever exists, still wins first either way.
+    - Any other ``round_name`` outside ``ROUND_ORDER`` (e.g. ``DEADLINE``)
+      is never roster-gated and always returns False.
     """
-    if round_name not in ROUND_ORDER or opportunity_id is None:
+    if opportunity_id is None:
+        return False
+    if round_name != "PPT" and round_name not in ROUND_ORDER:
         return False
 
     direct = roster_verdicts.get((opportunity_id, round_name))
@@ -99,6 +107,12 @@ def is_round_excluded(
             return False
         if verdict == "NOT_MATCHED":
             return True
+
+    if round_name == "PPT":
+        return any(
+            roster_verdicts.get((opportunity_id, r), {}).get("verdict") == "NOT_MATCHED"
+            for r in ROUND_ORDER
+        )
 
     idx = ROUND_ORDER.index(round_name)
     for earlier_round in ROUND_ORDER[:idx]:
@@ -374,10 +388,10 @@ def derive_events(
 
         # A pre-placement talk is (per real CDC mail seen so far) open to
         # every applied student, not a shortlisted subset -- so it is gated
-        # on "applied" only, never on roster verdicts (is_round_excluded
-        # never applies to "PPT" anyway, since it's outside ROUND_ORDER) and
-        # never gets the unproven-red treatment above.
-        if has_applied:
+        # on "applied", not a positive roster match. But once a *later*
+        # round has come back NOT_MATCHED, the drive is over and the PPT
+        # event is stale noise too (is_round_excluded's PPT special case).
+        if has_applied and not is_round_excluded(roster_verdicts, opp.get("id"), "PPT"):
             ppt_event = _derive_single_event(opp, "PPT", opp.get("ppt_date"), settings, anomalies)
             if ppt_event is not None:
                 events.append(ppt_event)

@@ -371,10 +371,10 @@ def test_ppt_event_not_derived_when_not_applied(mock_settings):
     assert not any(e.event_type == "PPT" for e in events)
 
 
-def test_ppt_event_not_excluded_by_a_not_matched_oa_verdict(mock_settings):
-    """PPT sits outside ROUND_ORDER -- is_round_excluded never applies to
-    it, so it must survive even when OA is roster-excluded on the same
-    drive."""
+def test_ppt_event_excluded_by_a_not_matched_oa_verdict(mock_settings):
+    """PPT is outside ROUND_ORDER but is still gated: once OA comes back
+    NOT_MATCHED the drive is dead, so the PPT event must not survive it
+    either (explicit user request, 2026-09-05 -- "remove all the events")."""
     opp = _opp(
         oa_date="17-Jun-2026 05:30 PM", ppt_date="24 August 2026 3:30 PM", my_status="APPLIED"
     )
@@ -382,6 +382,14 @@ def test_ppt_event_not_excluded_by_a_not_matched_oa_verdict(mock_settings):
     events, _ = derive_events([opp], mock_settings, verdicts)
     types = {e.event_type for e in events}
     assert "OA" not in types
+    assert "PPT" not in types
+
+
+def test_ppt_event_survives_when_no_round_is_excluded(mock_settings):
+    """No proven exclusion anywhere -- PPT still shows normally."""
+    opp = _opp(ppt_date="24 August 2026 3:30 PM", my_status="APPLIED")
+    events, _ = derive_events([opp], mock_settings)
+    types = {e.event_type for e in events}
     assert "PPT" in types
 
 

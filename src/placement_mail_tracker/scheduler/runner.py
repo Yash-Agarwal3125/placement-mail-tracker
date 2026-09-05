@@ -905,8 +905,9 @@ class PlacementTrackerRunner:
                     opp_data["priority"],
                 )
 
+                roster_event_type = self._resolve_roster_event_type(classification, opp_data)
                 self._capture_roster_verdict(
-                    classification, opp_id, msg, msg_id, gmail_client, user_profile, database
+                    roster_event_type, opp_id, msg, msg_id, gmail_client, user_profile, database
                 )
 
             database.log_processed_email(
@@ -1234,17 +1235,44 @@ class PlacementTrackerRunner:
         return "\n\n".join(text_chunks), image_parts
 
     # Which calendar_events round a mail's classification carries evidence
-    # for. SHORTLIST_UPDATE is deliberately excluded -- it's ambiguous which
-    # specific round it refers to, and a wrong round mapping here would be
-    # worse than skipping (doc 15 §3.3's hard rule about false claims).
+    # for. SHORTLIST_UPDATE has no fixed mapping here -- it's ambiguous which
+    # round it refers to in general, so it's resolved per-email instead (see
+    # _resolve_roster_event_type): only when *this* email's own extraction
+    # sets exactly one of oa_date/interview_date do we know which round it's
+    # evidence for. A wrong round mapping would be worse than skipping it
+    # (doc 15 §3.3's hard rule about false claims).
     _ROSTER_EVENT_TYPE_BY_CLASSIFICATION = {
         "OA_UPDATE": "OA",
         "INTERVIEW_UPDATE": "INTERVIEW",
     }
 
+    @classmethod
+    def _resolve_roster_event_type(
+        cls, classification: str, opp_data: dict[str, Any]
+    ) -> str | None:
+        """Which round (if any) this specific email is roster evidence for.
+
+        OA_UPDATE/INTERVIEW_UPDATE map directly. SHORTLIST_UPDATE is
+        ambiguous in general, but this *specific* email disambiguates
+        itself when its own extraction newly set exactly one of
+        oa_date/interview_date -- that's unambiguous evidence for that one
+        round, still per doc 15 §3.3 (never guess).
+        """
+        direct = cls._ROSTER_EVENT_TYPE_BY_CLASSIFICATION.get(classification)
+        if direct is not None:
+            return direct
+        if classification == "SHORTLIST_UPDATE":
+            has_oa = bool(opp_data.get("oa_date"))
+            has_interview = bool(opp_data.get("interview_date"))
+            if has_oa and not has_interview:
+                return "OA"
+            if has_interview and not has_oa:
+                return "INTERVIEW"
+        return None
+
     def _capture_roster_verdict(
         self,
-        classification: str,
+        event_type: str | None,
         opportunity_id: int | None,
         msg: dict[str, Any],
         msg_id: str,
@@ -1264,7 +1292,6 @@ class PlacementTrackerRunner:
         """
         if opportunity_id is None:
             return
-        event_type = self._ROSTER_EVENT_TYPE_BY_CLASSIFICATION.get(classification)
         if event_type is None:
             return
         if not user_profile.is_identity_verified():
