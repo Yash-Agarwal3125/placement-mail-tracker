@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -158,6 +158,29 @@ def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
         return True
     priority_high = (opp.get("priority") or "").upper() == "HIGH"
     return not priority_high
+
+
+def is_missed_deadline(opp: dict[str, Any], now: datetime | None = None) -> bool:
+    """True when this drive's apply-by deadline has passed and the student
+    never applied -- the whole drive is moot now, not just its DEADLINE
+    reminder (explicit user request, 2026-09-09: a missed drive lingering
+    on the calendar "serves no purpose" and just confuses attendance
+    tracing later). Unlike ``is_deadline_gated_out`` (which only ever hides
+    the DEADLINE event itself), this gates the *entire* opportunity out of
+    ``derive_events`` -- no DEADLINE/OA/INTERVIEW/PPT event is admitted for
+    it, since a deadline you missed makes every later round moot too.
+
+    Only fires once there's a real, parsed, past deadline -- an unparseable
+    or missing deadline can't prove anything either way (doc 15 §3.3).
+    """
+    my_status = opp.get("my_status") or "NOT_APPLIED"
+    if my_status not in ("NOT_APPLIED", "", None):
+        return False
+    deadline = parse_event_datetime(opp.get("deadline") or "")
+    if deadline is None:
+        return False
+    reference = now or datetime.now()
+    return deadline < reference
 
 
 def _has_time_token(raw: str) -> bool:
@@ -324,6 +347,8 @@ def derive_events(
             continue
         eligibility_status = opp.get("eligibility_status") or ""
         if "NOT_ELIGIBLE" in eligibility_status:
+            continue
+        if is_missed_deadline(opp):
             continue
         if not _is_identifiable_company(opp.get("company_name")):
             # A drive can land here as "Unknown" for two different reasons:

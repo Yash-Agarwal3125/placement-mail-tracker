@@ -25,6 +25,7 @@ from placement_mail_tracker.calendar_sync.derive import (
     CalendarEvent,
     derive_events,
     is_deadline_gated_out,
+    is_missed_deadline,
     is_round_excluded,
 )
 from placement_mail_tracker.config.settings import Settings
@@ -521,11 +522,18 @@ class CalendarSyncEngine:
             # OA/INTERVIEW derivation stays governed purely by roster/
             # eligibility (Phases 3-4), untouched here.
             deadline_gated_out = event_type == "DEADLINE" and is_deadline_gated_out(opportunity)
+            # Explicit user request, 2026-09-09: once the apply-by deadline
+            # has passed with no application, the whole drive is moot --
+            # every event type for it, not just DEADLINE, is confidently
+            # excluded (derive_events already stops admitting any of them;
+            # this is what deletes ones created before that deadline passed).
+            missed_deadline = is_missed_deadline(opportunity)
             confidently_excluded = (
                 drive_kind != "PLACEMENT"
                 or "NOT_ELIGIBLE" in eligibility_status
                 or excluded_by_roster
                 or deadline_gated_out
+                or missed_deadline
             )
 
             if confidently_excluded:
