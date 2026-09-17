@@ -125,10 +125,12 @@ class CalendarSyncEngine:
             else:
                 self._handle_patch(event, existing, calendar_id, dry_run, result, states_by_key)
 
-        self._done_pass(states_by_key, now, dry_run, result)
-
         active_opp_ids = {row["id"] for row in rows}
         rows_by_id = {row["id"]: row for row in rows}
+        self._done_pass(
+            states_by_key, rows_by_id, roster_verdicts, now, calendar_id, dry_run, result
+        )
+
         self._null_date_pass(
             states_by_key, active_opp_ids, desired_keys, rows_by_id, roster_verdicts,
             calendar_id, dry_run, result,
@@ -440,18 +442,62 @@ class CalendarSyncEngine:
             event, gcal_event_id=gcal_event_id, status="active", row_id=row_id
         )
 
+    def _is_confidently_excluded(
+        self,
+        opportunity: dict[str, Any],
+        event_type: str,
+        roster_verdicts: dict[tuple[int, str], dict[str, Any]],
+    ) -> bool:
+        """Shared by ``_done_pass`` and ``_null_date_pass`` so the two can't
+        disagree about which rounds are proven no-longer-relevant (same
+        rationale as ``derive.is_round_excluded`` being shared with
+        ``derive_events``). See ``_null_date_pass``'s docstring for what each
+        branch means."""
+        opportunity_id = opportunity.get("id")
+        drive_kind = opportunity.get("drive_kind") or "PLACEMENT"
+        eligibility_status = opportunity.get("eligibility_status") or ""
+        excluded_by_roster = is_round_excluded(roster_verdicts, opportunity_id, event_type)
+        deadline_gated_out = event_type == "DEADLINE" and is_deadline_gated_out(opportunity)
+        missed_deadline = is_missed_deadline(opportunity)
+        return (
+            drive_kind != "PLACEMENT"
+            or "NOT_ELIGIBLE" in eligibility_status
+            or excluded_by_roster
+            or deadline_gated_out
+            or missed_deadline
+        )
+
     def _done_pass(
         self,
         states_by_key: dict[tuple[int, str], dict[str, Any]],
+        rows_by_id: dict[int, dict[str, Any]],
+        roster_verdicts: dict[tuple[int, str], dict[str, Any]],
         now: datetime,
+        calendar_id: str | None,
         dry_run: bool,
         result: CalendarSyncResult,
     ) -> None:
-        for state in states_by_key.values():
+        for key, state in states_by_key.items():
             if state["status"] != "active":
                 continue
             end_dt = self._effective_end(state["end_iso"], bool(state["all_day"]))
             if end_dt is None or end_dt >= now:
+                continue
+
+            # Explicit user request, 2026-09-17: an event whose time already
+            # passed while confidently excluded (e.g. a DEADLINE reminder for
+            # a drive whose apply-by date came and went with no application)
+            # must actually be deleted here, not just frozen "done" -- once
+            # frozen, the diff loop's own "frozen — excluded from all future
+            # diffing" rule (sync()'s main loop) means it would never be
+            # revisited, leaking onto the calendar forever. Anything not
+            # confidently excluded keeps the original freeze-only behaviour
+            # (e.g. a past OA reminder for a drive you did apply to stays as
+            # frozen history, not deleted).
+            opportunity_id, event_type = key
+            opportunity = rows_by_id.get(opportunity_id) or {}
+            if self._is_confidently_excluded(opportunity, event_type, roster_verdicts):
+                self._delete_and_freeze(state, opportunity_id, calendar_id, dry_run, result)
                 continue
 
             if dry_run:
@@ -511,32 +557,7 @@ class CalendarSyncEngine:
                 continue  # still has a date this pass
 
             opportunity = rows_by_id.get(opportunity_id) or {}
-            drive_kind = opportunity.get("drive_kind") or "PLACEMENT"
-            eligibility_status = opportunity.get("eligibility_status") or ""
-            # Cause 2 / Phase 3: same shared resolver derive_events() uses,
-            # so a cascaded (not just direct) NOT_MATCHED excludes here too
-            # -- the two paths disagreeing is what makes an event flicker
-            # between created and deleted on alternate runs.
-            excluded_by_roster = is_round_excluded(roster_verdicts, opportunity_id, event_type)
-            # Cause 5 / Phase 7: only ever applies to the DEADLINE round --
-            # OA/INTERVIEW derivation stays governed purely by roster/
-            # eligibility (Phases 3-4), untouched here.
-            deadline_gated_out = event_type == "DEADLINE" and is_deadline_gated_out(opportunity)
-            # Explicit user request, 2026-09-09: once the apply-by deadline
-            # has passed with no application, the whole drive is moot --
-            # every event type for it, not just DEADLINE, is confidently
-            # excluded (derive_events already stops admitting any of them;
-            # this is what deletes ones created before that deadline passed).
-            missed_deadline = is_missed_deadline(opportunity)
-            confidently_excluded = (
-                drive_kind != "PLACEMENT"
-                or "NOT_ELIGIBLE" in eligibility_status
-                or excluded_by_roster
-                or deadline_gated_out
-                or missed_deadline
-            )
-
-            if confidently_excluded:
+            if self._is_confidently_excluded(opportunity, event_type, roster_verdicts):
                 self._delete_and_freeze(state, opportunity_id, calendar_id, dry_run, result)
                 continue
 

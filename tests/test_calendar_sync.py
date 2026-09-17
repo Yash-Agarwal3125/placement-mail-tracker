@@ -474,6 +474,55 @@ def test_deadline_missed_without_applying_deletes_the_existing_event(
     assert state["gcal_event_id"] is None
 
 
+def test_deadline_that_naturally_passes_is_deleted_not_frozen_done(
+    db_manager, mock_settings, sample_opportunity
+):
+    """Explicit user report, 2026-09-17: the previous fix only caught a
+    missed deadline via _null_date_pass, which skips any state _done_pass
+    already froze to 'done' this same sync (sync()'s main diff loop treats
+    'done' as "frozen — excluded from all future diffing"). Since _done_pass
+    ran first and its own end-of-event check reads the *stored* event's
+    end_iso -- which is exactly what happens when real wall-clock time
+    simply passes the deadline, not just when the opportunity row is edited
+    later -- the event got frozen 'done' with its live gcal_event_id intact
+    and _null_date_pass never got a turn. Simulated here by moving the
+    stored event's own end_iso into the past (mirroring time passing)
+    together with the opportunity's deadline, instead of only the latter."""
+    opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
+    opp["priority"] = "HIGH"
+    opp_id, _ = db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-natural")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+    engine.sync()
+    stored = db_manager.fetch_calendar_event_states()[0]
+    assert stored["gcal_event_id"] is not None
+
+    # Both the opportunity's deadline and the *stored event's* own end_iso
+    # move into the past -- this is what "time actually passed" looks like,
+    # as opposed to only editing the opportunity row after the fact.
+    db_manager.connection.execute(
+        "UPDATE opportunities SET deadline = '15 June 2020' WHERE id = ?;", (opp_id,)
+    )
+    db_manager.connection.execute(
+        "UPDATE calendar_events SET start_iso = '2020-06-15T17:30:00+05:30', "
+        "end_iso = '2020-06-15T18:00:00+05:30' WHERE opportunity_id = ?;",
+        (opp_id,),
+    )
+    db_manager.connection.commit()
+
+    result = engine.sync()
+
+    assert result.deleted == 1
+    assert result.marked_done == 0
+    assert client.delete_calls == [(client.calendar_id, stored["gcal_event_id"])]
+
+    state = next(
+        s for s in db_manager.fetch_calendar_event_states() if s["opportunity_id"] == opp_id
+    )
+    assert state["status"] == "excluded"
+    assert state["gcal_event_id"] is None
+
+
 def test_not_eligible_drive_deletes_event(db_manager, mock_settings, sample_opportunity):
     opp = sample_opportunity(deadline="17-Aug-2027 05:30 PM")
     opp["priority"] = "HIGH"  # Phase 7: DEADLINE events need demonstrated interest/HIGH priority
