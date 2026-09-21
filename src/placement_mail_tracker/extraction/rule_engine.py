@@ -372,10 +372,52 @@ _CLASSIFICATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"(campus\s*(drive|hiring|recruitment|placement)|"
         r"placement\s*(drive|opportunity)|new\s*opportunity|"
         r"hiring\s*for|registration\s*open|invit(ing|ation)|"
-        r"ppt\s*(announcement|scheduled|notification))",
+        r"ppt\s*(announcement|scheduled|notification)|"
+        # "X ... Super dream offer placement Registration 2027 Batch -
+        # Physical interview at <venue>" -- real, recurring VIT CDC phrasing
+        # (TresVista) that none of the alternatives above reach (no
+        # "drive"/"opportunity"/"registration open" wording, and "Physical
+        # interview at <venue>" doesn't match INTERVIEW_UPDATE's
+        # "interview\s*(scheduled|...)" since nothing follows "interview"
+        # directly). Classified IRRELEVANT before this addition and never
+        # reached the Phase 1 safe-attach resolver (2026-09-21 audit).
+        r"registration\s*[-–]?\s*\d{4}\s*batch)",
         re.IGNORECASE,
     )),
 ]
+
+# 2026-09-21 root cause (real Fareportal/Chargebee/Malomatia mail): a drive's
+# own FIRST "Registration - <year> Batch" announcement states the whole
+# planned OA+Interview schedule up front in a "Date of Visit:" field, meant
+# for every eligible/registered student -- not a personal per-round update.
+# The keyword patterns above can't tell that field's "Online Assessment"/
+# "Interviews"/"selection process" wording apart from a genuine round-
+# specific update, so this structural template (checked ahead of the
+# keyword loop) recognizes and forces NEW_DRIVE whenever both of the
+# template's two distinguishing field labels are present -- something a
+# genuine round-update mail (which reports a status, not a fresh drive)
+# does not carry.
+_NEW_DRIVE_STRUCTURED_TEMPLATE_RE = re.compile(
+    r"name\s+of\s+the\s+company.{0,2000}?last\s+date\s+for\s+registration",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Same wording as OA_UPDATE's "pre-placement talk" branch above -- shared so
+# a caller (runner.py's roster-verdict event-type mapping) can tell whether
+# a mail classified OA_UPDATE actually matched via that branch (a PPT
+# announcement) rather than a real OA-round update, without re-deriving the
+# phrase separately (2026-09-21 root cause, real TresVista mail: a PPT-only
+# mail's roster check was being recorded under event_type='OA').
+PPT_PHRASE_RE = re.compile(
+    r"pre[\-\s]?placement\s*talk|\bppt\b\s*(?:is\s*)?(?:scheduled|announcement|notification|date)",
+    re.IGNORECASE,
+)
+
+
+def is_ppt_mail(subject: str, body: str = "") -> bool:
+    """True when the mail's own PPT phrasing is what makes it match
+    OA_UPDATE, as opposed to a genuine OA-round update."""
+    return bool(PPT_PHRASE_RE.search(f"{subject} {body[:500]}"))
 
 
 def classify_email(subject: str, body: str = "", sender: str = "") -> str:
@@ -385,9 +427,24 @@ def classify_email(subject: str, body: str = "", sender: str = "") -> str:
     contains OFFER_UPDATE's bare "congratulations" pattern), so a confirmation
     mail phrased "Congratulations, your application has been submitted" can
     never misfire as OFFER_UPDATE — it never reaches that pattern at all.
+
+    2026-09-21 root cause fix: the structural NEW_DRIVE template check runs
+    next, ahead of the keyword loop, over a wider body window than that loop
+    uses -- "Last date for Registration" is a late field in these mails
+    (routinely past 500 chars in), and a drive's own first announcement
+    describing its planned OA+Interview schedule must never be mistaken for
+    a personal round update by the keyword loop below.
     """
     if sender and is_confirmation_sender(sender):
         return "APPLICATION_CONFIRMATION"
+
+    # ponytail: a "Re:" reply quoting the original registration mail below a
+    # genuine round update would also contain this template and misfire here
+    # -- no real sample of that shape exists yet to test against (checked
+    # 2026-09-21), so this stays a known, documented risk rather than
+    # speculative quote-stripping logic.
+    if _NEW_DRIVE_STRUCTURED_TEMPLATE_RE.search(f"{subject} {body[:3000]}"):
+        return "NEW_DRIVE"
 
     combined = f"{subject} {body[:500]}"
 
@@ -788,6 +845,18 @@ _COMPANY_FROM_SUBJECT = [
     # last so it only fires when nothing more specific already matched.
     re.compile(
         r"^(.+?)\s*[–—\-]\s*.*?\b(?:shortlist(?:ed)?|selection|selected)\s*list\b",
+        re.IGNORECASE,
+    ),
+    # "CATERPILLAR HACKATHON REGISTRATION - 2027 BATCH" -- real CDC phrasing
+    # with no separator (colon/dash) between the company and drive-type
+    # word, unlike every other pattern above. Without this, extraction fell
+    # through to _COMPANY_FROM_BODY_PATTERNS' "hiring for X" match, which
+    # grabbed the WRONG noun phrase from this drive's unstructured body
+    # ("hiring for Final year students" -- describing who's eligible, not
+    # the employer) and minted a bogus "Final Year Students" opportunity
+    # (2026-09-21 root cause, real Caterpillar Hackathon mail).
+    re.compile(
+        r"^([A-Za-z][A-Za-z\s]+?)\s+(?:hackathon|ideathon)\b",
         re.IGNORECASE,
     ),
 ]

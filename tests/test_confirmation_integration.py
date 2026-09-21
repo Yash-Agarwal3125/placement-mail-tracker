@@ -237,7 +237,7 @@ class TestPhase6SubjectResolvedConfirmations:
         before = db_manager.connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
         msg = _confirmation_msg(
             "conf_p6_1",
-            "Congratulations! You're Eligible for Honeywell Aerospace Placement Drive",
+            "Confirmed: Your Registration for Honeywell Aerospace Placement Drive",
             "",
         )
         stats = _stats()
@@ -251,6 +251,34 @@ class TestPhase6SubjectResolvedConfirmations:
         assert row is not None
         assert row["my_status"] == "APPLIED"
         assert row["email_classification"] == "APPLICATION_CONFIRMATION"
+
+    def test_eligible_for_subject_creates_drive_but_does_not_write_applied(
+        self, db_manager, mock_settings
+    ):
+        """2026-09-21 root cause (real Fareportal/TresVista/Chargebee/Malomatia
+        mail): "Congratulations! You're Eligible for X" is an invitation
+        ("please log in to confirm your participation"), not proof of
+        registration -- unlike the "Confirmed: Your Registration for X"
+        sibling above, it must still resolve/create the drive (so it's
+        tracked) but must NOT set my_status=APPLIED."""
+        settings = mock_settings.model_copy(update={"confirmation_mode": "enforce"})
+        runner = PlacementTrackerRunner(connection=db_manager.connection, settings=settings)
+        extractor = MagicMock()
+        extractor.extract_from_email.side_effect = AssertionError("Gemini must not be called")
+
+        msg = _confirmation_msg(
+            "conf_p6_1b",
+            "Congratulations! You're Eligible for Honeywell Aerospace Placement Drive",
+            "",
+        )
+        stats = _stats()
+        runner._process_single_message(msg, db_manager, extractor, UserProfile.load(), stats)
+
+        row = db_manager.connection.execute(
+            "SELECT * FROM opportunities WHERE company_name = 'Honeywell Aerospace';"
+        ).fetchone()
+        assert row is not None
+        assert row["my_status"] == "NOT_APPLIED"
 
     def test_observe_mode_creates_drive_but_never_writes_status(self, db_manager, mock_settings):
         settings = mock_settings.model_copy(update={"confirmation_mode": "observe"})

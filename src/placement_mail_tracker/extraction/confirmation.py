@@ -33,6 +33,7 @@ __all__ = [
     "FUZZY_MATCH_THRESHOLD",
     "FUZZY_UNIQUENESS_MARGIN",
     "extract_company_from_confirmation_subject",
+    "is_eligibility_only_subject",
 ]
 
 
@@ -243,8 +244,20 @@ def find_confident_drive_match(
 # Each pattern anchors on the fixed phrase and non-greedily captures
 # everything up to an optional trailing "Placement Drive"/"Drive" and the
 # end of the subject line.
+# "Eligible for X" is deliberately kept out of _SUBJECT_COMPANY_PATTERNS'
+# implicit "this proves the student acted" assumption -- 2026-09-21 root
+# cause (real Fareportal/TresVista/Chargebee/Malomatia mail): the eligible-for
+# mail's own body says "you are eligible to participate ... please log in to
+# confirm your participation" -- an invitation, not proof of registration.
+# Kept in its own list, checked separately by is_eligibility_only_subject(),
+# so callers can still resolve/attach the drive from it without treating it
+# as an APPLIED-confirming mail.
+_ELIGIBILITY_ONLY_SUBJECT_PATTERN = re.compile(
+    r"eligible\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE
+)
+
 _SUBJECT_COMPANY_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"eligible\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE),
+    _ELIGIBILITY_ONLY_SUBJECT_PATTERN,
     re.compile(
         r"registration\s+for\s+(?P<company>.+?)(?:\s+placement\s+drive)?\s*$", re.IGNORECASE
     ),
@@ -256,6 +269,16 @@ _SUBJECT_COMPANY_PATTERNS: list[re.Pattern[str]] = [
         re.IGNORECASE,
     ),
 ]
+
+
+def is_eligibility_only_subject(subject: str) -> bool:
+    """True when ``subject`` is the "you're eligible" invitation, not a
+    genuine confirmation of registration/participation (2026-09-21 root
+    cause). Used to stop ``extract_company_from_confirmation_subject``'s
+    resolved company from also being treated as proof the student applied --
+    it still resolves/attaches the drive so it's tracked, it just must not
+    write ``my_status=APPLIED``."""
+    return bool(subject) and bool(_ELIGIBILITY_ONLY_SUBJECT_PATTERN.search(subject))
 
 
 def extract_company_from_confirmation_subject(subject: str) -> str | None:

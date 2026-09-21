@@ -32,6 +32,7 @@ from placement_mail_tracker.extraction.confirmation import (
     extract_company_from_confirmation_subject,
     extract_reference_id,
     find_confident_drive_match,
+    is_eligibility_only_subject,
 )
 from placement_mail_tracker.extraction.eligibility import evaluate_eligibility
 from placement_mail_tracker.extraction.roster import verify_roster
@@ -39,6 +40,7 @@ from placement_mail_tracker.extraction.rule_engine import (
     classify_email,
     detect_status_from_text,
     is_identifiable_company,
+    is_ppt_mail,
     normalize_company_name,
 )
 from placement_mail_tracker.extraction.rule_engine import (
@@ -113,7 +115,24 @@ _STATUS_CANONICAL = {
 }
 
 
-def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
+# "scheduled on 24th, 25th & 26th September 2026 by Respective batches" --
+# real CDC phrasing (Accenture, 2026-09-21 root cause) that names three
+# candidate dates for a single round with no per-student disambiguator this
+# pipeline can read (the referenced "Timing slot" attachment carries no
+# attachment_id in the Gmail API response, so it can't be fetched at all).
+# No rule/AI extraction can safely pick one of the three without guessing
+# (doc 15 §3.3) -- this exists purely to make that ambiguity loud instead of
+# a silently-missing date, per the plan's "flag, don't guess" rule.
+_MULTI_DATE_BY_BATCH_RE = re.compile(
+    r"scheduled\s+on\s+\d{1,2}\w{0,2}\s*,\s*\d{1,2}\w{0,2}\s*&\s*\d{1,2}\w{0,2}\s+\w+\s+\d{4}"
+    r".{0,60}?respective\s+batch",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _warn_data_quality(
+    opp_data: dict[str, Any], msg_id: str, subject: str = "", body: str = ""
+) -> None:
     """Log warnings for common data quality issues; never blocks processing."""
     company = opp_data.get("company_name") or ""
     if not opp_data.get("package_or_stipend"):
@@ -124,6 +143,13 @@ def _warn_data_quality(opp_data: dict[str, Any], msg_id: str) -> None:
     if deadline:
         if parse_datetime_flexible(str(deadline)) is None:
             logger.warning("[DQ] %s (%s): unparseable deadline %r", company, msg_id, deadline)
+    if not opp_data.get("oa_date") and not opp_data.get("interview_date"):
+        if _MULTI_DATE_BY_BATCH_RE.search(f"{subject} {body}"):
+            logger.warning(
+                "[DQ] %s (%s): multi-date per-batch schedule, no date extracted -- "
+                "manual review needed to pick the student's own batch date",
+                company, msg_id,
+            )
 
 
 # Re-exported for backwards compatibility -- this module's own copy of the
@@ -674,6 +700,35 @@ class PlacementTrackerRunner:
             # Gemini's opp_data never carries it, so always take the rule result.
             opp_data["drive_kind"] = rule_result.drive_kind
 
+            # 2026-09-21 root cause: a NEW_DRIVE announcement's own "Date of
+            # Visit" field routinely states the WHOLE planned OA+Interview
+            # schedule up front (real Fareportal/Chargebee mail) -- Gemini/
+            # rules extract that faithfully regardless of classification, so
+            # fixing classify_email() alone (see rule_engine.py's structural
+            # NEW_DRIVE template check) isn't sufficient on its own: the dates
+            # still land on the row and can still derive a calendar event for
+            # a round nobody has personally confirmed. oa_date/interview_date
+            # are trustworthy only from a genuine round-specific mail
+            # (OA_UPDATE/INTERVIEW_UPDATE/SHORTLIST_UPDATE) -- COALESCE in
+            # _update_opportunity_row means clearing to None here never wipes
+            # an already-legitimate date on a later update, it only stops a
+            # NEW_DRIVE mail from ever writing one in the first place.
+            # ppt_date is only exempt when THIS mail's own distinguishing
+            # signal is a real, standalone PPT announcement (is_ppt_mail) --
+            # NEW_DRIVE's own pattern includes that case on purpose, and PPT
+            # is open to every applied student by design (derive.py), not
+            # roster-gated the same way. But a structured registration
+            # template's "Date of Visit: PPT & Test: ..." field (real
+            # Chargebee mail) fabricates a ppt_date exactly the same way it
+            # fabricates oa/interview dates -- is_ppt_mail is False for that
+            # mail (no "pre-placement talk"/"ppt is scheduled" phrasing, just
+            # the bare word inside an unrelated field), so it's cleared too.
+            if classification == "NEW_DRIVE":
+                opp_data["oa_date"] = None
+                opp_data["interview_date"] = None
+                if not is_ppt_mail(subject, body):
+                    opp_data["ppt_date"] = None
+
             if opp_data.get("company_name"):
                 opp_data["company_name"] = normalize_company_name(opp_data["company_name"])
 
@@ -744,7 +799,7 @@ class PlacementTrackerRunner:
             ).upper() in _ADVANCEMENT_STATUSES:
                 opp_data["current_status"] = "OPEN"
 
-            _warn_data_quality(opp_data, msg_id)
+            _warn_data_quality(opp_data, msg_id, subject, body)
 
             with self.connection:
                 active_opportunities = database.get_active_opportunities()
@@ -905,7 +960,9 @@ class PlacementTrackerRunner:
                     opp_data["priority"],
                 )
 
-                roster_event_type = self._resolve_roster_event_type(classification, opp_data)
+                roster_event_type = self._resolve_roster_event_type(
+                    classification, opp_data, subject, body
+                )
                 self._capture_roster_verdict(
                     roster_event_type, opp_id, msg, msg_id, gmail_client, user_profile, database
                 )
@@ -1034,6 +1091,17 @@ class PlacementTrackerRunner:
         # CONFIRMED_PATTERN_FAMILIES) and never write anything.
         extracted_company = extract_company_from_confirmation_subject(subject)
         recognized = tier == "CONFIRMED" or extracted_company is not None
+        # 2026-09-21 root cause (real Fareportal/TresVista/Chargebee/Malomatia
+        # mail): "Congratulations! You're Eligible for X" is one of the
+        # subjects `extract_company_from_confirmation_subject` resolves, but
+        # its own body is an invitation ("please log in to confirm your
+        # participation"), not proof the student registered/applied.
+        # `recognized` stays permissive (still resolves/attaches the drive so
+        # it's tracked) -- only the APPLIED status write is gated on this
+        # narrower check.
+        proves_application = tier == "CONFIRMED" or (
+            extracted_company is not None and not is_eligibility_only_subject(subject)
+        )
         active_opportunities = database.get_active_opportunities()
         match, candidates = find_confident_drive_match(
             subject, body, active_opportunities, reference_id=reference_id
@@ -1065,6 +1133,11 @@ class PlacementTrackerRunner:
                 digest_lines.append(
                     f"confirmation received for {company} (unrecognized phrasing) — "
                     "would review manually."
+                )
+            elif not proves_application:
+                digest_lines.append(
+                    f"{company} eligibility notice received — drive tracked, but this "
+                    "isn't proof of application; my_status left unchanged."
                 )
             elif self.settings.confirmation_mode == "enforce":
                 changed = database.set_my_status(drive_id, "APPLIED", source="automation")
@@ -1115,7 +1188,13 @@ class PlacementTrackerRunner:
                     drive_id = resolved["drive_id"]
                     origin = "new drive" if created else "existing drive"
 
-                    if self.settings.confirmation_mode == "enforce":
+                    if not proves_application:
+                        digest_lines.append(
+                            f"{company} eligibility notice received — drive tracked "
+                            f"({origin}), but this isn't proof of application; "
+                            "my_status left unchanged."
+                        )
+                    elif self.settings.confirmation_mode == "enforce":
                         changed = database.set_my_status(
                             drive_id, "APPLIED", source="automation"
                         )
@@ -1248,16 +1327,29 @@ class PlacementTrackerRunner:
 
     @classmethod
     def _resolve_roster_event_type(
-        cls, classification: str, opp_data: dict[str, Any]
+        cls,
+        classification: str,
+        opp_data: dict[str, Any],
+        subject: str = "",
+        body: str = "",
     ) -> str | None:
         """Which round (if any) this specific email is roster evidence for.
 
-        OA_UPDATE/INTERVIEW_UPDATE map directly. SHORTLIST_UPDATE is
-        ambiguous in general, but this *specific* email disambiguates
-        itself when its own extraction newly set exactly one of
-        oa_date/interview_date -- that's unambiguous evidence for that one
-        round, still per doc 15 §3.3 (never guess).
+        OA_UPDATE/INTERVIEW_UPDATE map directly -- except OA_UPDATE also
+        matches its own PPT branch ("pre-placement talk"), which is a
+        distinct event_type ("PPT") that is_round_excluded() gates
+        separately (2026-09-05 fix). A PPT-flavored OA_UPDATE mail's roster
+        check must be recorded under "PPT", not "OA", or it's meaningless --
+        there's no OA round to speak of on that mail's own date (2026-09-21
+        root cause, real TresVista mail).
+
+        SHORTLIST_UPDATE is ambiguous in general, but this *specific* email
+        disambiguates itself when its own extraction newly set exactly one
+        of oa_date/interview_date -- that's unambiguous evidence for that
+        one round, still per doc 15 §3.3 (never guess).
         """
+        if classification == "OA_UPDATE" and is_ppt_mail(subject, body):
+            return "PPT"
         direct = cls._ROSTER_EVENT_TYPE_BY_CLASSIFICATION.get(classification)
         if direct is not None:
             return direct
