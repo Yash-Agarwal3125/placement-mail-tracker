@@ -217,6 +217,51 @@ class TestGeminiCostGuard:
 
         extractor.extract_from_email.assert_called_once()
 
+    def test_gemini_failure_on_known_thread_preserves_company_name(
+        self, db_manager: DatabaseManager, mock_settings, sample_opportunity
+    ):
+        """2026-09-24 root cause (real TresVista/Accenture mail): a Gemini
+        exception (e.g. Groq 413) on a known-thread OA_UPDATE/INTERVIEW_UPDATE
+        follow-up fell back to bare rule_result.to_dict() with NO identity-
+        preservation guard, unlike the "Gemini skipped" branch above -- rules
+        alone found no company name for a reply-thread mail, so the real
+        tracked company_name got overwritten with a blank ("Unknown" after
+        normalization), corrupting an already-correct production row."""
+        db_manager.insert_or_update_opportunity(
+            sample_opportunity("Microsoft", "Software Engineer Intern"),
+            source_email_id="orig_msg3",
+            source_thread_id="thread_gemini_fails",
+        )
+
+        runner = PlacementTrackerRunner(
+            connection=db_manager.connection, settings=mock_settings
+        )
+
+        extractor = MagicMock()
+        extractor.extract_from_email.side_effect = RuntimeError("413 Payload Too Large")
+
+        from placement_mail_tracker.config.user_profile import UserProfile
+
+        stats = {
+            "processed": 0, "skipped": 0, "errors": 0,
+            "gemini_calls": 0, "rule_only": 0, "created": 0, "updated": 0,
+        }
+        followup = {
+            "message_id": "followup_gemini_fail_msg",
+            "thread_id": "thread_gemini_fails",
+            "subject": "Re: Online assessment is scheduled",
+            "sender": "cdc@college.edu",
+            "body_text": "Your online assessment has been scheduled.",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        runner._process_single_message(
+            followup, db_manager, extractor, UserProfile.load(), stats
+        )
+
+        drive = db_manager.fetch_opportunity_by_thread_id("thread_gemini_fails")
+        assert drive["company_name"] == "Microsoft"
+
 
 # ---------------------------------------------------------------------------
 # (c) Quota-aware deferral: a genuine daily-quota exhaustion must not be

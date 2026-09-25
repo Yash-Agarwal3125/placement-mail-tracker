@@ -671,6 +671,18 @@ class PlacementTrackerRunner:
                         "Gemini failed completely, falling back to rule engine: %s", gemini_err
                     )
                     opp_data = rule_result.to_dict()
+                    # 2026-09-24 root cause (real TresVista/Accenture mail):
+                    # this fallback landed here with no identity-preservation
+                    # guard at all -- unlike the "Gemini skipped" branch below,
+                    # a Gemini failure on a known-thread follow-up (rules alone
+                    # found no company name) wiped a real tracked company_name
+                    # to "Unknown" in production, corrupting an already-correct
+                    # row. Same guard, same reasoning as the else branch.
+                    if known_thread_followup and existing_thread_drive is not None:
+                        if not opp_data.get("company_name"):
+                            opp_data["company_name"] = existing_thread_drive["company_name"]
+                        if not opp_data.get("role"):
+                            opp_data["role"] = existing_thread_drive["role"]
             else:
                 opp_data = rule_result.to_dict()
                 stats["rule_only"] += 1
