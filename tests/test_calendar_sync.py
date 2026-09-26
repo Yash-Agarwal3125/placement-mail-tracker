@@ -623,6 +623,52 @@ def test_past_event_marked_done_and_frozen(db_manager, mock_settings, sample_opp
 
 
 # ---------------------------------------------------------------------------
+# Case 13b — a genuinely NEW round lands on a slot "done" already froze
+# ---------------------------------------------------------------------------
+
+
+def test_new_round_after_done_reactivates_same_slot(
+    db_manager, mock_settings, sample_opportunity
+):
+    """2026-09-26 root cause (real Caterpillar mail): "done" freezes a
+    (opportunity_id, event_type) slot forever, but a drive can get a
+    genuinely new round of the same event_type later -- e.g. an interview
+    that already happened and got marked done, then a second interview
+    round for the same drive with a brand-new future date. derive_events
+    keeps regenerating from the row's current date field regardless, so the
+    old blanket "done -> continue" skip silently dropped this new round's
+    event forever, even though it was never excluded by roster/eligibility."""
+    opp = sample_opportunity(interview_date="15 June 2020")
+    opp["my_status"] = "APPLIED"
+    db_manager.insert_or_update_opportunity(opp, source_thread_id="thread-13b")
+    client = FakeCalendarClient()
+    engine = CalendarSyncEngine(db_manager, client, mock_settings)
+
+    result1 = engine.sync()
+    assert result1.inserted == 1
+    assert result1.marked_done == 1
+    state = db_manager.fetch_calendar_event_states()[0]
+    assert state["status"] == "done"
+    frozen_event_id = state["gcal_event_id"]
+
+    # A second interview round arrives with a genuinely new future date.
+    new_round = sample_opportunity(interview_date="30 September 2030")
+    new_round["my_status"] = "APPLIED"
+    db_manager.insert_or_update_opportunity(new_round, source_thread_id="thread-13b")
+
+    result2 = engine.sync()
+
+    assert result2.patched == 1
+    assert len(client.patch_calls) == 1
+    _, patched_event_id, _ = client.patch_calls[0]
+    assert patched_event_id == frozen_event_id
+
+    state_after = db_manager.fetch_calendar_event_states()[0]
+    assert state_after["status"] == "active"
+    assert state_after["start_iso"].startswith("2030-09-30")
+
+
+# ---------------------------------------------------------------------------
 # Case 14 — terminal drive: grace period, then retitle + cancelled, never delete
 # ---------------------------------------------------------------------------
 

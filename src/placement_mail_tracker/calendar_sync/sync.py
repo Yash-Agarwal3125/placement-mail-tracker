@@ -104,7 +104,19 @@ class CalendarSyncEngine:
                 continue
 
             if existing["status"] == "done":
-                continue  # frozen — excluded from all future diffing
+                # 2026-09-26 root cause (real Caterpillar mail): "done" freezes
+                # this (opportunity_id, event_type) slot forever, but a drive
+                # can get a genuinely NEW round of the same event_type later
+                # (e.g. a second interview round after the first one already
+                # happened and got marked done) -- derive_events keeps
+                # regenerating from the row's current date field regardless.
+                # Only stay frozen when the desired event is still the exact
+                # one that was frozen; a differing content_hash means a new
+                # round landed on this slot and must not be silently dropped.
+                if existing["content_hash"] == event.content_hash():
+                    continue  # same finished event — still frozen
+                self._handle_patch(event, existing, calendar_id, dry_run, result, states_by_key)
+                continue
 
             # A drive that was previously retitled `[?] ...` by the stale pass
             # (status 'stale'/'cancelled') and has now reappeared as active
