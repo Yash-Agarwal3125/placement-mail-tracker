@@ -485,7 +485,10 @@ class PlacementTrackerRunner:
         PENDING_EXTRACTION retry path in :meth:`_fetch_messages`)."""
         rows = self.connection.execute(
             "SELECT gmail_message_id FROM processed_emails "
-            "WHERE processed_status = 'unmatched_review';"
+            "WHERE processed_status = 'unmatched_review' "
+            # Only recent mail: older parked items were already replayed once
+            # and re-running hundreds of them is hours of rate-limited LLM calls.
+            "AND created_at >= date('now', '-3 days');"
         ).fetchall()
         message_ids = [row[0] for row in rows]
         logger.info("Reprocessing %s messages parked in the review queue", len(message_ids))
