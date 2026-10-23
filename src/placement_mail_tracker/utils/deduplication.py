@@ -12,6 +12,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from placement_mail_tracker.extraction.rule_engine import normalize_company_name
@@ -673,6 +674,12 @@ def has_event_coincidence(
         # the same event. Same calendar day is always coincident; a genuine
         # reschedule lands on a different day.
         if dt_a.date() == dt_b.date():
+            return True
+        # 2026-10-23 incident (Toshiba / RFPIO): a mail whose date moves a
+        # round FORWARD into the future is the next round (or a reschedule) of
+        # this same identity-matched drive, not a different event. Parking it
+        # for review silently dropped the 26 Oct tests from the calendar.
+        if dt_a > dt_b and dt_a > datetime.now():
             return True
 
     return False

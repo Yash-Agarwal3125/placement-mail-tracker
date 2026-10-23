@@ -1082,7 +1082,13 @@ class DatabaseManager:
                 score = excluded.score,
                 source_email_id = excluded.source_email_id,
                 verified_at = excluded.verified_at
-            WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER');
+            WHERE excluded.verdict NOT IN ('AMBIGUOUS', 'NO_ROSTER')
+              -- 2026-10-23 Thermofisher: a later "revised shortlist" mail's
+              -- NOT_MATCHED erased a real MATCHED and hid a confirmed
+              -- interview. A proven match is never downgraded by a later
+              -- exclusion (hiding a real event is worse than showing one).
+              AND NOT (excluded.verdict = 'NOT_MATCHED'
+                       AND roster_verdicts.verdict = 'MATCHED');
             """,
             (opportunity_id, event_type, verdict, method, score, source_email_id, utc_now_iso()),
         )

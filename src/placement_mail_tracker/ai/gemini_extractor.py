@@ -863,7 +863,10 @@ Additional rules:
   - interview_date: when an interview / selection round / HR round / group discussion happens
     (look for "interview", "next round of selection process", "group discussion", "HR round").
     A "selection process" round is interview_date, not oa_date, unless the email explicitly
-    calls it an online test/assessment.
+    calls it an online test/assessment. If the email announces an online test and only mentions
+    an interview as a conditional later step ("shortlisted students will have a physical
+    interview on <date>" after the test), the reader is not yet invited: leave interview_date
+    null.
   - ppt_date: when a pre-placement talk / PPT / company info session happens (look for "PPT",
     "pre-placement talk", "pre placement talk"). A PPT is an informational session before any
     test or interview — do NOT put its date/time in interview_date or oa_date even though the
