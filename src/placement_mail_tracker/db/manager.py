@@ -1170,6 +1170,19 @@ class DatabaseManager:
         now = datetime.now()
         grace_cutoff = now - timedelta(days=cutoff_days)
         count = 0
+        # Self-heal drives expired earlier while a round was still ahead.
+        for row in self.connection.execute(
+            "SELECT id, oa_date, interview_date FROM opportunities "
+            "WHERE status = 'active' AND current_status = 'EXPIRED';"
+        ).fetchall():
+            oa = parse_datetime_flexible(row["oa_date"] or "")
+            iv = parse_datetime_flexible(row["interview_date"] or "")
+            if (iv and iv >= now) or (oa and oa >= now):
+                self.connection.execute(
+                    "UPDATE opportunities SET current_status = ?, updated_at = ? WHERE id = ?;",
+                    ("INTERVIEW" if iv and iv >= now else "OA", utc_now_iso(), row["id"]),
+                )
+                count += 1
         for row in self.fetch_active_drives_only():
             current_status = (row.get("current_status") or "OPEN").upper()
             my_status = row.get("my_status") or "NOT_APPLIED"
@@ -1179,8 +1192,15 @@ class DatabaseManager:
             }
             latest = max((d for d in dates.values() if d), default=None)
 
+            # An OA/interview still ahead means we were invited -- the
+            # passed registration deadline no longer makes the drive dead.
+            upcoming_round = any(
+                d is not None and d >= now
+                for d in (dates["oa_date"], dates["interview_date"])
+            )
             never_applied_deadline_passed = (
-                current_status in ("OPEN", "REGISTERED")
+                not upcoming_round
+                and current_status in ("OPEN", "REGISTERED")
                 and my_status == "NOT_APPLIED"
                 and dates["deadline"] is not None
                 and dates["deadline"] < now

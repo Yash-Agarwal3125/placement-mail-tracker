@@ -123,6 +123,21 @@ def is_round_excluded(
     return False
 
 
+# A drive that reached one of these stages has been invited past the apply
+# step, so it counts as applied even when no application-confirmation mail
+# ever set my_status (2026-10-23: OA/interview events for ~13 such drives
+# never reached the calendar).
+_PROGRESSED_STATUSES = frozenset(
+    {"SHORTLISTED", "OA", "INTERVIEW", "HR", "SELECTED", "OFFER_RECEIVED"}
+)
+
+
+def is_applied(opp: dict[str, Any]) -> bool:
+    if (opp.get("my_status") or "NOT_APPLIED") != "NOT_APPLIED":
+        return True
+    return (opp.get("current_status") or "").upper() in _PROGRESSED_STATUSES
+
+
 def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
     """Cause 5 / Phase 7 (calendar-drift remediation plan): True when a
     DEADLINE event for ``opp`` must NOT be admitted.
@@ -153,8 +168,7 @@ def is_deadline_gated_out(opp: dict[str, Any]) -> bool:
     those stay governed purely by the existing roster/eligibility logic
     from Phases 3-4.
     """
-    my_status = opp.get("my_status") or "NOT_APPLIED"
-    if my_status not in ("NOT_APPLIED", "", None):
+    if is_applied(opp):
         return True
     priority_high = (opp.get("priority") or "").upper() == "HIGH"
     return not priority_high
@@ -173,8 +187,7 @@ def is_missed_deadline(opp: dict[str, Any], now: datetime | None = None) -> bool
     Only fires once there's a real, parsed, past deadline -- an unparseable
     or missing deadline can't prove anything either way (doc 15 §3.3).
     """
-    my_status = opp.get("my_status") or "NOT_APPLIED"
-    if my_status not in ("NOT_APPLIED", "", None):
+    if is_applied(opp):
         return False
     deadline = parse_event_datetime(opp.get("deadline") or "")
     if deadline is None:
@@ -389,7 +402,7 @@ def derive_events(
             events.append(deadline_event)
             normalized_companies[(deadline_event.opportunity_id, "DEADLINE")] = norm_company
 
-        has_applied = opp.get("my_status") not in ("NOT_APPLIED", "", None)
+        has_applied = is_applied(opp)
         include_oa_interview = settings.calendar_sync_mode == "all_eligible" or has_applied
         if include_oa_interview:
             for event_type, raw_date in (
